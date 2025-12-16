@@ -93,6 +93,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	db.config.AddExtensionOption("pac_m", "number of per-sample subsets (m)", LogicalType::INTEGER);
 	// Add option to toggle enforcement of per-sample array length == pac_m (default true)
 	db.config.AddExtensionOption("enforce_m_values", "enforce per-sample arrays length equals pac_m", LogicalType::BOOLEAN);
+	// Add option to set path where compiled PAC artifacts (CTEs) are written
+	db.config.AddExtensionOption("pac_compiled_path", "path to write compiled PAC artifacts", LogicalType::VARCHAR);
 
 	// Register pac_aggregate function(s)
 	RegisterPacAggregateFunctions(loader);

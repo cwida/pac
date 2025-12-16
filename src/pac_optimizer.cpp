@@ -10,6 +10,8 @@
 
 // Include public helper to access the configured PAC tables filename and read helper
 #include "include/pac_privacy_unit.hpp"
+// Include PAC compiler
+#include "include/pac_compiler.hpp"
 
 // Include concrete logical operator headers and bound aggregate expression
 #include "duckdb/planner/operator/logical_aggregate.hpp"
@@ -17,8 +19,6 @@
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
-
-using namespace duckdb;
 
 namespace duckdb {
 
@@ -97,7 +97,7 @@ static bool ContainsWindowFunction(const LogicalOperator &op) {
         return true;
     }
     for (auto &child : op.children) {
-        if (ContainsWindowFunction(*child)) return true;
+        if (ContainsWindowFunction(*child)) { return true; }
     }
     return false;
 }
@@ -107,66 +107,69 @@ static bool ContainsDistinct(const LogicalOperator &op) {
         return true;
     }
     for (auto &child : op.children) {
-        if (ContainsDistinct(*child)) return true;
+        if (ContainsDistinct(*child)) { return true; }
     }
     return false;
 }
 
-static bool ScanOnPACTable(const LogicalOperator &op, const std::unordered_set<std::string> &pac_tables) {
+// Scan the logical operator tree for referenced PAC tables and return the single privacy-unit name
+// if found (empty string if none). Throws ParserException if more than one privacy unit is referenced.
+static std::string ScanOnPACTable(const LogicalOperator &op, const std::unordered_set<std::string> &pac_tables) {
+    // Recursive traversal that merges child results. If two different non-empty names are found,
+    // we throw a ParserException.
+    std::string result;
+    // Check current node if it's a table scan
     if (op.type == LogicalOperatorType::LOGICAL_GET) {
         auto &scan = op.Cast<LogicalGet>();
-        // Try to obtain the underlying table catalog entry and check its name(s)
         auto table_entry = scan.GetTable();
         if (table_entry) {
             auto &tentry = *table_entry;
             if (pac_tables.count(tentry.name) > 0) {
-                return true;
+                result = tentry.name;
             }
         } else {
-            // fallback: check names vector if present
             for (auto &n : scan.names) {
-                if (pac_tables.count(n) > 0) return true;
+                if (pac_tables.count(n) > 0) {
+                    result = n;
+                    break;
+                }
             }
         }
     }
-    for (auto &child : op.children) {
-        if (ScanOnPACTable(*child, pac_tables)) return true;
+
+    // Merge child results
+    for (auto &c : op.children) {
+        std::string child_res = ScanOnPACTable(*c, pac_tables);
+        if (!child_res.empty()) {
+            if (result.empty()) {
+                result = std::move(child_res);
+            } else if (result != child_res) {
+                throw ParserException("PAC compilation: queries referencing more than one privacy unit are not supported");
+            }
+        }
     }
-    return false;
+    return result;
 }
 
 void PACRewriteRule::IsPACCompatible(LogicalOperator &plan, ClientContext &context) {
-	string pac_privacy_file = "pac_tables.csv";
-	Value pac_privacy_file_value;
-	context.TryGetCurrentSetting("pac_privacy_file", pac_privacy_file_value);
-	if (!pac_privacy_file_value.IsNull()) {
-		// by default, the ivm files path is the database path
-		// however this can be overridden by a setting
-		pac_privacy_file = pac_privacy_file_value.ToString();
-	}
-    // 1. Read PAC tables using the configured filename (default) and also merge test file if present
-    auto pac_tables = ReadPacTablesFile(pac_privacy_file);
-    // 2. If the query does not scan a PAC table, return
-    if (!ScanOnPACTable(plan, pac_tables)) {
-	    return;
+    // Assumes the plan references exactly one PAC table (the scan and multi-table check are done in the caller).
+    // 1. Must not contain window functions (a WINDOW node can contain aggregates inside)
+    if (ContainsWindowFunction(plan)) {
+        throw ParserException("Query contains window functions, which are not allowed in PAC-compatible queries!");
     }
-	// 3. Must not contain window functions (a WINDOW node can contain aggregates inside)
-	if (ContainsWindowFunction(plan)) {
-		throw ParserException("Query contains window functions, which are not allowed in PAC-compatible queries!");
-	}
-    // 4. Aggregates validation: detect disallowed aggregates first (throws), and ensure at least one allowed aggregate exists
+    // 2. Aggregates validation: detect disallowed aggregates first (throws), and ensure at least one allowed aggregate exists
     bool has_allowed_aggregate = false;
     AnalyzeAggregates(plan, false, has_allowed_aggregate);
     if (!has_allowed_aggregate) {
         throw ParserException("Query does not contain any allowed aggregation (sum, count, avg)!");
     }
-    // 5. Must not contain DISTINCT
+    // 3. Must not contain DISTINCT
     if (ContainsDistinct(plan)) {
-	    throw ParserException("Query contains DISTINCT, which is not allowed in PAC-compatible queries!");
-	}
-    // 6. Must not contain disallowed joins (only INNER JOIN allowed)
+        throw ParserException("Query contains DISTINCT, which is not allowed in PAC-compatible queries!");
+    }
+    // 4. Must not contain disallowed joins (only INNER JOIN allowed)
     if (ContainsDisallowedJoin(plan)) {
-	    throw ParserException("Query contains disallowed joins (only INNER JOIN allowed in PAC-compatible queries)!");
+        throw ParserException("Query contains disallowed joins (only INNER JOIN allowed in PAC-compatible queries)!");
     }
     // Passed all checks
 }
@@ -177,18 +180,35 @@ void PACRewriteRule::PACRewriteRuleFunction(OptimizerExtensionInput &input, uniq
 	if (!plan || plan->type != LogicalOperatorType::LOGICAL_PROJECTION) {
 		return;
 	}
-    // Will throw ParserException with a specific message if not compatible
+    // Load configured PAC tables once
+    string pac_privacy_file = "pac_tables.csv";
+    Value pac_privacy_file_value;
+    input.context.TryGetCurrentSetting("pac_privacy_file", pac_privacy_file_value);
+    if (!pac_privacy_file_value.IsNull()) {
+        pac_privacy_file = pac_privacy_file_value.ToString();
+    }
+    auto pac_tables = ReadPacTablesFile(pac_privacy_file);
+
+    // Scan the plan for referenced PAC tables; ScanOnPACTable returns the single privacy unit name or
+    // an empty string if none, and throws if more than one is referenced.
+    std::string privacy_unit = ScanOnPACTable(*plan, pac_tables);
+    if (privacy_unit.empty()) {
+        // no PAC tables referenced -> nothing to do
+        return;
+    }
+
+    // Exactly one privacy unit referenced. Continue with compatibility checks
     IsPACCompatible(*plan, input.context);
-    // PAC compatible: do nothing for now
-	bool apply_noise = false;
-	Value pac_noise_value;
-	input.context.TryGetCurrentSetting("pac_noise", pac_noise_value);
-	if (!pac_noise_value.IsNull() && pac_noise_value.GetValue<bool>()) {
-		apply_noise = true;
-	}
-	if (apply_noise) {
-		// todo
-	}
+    bool apply_noise = false;
+    Value pac_noise_value;
+    input.context.TryGetCurrentSetting("pac_noise", pac_noise_value);
+    if (!pac_noise_value.IsNull() && pac_noise_value.GetValue<bool>()) {
+        apply_noise = true;
+    }
+    if (apply_noise) {
+    	// PAC compatible: invoke compiler to produce artifacts (e.g., sample CTE)
+    	CompilePACQuery(input, plan, privacy_unit);
+    }
 }
 
 } // namespace duckdb
