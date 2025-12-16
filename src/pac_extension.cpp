@@ -89,6 +89,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 	db.config.AddExtensionOption("pac_noise", "apply PAC noise", LogicalType::BOOLEAN);
 	// Add option to set deterministic RNG seed for PAC functions (useful for tests)
 	db.config.AddExtensionOption("pac_seed", "deterministic RNG seed for PAC functions", LogicalType::BIGINT);
+	// Add option to configure the number of samples (m) used by PAC (default 128)
+	db.config.AddExtensionOption("pac_m", "number of per-sample subsets (m)", LogicalType::INTEGER);
+	// Add option to toggle enforcement of per-sample array length == pac_m (default true)
+	db.config.AddExtensionOption("enforce_m_values", "enforce per-sample arrays length equals pac_m", LogicalType::BOOLEAN);
 
 	// Register pac_aggregate function(s)
 	RegisterPacAggregateFunctions(loader);
