@@ -16,9 +16,13 @@ namespace duckdb {
 DUCKDB_API void CompilePACQuery(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
                                 const std::string &privacy_unit);
 
-// Create the sample CTE and write it to a file; returns the full path of the written file
-DUCKDB_API std::string CreateSampleCTE(ClientContext &context, const std::string &privacy_unit,
-                                       const std::string &query_normalized, const std::string &query_hash);
+// Create the sample CTE and write it to a file (void): filename provided by caller
+DUCKDB_API void CreateSampleCTE(ClientContext &context, const std::string &privacy_unit,
+                                const std::string &filename, const std::string &query_normalized);
+
+// Modify the logical query plan to join in the per-sample table (pac_sample) and extend
+// group-by keys / projections as needed. Implemented as an in-place modification of `plan`.
+DUCKDB_API void JoinWithSampleTable(ClientContext &context, unique_ptr<LogicalOperator> &plan);
 
 } // namespace duckdb
 

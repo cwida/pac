@@ -7,6 +7,11 @@
 #include "duckdb/common/types/data_chunk.hpp"
 #include "duckdb/common/types/vector.hpp"
 #include "duckdb/common/types/string_type.hpp"
+#include "duckdb/parser/parsed_data/create_table_info.hpp"
+#include "duckdb/parser/column_definition.hpp"
+#include "duckdb/main/appender.hpp"
+#include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
+#include "duckdb/main/database_manager.hpp"
 
 #include <fstream>
 #include <cstdio>
@@ -108,6 +113,59 @@ void AddPrivacyUnitPragma(ClientContext &context, const FunctionParameters &para
         tables.insert(table_name);
         WritePacTablesFile(pac_privacy_file, tables);
     }
+
+    // Create a small internal helper table for plan verification/explain.
+    // Sanitize the table name into a safe identifier: replace non-alnum with '_'
+    auto SanitizeName = [&](const string &in) {
+        string out;
+        out.reserve(in.size());
+        for (char c : in) {
+            if (std::isalnum((unsigned char)c) || c == '_') {
+                out.push_back(c);
+            } else {
+                out.push_back('_');
+            }
+        }
+        return out;
+    };
+    string sanitized = SanitizeName(table_name);
+    string internal_name = "_pac_internal_sample_" + sanitized;
+
+    // If the internal table does not exist, create it and populate with 100 rows
+    if (!TableExists(context, internal_name)) {
+        // Create the table using the catalog API instead of context.Query to avoid locking/deadlocks.
+        try {
+            // Build CreateTableInfo as a temporary table in the TEMP_CATALOG to avoid modifying the main database
+            auto create_info = unique_ptr<CreateTableInfo>(new CreateTableInfo(TEMP_CATALOG, DEFAULT_SCHEMA, internal_name));
+            // Mark as temporary and ignore conflicts if the name already exists
+            create_info->temporary = true;
+            create_info->on_conflict = OnCreateConflict::IGNORE_ON_CONFLICT;
+            // Define columns: rowid BIGINT, sample_id BIGINT
+            create_info->columns.AddColumn(ColumnDefinition("rowid", LogicalType::BIGINT));
+            create_info->columns.AddColumn(ColumnDefinition("sample_id", LogicalType::BIGINT));
+
+            // Use the temp catalog to create the table in the current context
+            auto created_entry = Catalog::GetCatalog(context, TEMP_CATALOG).CreateTable(context, std::move(create_info));
+             if (!created_entry) {
+                 throw InvalidInputException(StringUtil::Format("failed to create internal PAC helper table %s: unknown error", internal_name));
+             }
+
+            // The Catalog::CreateTable returns an optional_ptr<CatalogEntry>. Retrieve the TableCatalogEntry by casting
+            TableCatalogEntry &table_entry = created_entry->Cast<TableCatalogEntry>();
+
+            // Use InternalAppender to populate with 100 rows without issuing SQL queries
+            InternalAppender appender(context, table_entry);
+            for (int64_t i = 1; i <= 100; ++i) {
+                appender.BeginRow();
+                appender.Append<int64_t>(i);
+                appender.Append<int64_t>(i);
+                appender.EndRow();
+            }
+            appender.Close();
+        } catch (std::exception &ex) {
+            throw InvalidInputException(StringUtil::Format("failed to create internal PAC helper table %s: %s", internal_name, ex.what()));
+        }
+    }
 }
 
 // Pragma-style API: PRAGMA remove_privacy_unit('table', 'filename?')
@@ -131,6 +189,31 @@ void RemovePrivacyUnitPragma(ClientContext &context, const FunctionParameters &p
     auto tables = ReadPacTablesFile(pac_privacy_file);
     if (tables.erase(table_name) > 0) {
         WritePacTablesFile(pac_privacy_file, tables);
+    }
+
+    // Also drop the internal helper table if it exists
+    auto SanitizeName = [&](const string &in) {
+        string out;
+        out.reserve(in.size());
+        for (char c : in) {
+            if (std::isalnum((unsigned char)c) || c == '_') {
+                out.push_back(c);
+            } else {
+                out.push_back('_');
+            }
+        }
+        return out;
+    };
+    string sanitized = SanitizeName(table_name);
+    string internal_name = "_pac_internal_sample_" + sanitized;
+    if (TableExists(context, internal_name)) {
+        string drop_sql = "DROP TABLE IF EXISTS " + internal_name + ";";
+        try {
+            context.Query(drop_sql, false);
+        } catch (std::exception &ex) {
+            // Non-fatal; surface as InvalidInputException
+            throw InvalidInputException(StringUtil::Format("failed to drop internal PAC helper table %s: %s", internal_name, ex.what()));
+        }
     }
 }
 
