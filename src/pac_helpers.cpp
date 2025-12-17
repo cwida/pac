@@ -92,94 +92,84 @@ static void CollectTableIndicesExcluding(LogicalOperator *node, LogicalOperator 
 static void ApplyIndexMapToSubtree(LogicalOperator *node, const std::unordered_map<idx_t, idx_t> &map);
 static void CollectColumnBindingsRecursive(LogicalOperator *node, vector<ColumnBinding> &out);
 
-void UpdateParent(unique_ptr<LogicalOperator> &root,
-                  unique_ptr<LogicalOperator> &child_ref,
-                  unique_ptr<LogicalOperator> new_parent) {
-    // Basic preconditions
-    if (!child_ref) {
-        // Nothing to do
-        return;
+void ReplaceNode(unique_ptr<LogicalOperator> &root,
+                  unique_ptr<LogicalOperator> &old_node,
+                  unique_ptr<LogicalOperator> &new_node) {
+    // Validate inputs
+    if (!old_node) {
+        throw InternalException("ReplaceNode: old_node must not be null");
     }
-    if (!new_parent) {
-        throw InternalException("UpdateParent: new_parent is null");
-    }
-    if (!new_parent->children.empty()) {
-        throw InvalidInputException("UpdateParent: new_parent must not have children");
+    if (!new_node) {
+        throw InternalException("ReplaceNode: new_node must not be null");
     }
 
-    // Keep pointer to original child (will be moved)
-    LogicalOperator *original_child = child_ref.get();
+    // Keep pointer to the old subtree (before destruction)
+    LogicalOperator *old_subtree_ptr = old_node.get();
+    if (!old_subtree_ptr) {
+        throw InternalException("ReplaceNode: referenced old subtree is null");
+    }
 
-    // Collect table indices used outside the subtree (we will avoid colliding with these)
+    // Collect top-level bindings from the old subtree (these are the bindings advertised by the old child)
+    vector<ColumnBinding> old_top_bindings = old_subtree_ptr->GetColumnBindings();
+
+    // Collect all table indices present in the old subtree so we can exclude them when computing external indices
+    idx_set old_subtree_indices;
+    CollectTableIndicesRecursive(old_subtree_ptr, old_subtree_indices);
+
+    // Compute external indices (everything in the plan except the old subtree)
     idx_set external_indices;
-    CollectTableIndicesExcluding(root.get(), original_child, external_indices);
+    CollectTableIndicesExcluding(root.get(), old_subtree_ptr, external_indices);
 
-    // Collect all column bindings and table indices from the subtree to insert
-    vector<ColumnBinding> subtree_old_bindings;
-    CollectColumnBindingsRecursive(original_child, subtree_old_bindings);
-    idx_set subtree_indices;
-    CollectTableIndicesRecursive(original_child, subtree_indices);
+    // Replace the slot with the new node (this destroys the old subtree)
+    old_node = std::move(new_node);
+    LogicalOperator *subtree_root = old_node.get();
+    if (!subtree_root) {
+        throw InternalException("ReplaceNode: inserted subtree is null after move");
+    }
 
-    // Insert: make the original child a child of new_parent, and place new_parent where child_ref was.
-    new_parent->children.emplace_back(std::move(child_ref));
-    // child_ref now becomes the new_parent
-    child_ref = std::move(new_parent);
-    LogicalOperator *subtree_root = child_ref.get();
+    // Collect table indices present in the newly inserted subtree
+    idx_set new_subtree_indices;
+    CollectTableIndicesRecursive(subtree_root, new_subtree_indices);
 
-    // Build mapping for any table index in subtree that collides with external indices
+    // Build index remapping for any new-subtree indices that collide with external indices
     std::unordered_map<idx_t, idx_t> index_map;
-    if (!subtree_indices.empty()) {
-        // Start allocating new indices from the next available table index in the plan
+    if (!new_subtree_indices.empty()) {
         idx_t next_idx = GetNextTableIndex(root);
-        for (auto old_idx : subtree_indices) {
-            if (old_idx == DConstants::INVALID_INDEX) continue;
-            // Only remap when there's a collision with an external index
-            if (external_indices.find(old_idx) != external_indices.end()) {
-                // assign next unique index
-                while (external_indices.find(next_idx) != external_indices.end() || subtree_indices.find(next_idx) != subtree_indices.end()) {
+        for (auto idx : new_subtree_indices) {
+            if (idx == DConstants::INVALID_INDEX) continue;
+            if (external_indices.find(idx) != external_indices.end()) {
+                // find a fresh index not in external_indices and not in new_subtree_indices
+                while (external_indices.find(next_idx) != external_indices.end() || new_subtree_indices.find(next_idx) != new_subtree_indices.end()) {
                     ++next_idx;
                 }
-                index_map[old_idx] = next_idx;
-                // Mark next_idx as used to avoid duplicates
+                index_map[idx] = next_idx;
                 external_indices.insert(next_idx);
                 ++next_idx;
             }
         }
     }
 
-    // If we need to remap indices, apply to subtree operator fields and create column binding replacements
+    // Apply index remapping to the inserted subtree if necessary
     if (!index_map.empty()) {
-        // Apply mapping to operator-local index fields within the subtree
         ApplyIndexMapToSubtree(subtree_root, index_map);
-        // Build column-binding replacements from the collected subtree_old_bindings
-        ColumnBindingReplacer replacer;
-        replacer.replacement_bindings.reserve(subtree_old_bindings.size());
-        for (const auto &old_cb : subtree_old_bindings) {
-            auto it = index_map.find(old_cb.table_index);
-            if (it != index_map.end()) {
-                ColumnBinding new_cb = ColumnBinding(it->second, old_cb.column_index);
-                replacer.replacement_bindings.emplace_back(old_cb, new_cb);
-            }
+    }
+
+    // After remap, get the new top-level bindings
+    vector<ColumnBinding> new_top_bindings = subtree_root->GetColumnBindings();
+
+    // Build positional replacement map from old_top_bindings -> new_top_bindings
+    ColumnBindingReplacer replacer;
+    const idx_t n = (std::min)(old_top_bindings.size(), new_top_bindings.size());
+    replacer.replacement_bindings.reserve(n);
+    for (idx_t i = 0; i < n; ++i) {
+        if (!(old_top_bindings[i] == new_top_bindings[i])) {
+            replacer.replacement_bindings.emplace_back(old_top_bindings[i], new_top_bindings[i]);
         }
-        // Apply replacer to the tree, stopping at the newly inserted subtree
+    }
+
+    if (!replacer.replacement_bindings.empty()) {
         replacer.stop_operator = subtree_root;
         replacer.VisitOperator(*root);
-    } else {
-        // No index remapping required. To preserve old behaviour we still perform binding positional replacement
-        // for the top node: map old top-level bindings where positions changed
-        vector<ColumnBinding> old_top = original_child->GetColumnBindings();
-        vector<ColumnBinding> new_top = subtree_root->GetColumnBindings();
-        ColumnBindingReplacer replacer;
-        const idx_t n = (std::min)(old_top.size(), new_top.size());
-        for (idx_t i = 0; i < n; ++i) {
-            if (!(old_top[i] == new_top[i])) {
-                replacer.replacement_bindings.emplace_back(old_top[i], new_top[i]);
-            }
-        }
-        if (!replacer.replacement_bindings.empty()) {
-            replacer.stop_operator = subtree_root;
-            replacer.VisitOperator(*root);
-        }
     }
 }
 

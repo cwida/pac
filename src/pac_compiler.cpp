@@ -24,6 +24,17 @@ namespace duckdb {
 // Utilities
 // -----------------------------------------------------------------------------
 
+// Helper to ensure rowid is present in the output columns of a LogicalGet
+static void AddRowIDColumn(LogicalGet &get) {
+	if (get.virtual_columns.find(COLUMN_IDENTIFIER_ROW_ID) != get.virtual_columns.end()) {
+		get.virtual_columns[COLUMN_IDENTIFIER_ROW_ID] = TableColumn("rowid", LogicalTypeId::BIGINT);
+	}
+	get.AddColumnId(COLUMN_IDENTIFIER_ROW_ID);
+	get.projection_ids.push_back(get.GetColumnIds().size() - 1);
+	// We also need to add a column binding for rowid
+	get.GenerateColumnBindings(get.table_index, get.GetColumnIds().size());
+}
+
 static LogicalAggregate *FindTopAggregate(unique_ptr<LogicalOperator> &op) {
     if (!op) {
         return nullptr;
@@ -48,6 +59,20 @@ static LogicalProjection *FindTopProjection(unique_ptr<LogicalOperator> &op) {
     }
     for (auto &child : op->children) {
         if (auto *proj = FindTopProjection(child)) {
+            return proj;
+        }
+    }
+    return nullptr;
+}
+
+// Helper to find the parent LogicalProjection of a given child node
+static LogicalProjection *FindParentProjection(unique_ptr<LogicalOperator> &root, LogicalOperator *target_child) {
+    if (!root) return nullptr;
+    for (auto &child : root->children) {
+        if (child.get() == target_child && root->type == LogicalOperatorType::LOGICAL_PROJECTION) {
+            return &root->Cast<LogicalProjection>();
+        }
+        if (auto *proj = FindParentProjection(child, target_child)) {
             return proj;
         }
     }
@@ -142,16 +167,20 @@ CreatePacSampleJoinNode(ClientContext &context,
                         unique_ptr<LogicalGet> pac_get,
                         idx_t base_idx,
                         idx_t pac_idx) {
+    // Get output bindings for left and right child
+    auto left_bindings = base->GetColumnBindings();
+    auto right_bindings = pac_get->GetColumnBindings();
+    // The rowid is always the last column added
+	idx_t left_rowid_idx = left_bindings.size() - 1;
+	idx_t right_rowid_idx = right_bindings.size() - 1;
     JoinCondition cond;
     cond.comparison = ExpressionType::COMPARE_EQUAL;
     cond.left = make_uniq<BoundColumnRefExpression>(
-        LogicalType::BIGINT, ColumnBinding(base_idx, COLUMN_IDENTIFIER_ROW_ID));
+        LogicalType::BIGINT, left_bindings[left_rowid_idx]);
     cond.right = make_uniq<BoundColumnRefExpression>(
-        LogicalType::BIGINT, ColumnBinding(pac_idx, 0));
-
+        LogicalType::BIGINT, right_bindings[right_rowid_idx]);
     vector<JoinCondition> conditions;
     conditions.push_back(std::move(cond));
-
     vector<unique_ptr<Expression>> extra;
     return LogicalComparisonJoin::CreateJoin(
         context, JoinType::INNER, JoinRefType::REGULAR,
@@ -163,52 +192,6 @@ CreatePacSampleJoinNode(ClientContext &context,
 // Plan rewrite
 // -----------------------------------------------------------------------------
 
-static idx_t
-InsertPacJoinBelowAggregate(ClientContext &context,
-                            unique_ptr<LogicalOperator> &root,
-                            unique_ptr<LogicalGet> pac_get,
-                            idx_t pac_idx) {
-    auto *agg = FindTopAggregate(root);
-    unique_ptr<LogicalOperator> *target = nullptr;
-
-    if (agg) {
-        D_ASSERT(!agg->children.empty());
-        target = &agg->children[0];
-    } else {
-        target = &root;
-    }
-
-    idx_t base_idx = DConstants::INVALID_INDEX;
-    vector<unique_ptr<LogicalOperator> *> stack;
-    stack.push_back(target);
-    while (!stack.empty() && base_idx == DConstants::INVALID_INDEX) {
-        auto cur_ptr = stack.back();
-        stack.pop_back();
-        auto &cur = *cur_ptr;
-        if (!cur) continue;
-        if (cur->type == LogicalOperatorType::LOGICAL_GET) {
-            base_idx = cur->Cast<LogicalGet>().table_index;
-            break;
-        }
-        for (auto &c : cur->children) {
-            stack.push_back(&c);
-        }
-    }
-
-    if (base_idx == DConstants::INVALID_INDEX) {
-        return DConstants::INVALID_INDEX;
-    }
-
-    // Create the join node and insert it using UpdateParent so that bindings are updated correctly
-    auto new_join = CreatePacSampleJoinNode(
-        context, std::move(*target), std::move(pac_get),
-        base_idx, pac_idx);
-    // Use UpdateParent to replace *target with the new join, propagating binding changes
-    UpdateParent(root, *target, std::move(new_join));
-
-    return pac_idx;
-}
-
 // -----------------------------------------------------------------------------
 // Aggregate update
 // -----------------------------------------------------------------------------
@@ -218,7 +201,7 @@ static void UpdateAggregateGroups(LogicalAggregate *agg, idx_t pac_idx) {
     agg->groups.push_back(
         make_uniq<BoundColumnRefExpression>(
             LogicalType::BIGINT,
-            ColumnBinding(pac_idx, 1)));
+            ColumnBinding(pac_idx, agg->expressions.size() - 1)));
 }
 
 static void UpdateProjection(LogicalProjection *proj, idx_t pac_idx) {
@@ -234,66 +217,13 @@ static void UpdateProjection(LogicalProjection *proj, idx_t pac_idx) {
 // Entry point
 // -----------------------------------------------------------------------------
 
-// Insert pac_sample into plan using provided pac_get (pac_get.table_index must be set) and return pac_idx
-DUCKDB_API idx_t JoinWithSampleTable(ClientContext &context, unique_ptr<LogicalOperator> &plan, unique_ptr<LogicalGet> pac_get) {
-    if (!plan) return DConstants::INVALID_INDEX;
-    if (!pac_get) return DConstants::INVALID_INDEX;
-    idx_t pac_idx = pac_get->table_index;
-    if (pac_idx == DConstants::INVALID_INDEX) return DConstants::INVALID_INDEX;
-    // use existing insertion helper that will call UpdateParent internally
-    InsertPacJoinBelowAggregate(context, plan, std::move(pac_get), pac_idx);
-    return pac_idx;
-}
-
-// Create pac_get for privacy_unit and insert into plan, returning pac_idx
-DUCKDB_API idx_t JoinWithSampleTable(ClientContext &context, unique_ptr<LogicalOperator> &plan, const std::string &privacy_unit) {
-    if (!plan) return DConstants::INVALID_INDEX;
-    // determine target to compute next table index (same logic as earlier)
-    auto *agg = FindTopAggregate(plan);
-    unique_ptr<LogicalOperator> *target = nullptr;
-    if (agg) {
-        D_ASSERT(!agg->children.empty());
-        target = &agg->children[0];
-    } else {
-        target = &plan;
-    }
-    idx_t pac_idx = GetNextTableIndex(*target);
-    if (pac_idx == DConstants::INVALID_INDEX) return DConstants::INVALID_INDEX;
-    auto pac_get = CreatePacSampleLogicalGet(context, pac_idx, privacy_unit);
-    return JoinWithSampleTable(context, plan, std::move(pac_get));
-}
-
-// Compile artifacts for a plan that already contains the pac_sample at pac_idx (skip insertion)
-DUCKDB_API void CompilePACQuery(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
-                                const std::string &privacy_unit, idx_t pac_idx) {
-    if (privacy_unit.empty()) return;
-    // create sample CTE file
-    string normalized = NormalizeQueryForHash(input.context.GetCurrentQuery());
-    string hash = HashStringToHex(normalized);
-    string path = ".";
-    Value v;
-    if (input.context.TryGetCurrentSetting("pac_compiled_path", v) && !v.IsNull()) {
-        path = v.ToString();
-    }
-    if (!path.empty() && path.back() != '/') path.push_back('/');
-    string filename = path + privacy_unit + "_" + hash + ".sql";
-    CreateSampleCTE(input.context, privacy_unit, filename, normalized);
-
-    // pac_idx already inserted; update aggregates/projections accordingly
-    auto *agg = FindTopAggregate(plan);
-    UpdateAggregateGroups(agg, pac_idx);
-    auto *proj = FindTopProjection(plan);
-    UpdateProjection(proj, pac_idx);
-    plan->Verify(input.context);
-    Printer::Print("done");
-}
-
-// Keep the existing 3-arg CompilePACQuery but have it call JoinWithSampleTable then the new overload
+// Refactored CompilePACQuery: does all steps in one place
 void CompilePACQuery(OptimizerExtensionInput &input,
                      unique_ptr<LogicalOperator> &plan,
                      const std::string &privacy_unit) {
+
     if (privacy_unit.empty()) return;
-    // create sample CTE file and insert join
+    // 1. Create sample CTE file (unchanged)
     string normalized = NormalizeQueryForHash(input.context.GetCurrentQuery());
     string hash = HashStringToHex(normalized);
     string path = ".";
@@ -305,11 +235,84 @@ void CompilePACQuery(OptimizerExtensionInput &input,
     string filename = path + privacy_unit + "_" + hash + ".sql";
     CreateSampleCTE(input.context, privacy_unit, filename, normalized);
 
-    // Insert pac_sample join and then update aggregates/projection
-    idx_t pac_idx = JoinWithSampleTable(input.context, plan, privacy_unit);
-    if (pac_idx == DConstants::INVALID_INDEX) return;
-    UpdateAggregateGroups(FindTopAggregate(plan), pac_idx);
-    UpdateProjection(FindTopProjection(plan), pac_idx);
+    // 2. Create LogicalGet for sample table
+    idx_t sample_idx = GetNextTableIndex(plan);
+    auto sample_get = CreatePacSampleLogicalGet(input.context, sample_idx, privacy_unit);
+    // 3. Find the scan (LogicalGet) of the PAC table in the plan
+    unique_ptr<LogicalOperator> *pac_scan_ptr = nullptr;
+    idx_t pac_table_idx = DConstants::INVALID_INDEX;
+    {
+        vector<unique_ptr<LogicalOperator> *> stack;
+        stack.push_back(&plan);
+        while (!stack.empty()) {
+            auto cur_ptr = stack.back();
+            stack.pop_back();
+            auto &cur = *cur_ptr;
+            if (!cur) continue;
+            if (cur->type == LogicalOperatorType::LOGICAL_GET) {
+                pac_scan_ptr = cur_ptr;
+                pac_table_idx = cur->Cast<LogicalGet>().table_index;
+                break;
+            }
+            for (auto &c : cur->children) {
+                stack.push_back(&c);
+            }
+        }
+    }
+    if (!pac_scan_ptr || pac_table_idx == DConstants::INVALID_INDEX) {
+        // Could not find PAC scan
+        return;
+    }
+    // Ensure rowid is present in both scans before join construction
+    AddRowIDColumn(pac_scan_ptr->get()->Cast<LogicalGet>()); // PAC scan
+    // The sample get already has rowid added in its creation function
+
+    // 4. Create the join node using a copy of the PAC scan and the sample table scan
+    auto pac_scan = (*pac_scan_ptr)->Copy(input.context);
+    auto join = CreatePacSampleJoinNode(input.context, std::move(pac_scan), std::move(sample_get), pac_table_idx, sample_idx);
+    LogicalOperator *join_ptr = join.get();
+    ReplaceNode(plan, *pac_scan_ptr, join);
+
+    // Find the parent projection of the join we just inserted
+    LogicalProjection *parent_proj = FindParentProjection(plan, join_ptr);
+	auto parent_proj_idx = DConstants::INVALID_INDEX;
+    // Now we add the sample_id column to the parent projection if it exists
+	if (parent_proj) {
+		parent_proj->expressions.push_back(
+			make_uniq<BoundColumnRefExpression>(
+				LogicalType::BIGINT,
+				ColumnBinding(sample_idx, 1)));
+		parent_proj_idx = parent_proj->table_index;
+	}
+
+    // 5. Update the aggregate node to include the sample column
+    auto *agg = FindTopAggregate(plan);
+    UpdateAggregateGroups(agg, parent_proj_idx);
+
+    // 6. Update the projection node to include the sample column
+	parent_proj = FindParentProjection(plan, agg);
+	parent_proj_idx = DConstants::INVALID_INDEX;
+	// Now we add the sample_id column to the parent projection if it exists
+	if (parent_proj) {
+		parent_proj->expressions.push_back(
+			make_uniq<BoundColumnRefExpression>(
+				LogicalType::BIGINT,
+				ColumnBinding(agg->group_index, agg->groups.size() - 1)));
+		parent_proj_idx = parent_proj->table_index;
+	}
+
+	// 7. Update the topmost projection if it exists
+	parent_proj = FindParentProjection(plan, parent_proj);
+	parent_proj_idx = DConstants::INVALID_INDEX;
+	// Now we add the sample_id column to the parent projection if it exists
+	if (parent_proj) {
+		parent_proj->expressions.push_back(
+			make_uniq<BoundColumnRefExpression>(
+				LogicalType::BIGINT,
+				ColumnBinding(parent_proj_idx, agg->groups.size() - 1)));
+		parent_proj_idx = parent_proj->table_index;
+	}
+
     plan->Verify(input.context);
     Printer::Print("done");
 }

@@ -204,21 +204,16 @@ void PACRewriteRule::PACRewriteRuleFunction(OptimizerExtensionInput &input, uniq
     bool apply_noise = true;
     Value pac_noise_value;
     input.context.TryGetCurrentSetting("pac_noise", pac_noise_value);
-    if (!pac_noise_value.IsNull() && pac_noise_value.GetValue<bool>()) {
-        apply_noise = true;
+    if (!pac_noise_value.IsNull() && !pac_noise_value.GetValue<bool>()) {
+        apply_noise = false;
     }
     if (apply_noise) {
         // PAC compatible: invoke compiler to produce artifacts (e.g., sample CTE)
-        // First insert the pac_sample get and join into the plan using JoinWithSampleTable.
-        // JoinWithSampleTable uses UpdateParent internally to ensure bindings are remapped correctly.
-        idx_t pac_idx = JoinWithSampleTable(input.context, plan, privacy_unit);
-        if (pac_idx == DConstants::INVALID_INDEX) {
-            // insertion failed or pac sample unavailable: bail out
-            return;
-        }
-        // Now compile artifacts for the plan that already contains the pac_sample
-        CompilePACQuery(input, plan, privacy_unit, pac_idx);
+        // Delegate insertion and compilation to CompilePACQuery, which will create the CTE,
+        // attempt to insert the pac_sample join (using UpdateParent internally) and update
+        // aggregates/projections if insertion succeeds. It returns early if insertion fails.
+        CompilePACQuery(input, plan, privacy_unit);
      }
-}
+ }
 
-} // namespace duckdb
+ } // namespace duckdb

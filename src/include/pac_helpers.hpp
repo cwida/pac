@@ -28,8 +28,8 @@ DUCKDB_API idx_t GetNextTableIndex(unique_ptr<LogicalOperator> &plan);
 // - `new_parent` must not have any children prior to calling this function.
 // The function will try to propagate column binding changes using ColumnBindingReplacer so that
 // expressions above the insertion point keep referring to the correct ColumnBindings.
-DUCKDB_API void UpdateParent(unique_ptr<LogicalOperator> &root,
-                             unique_ptr<LogicalOperator> &child_ref,
-                             unique_ptr<LogicalOperator> new_parent);
+DUCKDB_API void ReplaceNode(unique_ptr<LogicalOperator> &root,
+                            unique_ptr<LogicalOperator> &old_node,
+                            unique_ptr<LogicalOperator> &new_node);
 
 } // namespace duckdb
