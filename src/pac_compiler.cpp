@@ -101,7 +101,8 @@ void CreateSampleCTE(ClientContext &context,
         m_cfg = MaxValue<int64_t>(1, m_val.GetValue<int64_t>());
     }
 
-    std::ofstream ofs(filename);
+	// Truncate existing file
+	std::ofstream ofs(filename, std::ofstream::trunc);
     if (!ofs) {
         throw ParserException("PAC: failed to write " + filename);
     }
@@ -117,6 +118,36 @@ void CreateSampleCTE(ClientContext &context,
     ofs << ")\n";
 
     ofs.close();
+}
+
+void CreateQueryJoiningSampleCTE(const std::string &lpts,
+							  const std::string &output_filename) {
+	std::ofstream ofs(output_filename);
+	if (!ofs) {
+		throw ParserException("PAC: failed to write " + output_filename);
+	}
+
+	ofs << ",\n";
+	ofs << "per sample AS (\n";
+	ofs << "\t" << lpts << "\n";
+	ofs << ")\n";
+	ofs.close();
+}
+
+void CreatePacAggregateQuery(ClientContext &context,
+							 const std::string &privacy_unit,
+							 const std::string &lpts,
+							 const std::string &output_filename) {
+	std::ofstream ofs(output_filename);
+	if (!ofs) {
+		throw ParserException("PAC: failed to write " + output_filename);
+	}
+
+	ofs << "SELECT pac_aggregate(array_agg(cnt_sample ORDER BY sample_id), array_agg(cnt_sample_sq ORDER BY sample_id)";
+	// todo - mi, k
+	ofs << ", 1/128, 3)\n"; // hardcoded m=128, k=3 for now
+	ofs << "FROM per sample;\n";
+	ofs.close();
 }
 
 // -----------------------------------------------------------------------------
@@ -306,6 +337,7 @@ void CompilePACQuery(OptimizerExtensionInput &input,
     }
     if (!path.empty() && path.back() != '/') path.push_back('/');
     string filename = path + privacy_unit + "_" + hash + ".sql";
+	CreateSampleCTE(input.context, privacy_unit, filename, normalized);
 
 	// Replan the plan without compressed materialization.
 	// We change the "disabled_optimizers" setting temporarily and re-run the optimizer. Use RAII
@@ -423,6 +455,8 @@ void CompilePACQuery(OptimizerExtensionInput &input,
 	auto lp_to_sql = LogicalPlanToSql(input.context, plan);
 	auto ir = lp_to_sql.LogicalPlanToIR();
 	Printer::Print(ir->ToQuery(true));
+	CreateQueryJoiningSampleCTE(ir->ToQuery(true), path + "pac_joined_" + privacy_unit + "_" + hash + ".sql");
+	CreatePacAggregateQuery(input.context, privacy_unit, ir->ToQuery(true), path + "pac_aggregate_" + privacy_unit + "_" + hash + ".sql");
 
 	// replace the plan with a dummy plan for now
 	plan = make_uniq_base<LogicalOperator, LogicalDummyScan>(0);

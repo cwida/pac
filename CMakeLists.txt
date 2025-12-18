@@ -12,10 +12,11 @@ set(EXTENSION_NAME ${TARGET_NAME}_extension)
 set(LOADABLE_EXTENSION_NAME ${TARGET_NAME}_loadable_extension)
 
 project(${TARGET_NAME})
-include_directories(src/include)
+include_directories(src/include third_party/lpts)
 
 # Extension sources (added pac_privacy_unit and pac_compatibility_check)
-set(EXTENSION_SOURCES src/pac_extension.cpp src/pac_optimizer.cpp src/pac_compiler.cpp src/pac_privacy_unit.cpp src/pac_compatibility_check.cpp src/pac_aggregate.cpp src/pac_helpers.cpp)
+set(EXTENSION_SOURCES src/pac_extension.cpp src/pac_optimizer.cpp src/pac_compiler.cpp src/pac_privacy_unit.cpp
+        src/pac_compatibility_check.cpp src/pac_aggregate.cpp src/pac_helpers.cpp third_party/lpts/logical_plan_to_sql.cpp)
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
