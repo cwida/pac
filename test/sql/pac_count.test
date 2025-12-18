@@ -1,0 +1,80 @@
+# name: test/sql/pac_count.test
+# description: Test pac_count aggregate function
+# group: [sql]
+
+require pac
+
+statement ok
+PRAGMA enable_verification
+
+# Create test data with 4000 rows
+# rowid from 0-3999, value is rowid % 3 (so values 0, 1, 2)
+statement ok
+CREATE TABLE test_data AS
+SELECT i AS rowid, i % 3 AS value
+FROM range(4000) t(i)
+
+# Ungrouped pac_count - should return variance of 64 bit counters
+query I
+SELECT pac_count(hash(rowid)::UBIGINT) IS NOT NULL FROM test_data
+----
+true
+
+# Verify ungrouped pac_count returns a double
+query I
+SELECT typeof(pac_count(hash(rowid)::UBIGINT)) FROM test_data
+----
+DOUBLE
+
+# Grouped pac_count by value (0, 1, 2)
+# Each group has ~1333 rows
+query II
+SELECT value, pac_count(hash(rowid)::UBIGINT) IS NOT NULL AS has_result
+FROM test_data
+GROUP BY value
+ORDER BY value
+----
+0	true
+1	true
+2	true
+
+# Verify grouped results return doubles
+query II
+SELECT value, typeof(pac_count(hash(rowid)::UBIGINT)) AS result_type
+FROM test_data
+GROUP BY value
+ORDER BY value
+----
+0	DOUBLE
+1	DOUBLE
+2	DOUBLE
+
+# Test with NULL values - should be handled correctly
+statement ok
+CREATE TABLE test_with_nulls AS
+SELECT i AS rowid, i % 3 AS value,
+       CASE WHEN i % 10 = 0 THEN NULL ELSE hash(i)::UBIGINT END AS key_hash
+FROM range(4000) t(i)
+
+query I
+SELECT pac_count(key_hash) IS NOT NULL FROM test_with_nulls
+----
+true
+
+# Grouped with NULLs
+query II
+SELECT value, pac_count(key_hash) IS NOT NULL AS has_result
+FROM test_with_nulls
+GROUP BY value
+ORDER BY value
+----
+0	true
+1	true
+2	true
+
+# Cleanup
+statement ok
+DROP TABLE test_data
+
+statement ok
+DROP TABLE test_with_nulls
