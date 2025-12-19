@@ -16,6 +16,26 @@ using namespace duckdb;
 
 namespace duckdb {
 
+static bool ContainsCrossJoinWithGenerateSeries(const LogicalOperator &op) {
+    if (op.type == LogicalOperatorType::LOGICAL_CROSS_PRODUCT) {
+        auto &cross = op.Cast<LogicalJoin>();
+        for (auto &child : cross.children) {
+            if (child->type == LogicalOperatorType::LOGICAL_GET) {
+            	auto child_get = dynamic_cast<LogicalGet *>(child.get());
+            	if (child_get->function.name == "generate_series") {
+            		return true;
+            	}
+             }
+        }
+    }
+    for (auto &child : op.children) {
+	    if (ContainsCrossJoinWithGenerateSeries(*child)) {
+	    	return true;
+	    }
+    }
+    return false;
+}
+
 static bool IsAllowedAggregate(const std::string &func) {
     static const std::unordered_set<std::string> allowed = {"sum", "sum_no_overflow", "count", "count_star", "avg"};
     std::string lower_func = func;
@@ -187,6 +207,11 @@ bool PACRewriteQueryCheck(LogicalOperator &plan, ClientContext &context) {
 
     // If we reach here, there is at least one PAC table that has PAC scans without matching sample-CTE scans.
     // Now validate plan structure: ensure there is an aggregation using allowed aggregates; disallow window, distinct, non-inner joins.
+
+	// Only allow CROSS JOIN with GENERATE_SERIES (for random sample expansion)
+	if (ContainsCrossJoinWithGenerateSeries(plan)) {
+		return false;
+	}
 
     // Require there to be an aggregation (sum/count/avg) somewhere in the plan; otherwise nothing to do
     // If there's no allowed aggregation but we have PAC tables without matching samples,

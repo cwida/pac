@@ -115,19 +115,18 @@ void CreateSampleCTE(ClientContext &context,
     ofs << "  SELECT src.rowid, s.sample_id\n";
     ofs << "  FROM " << privacy_unit << " AS src\n";
     ofs << "  CROSS JOIN generate_series(1," << m_cfg << ") AS s(sample_id)\n";
-    ofs << ")\n";
+    ofs << "),\n";
 
     ofs.close();
 }
 
 void CreateQueryJoiningSampleCTE(const std::string &lpts,
 							  const std::string &output_filename) {
-	std::ofstream ofs(output_filename);
+	std::ofstream ofs(output_filename, std::ofstream::app);
 	if (!ofs) {
 		throw ParserException("PAC: failed to write " + output_filename);
 	}
 
-	ofs << ",\n";
 	ofs << "per sample AS (\n";
 	ofs << "\t" << lpts << "\n";
 	ofs << ")\n";
@@ -138,7 +137,7 @@ void CreatePacAggregateQuery(ClientContext &context,
 							 const std::string &privacy_unit,
 							 const std::string &lpts,
 							 const std::string &output_filename) {
-	std::ofstream ofs(output_filename);
+	std::ofstream ofs(output_filename, std::ofstream::app);
 	if (!ofs) {
 		throw ParserException("PAC: failed to write " + output_filename);
 	}
@@ -455,8 +454,8 @@ void CompilePACQuery(OptimizerExtensionInput &input,
 	auto lp_to_sql = LogicalPlanToSql(input.context, plan);
 	auto ir = lp_to_sql.LogicalPlanToIR();
 	Printer::Print(ir->ToQuery(true));
-	CreateQueryJoiningSampleCTE(ir->ToQuery(true), path + "pac_joined_" + privacy_unit + "_" + hash + ".sql");
-	CreatePacAggregateQuery(input.context, privacy_unit, ir->ToQuery(true), path + "pac_aggregate_" + privacy_unit + "_" + hash + ".sql");
+	CreateQueryJoiningSampleCTE(ir->ToQuery(true), filename);
+	CreatePacAggregateQuery(input.context, privacy_unit, ir->ToQuery(true), filename);
 
 	// replace the plan with a dummy plan for now
 	plan = make_uniq_base<LogicalOperator, LogicalDummyScan>(0);
