@@ -134,19 +134,52 @@ void CreateQueryJoiningSampleCTE(const std::string &lpts,
 	ofs.close();
 }
 
-void CreatePacAggregateQuery(ClientContext &context,
-							 const std::string &privacy_unit,
-							 const std::string &lpts,
-							 const std::string &output_filename) {
+void CreatePacAggregateQuery(const std::string &output_filename,
+							const std::vector<string> &group_names,
+							const std::vector<string> &aggregate_names) {
 	std::ofstream ofs(output_filename, std::ofstream::app);
 	if (!ofs) {
 		throw ParserException("PAC: failed to write " + output_filename);
 	}
 
-	ofs << "SELECT pac_aggregate(array_agg(cnt_sample ORDER BY sample_id), array_agg(cnt_sample_sq ORDER BY sample_id)";
+	// For each aggregate, we need to compile this query:
+	// SELECT group_key,
+	//		  pac_aggregate(array_agg(sum_val_sample ORDER BY sample_id),
+	//					    array_agg(sum_val_sample ORDER BY sample_id),
+	//						mi,
+	//						k)
+	//		  AS sum_val
+	// FROM per_sample
+	// GROUP BY group_key
+	// ORDER BY group_key;
+
+	// If there is more than one aggregate, we need to join them on group_key
+	// todo - support multiple aggregates
+
+	ofs << "SELECT ";
+	for (idx_t i = 0; i < group_names.size(); i++) {
+		ofs << group_names[i];
+		ofs << ", ";
+	}
+	ofs << "pac_aggregate(array_agg(" << aggregate_names[0] << " ORDER BY sample_id), array_agg(" << aggregate_names[0] << " ORDER BY sample_id), ";
 	// todo - mi, k
-	ofs << ", 1/128, 3)\n"; // hardcoded m=128, k=3 for now
-	ofs << "FROM per sample;\n";
+	ofs << "1/128, 3)\n"; // hardcoded m=128, k=3 for now
+	ofs << "FROM per_sample\n";
+	ofs << "GROUP BY ";
+	for (idx_t i = 0; i < group_names.size(); i++) {
+		ofs << group_names[i];
+		if (i < group_names.size() - 1) {
+			ofs << ", ";
+		}
+	}
+	ofs << "\nORDER BY ";
+	for (idx_t i = 0; i < group_names.size(); i++) {
+		ofs << group_names[i];
+		if (i < group_names.size() - 1) {
+			ofs << ", ";
+		}
+	}
+	ofs << ";\n";
 	ofs.close();
 }
 
@@ -443,6 +476,9 @@ void CompilePACQuery(OptimizerExtensionInput &input,
 
     // 5. Update the aggregate node to include the sample column
     auto *agg = FindTopAggregate(plan);
+	// Before updating the aggrgate node, we fetch the group and aggregate names
+	vector<string> group_names;
+	vector<string> aggregate_names;
     UpdateAggregateGroups(agg, parent_proj_idx);
 
     // 6. Update the projection node to include the sample column
@@ -456,19 +492,39 @@ void CompilePACQuery(OptimizerExtensionInput &input,
 	auto ir = lp_to_sql.LogicalPlanToIR();
 	Printer::Print(ir->ToQuery(true));
 	CreateQueryJoiningSampleCTE(ir->ToQuery(true), filename);
-	CreatePacAggregateQuery(input.context, privacy_unit, ir->ToQuery(true), filename);
+	group_names.emplace_back("group_key"); // hardcoded for now
+	aggregate_names.emplace_back("aggregate_0"); // hardcoded for now
+	CreatePacAggregateQuery(filename, group_names, aggregate_names);
 
-	// replace the plan with a dummy plan for now
-	plan = make_uniq_base<LogicalOperator, LogicalDummyScan>(0);
+	// Now read, plan and execute the query from the file
+	{
+		std::ifstream ifs(filename);
+		if (!ifs) {
+			throw ParserException("PAC: failed to read " + filename);
+		}
+		std::string query((std::istreambuf_iterator<char>(ifs)),
+		                  std::istreambuf_iterator<char>());
+
+		Parser parser;
+    	parser.ParseQuery(query);
+    	auto statement = parser.statements[0].get();
+    	Planner planner(input.context);
+    	planner.CreatePlan(statement->Copy());
+    	Optimizer optimizer(*planner.binder, input.context);
+    	plan = optimizer.Optimize(std::move(planner.plan));
+    	plan->Print();
+	}
 
 	// todo:
+	// figure out how to get aggregate names
+	// run string replace from the internal table
 	// clean up this code
-	// test with/without compressed materialization
-	// feed the query to LPTS
-	// implement the last query
+	// test more queries
 	// implement filter pushdown
+	// optimize pac_aggregate not to pass the same aray twice (when vals = counts)
 	// implement pac_sum final step
 	// test everything
+	// check for robustness with null values
  }
 
 } // namespace duckdb

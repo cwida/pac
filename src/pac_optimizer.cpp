@@ -72,6 +72,8 @@ void PACRewriteRule::PACRewriteRuleFunction(OptimizerExtensionInput &input, uniq
         return;
     }
 
+	return; // placeholder to disable PAC for now
+
     // After PACRewriteQueryCheck validated the plan is eligible, find the privacy unit name to pass to the compiler.
     auto pac_tables = ReadPacTablesFile(pac_privacy_file);
     std::string privacy_unit = FindPrivacyUnitInPlan(*plan, pac_tables);

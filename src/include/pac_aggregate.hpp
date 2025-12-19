@@ -22,6 +22,12 @@ DUCKDB_API unique_ptr<FunctionLocalState> PacAggregateInit(ExpressionState &stat
 // (LIST<DOUBLE> values, LIST<INT> counts, DOUBLE mi, INT k) -> DOUBLE
 DUCKDB_API void PacAggregateScalar(DataChunk &args, ExpressionState &state, Vector &result);
 
+// Scalar function entry point for BIGINT inputs. Accepts
+// (LIST<BIGINT> values, LIST<BIGINT> counts, DOUBLE mi, INT k) -> DOUBLE
+// This overload converts bigint elements to the expected internal types
+// and then applies the same PAC algorithm.
+DUCKDB_API void PacAggregateScalarBigint(DataChunk &args, ExpressionState &state, Vector &result);
+
 // Register pac_aggregate scalar function(s) with the extension loader
 void RegisterPacAggregateFunctions(ExtensionLoader &loader);
 
