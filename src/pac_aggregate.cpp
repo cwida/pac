@@ -28,7 +28,7 @@ namespace duckdb {
 // ============================================================================
 // State: 64 counters, one for each bit position
 // Update: for each input key_hash, increment count[i] if bit i is set
-// Finalize: compute the variance of the 64 counters
+// Finalize: compute the PAC-noised count from the 64 counters
 //
 // Uses SIMD-friendly intermediate accumulators (small_totals) that get
 // flushed to the main totals every 256 updates.
@@ -65,6 +65,7 @@ static void PacCountInitialize(const AggregateFunction &, data_ptr_t state_ptr) 
 }
 
 // Simple update for pac_count (ungrouped aggregation)
+AUTOVECTORIZE
 static void PacCountUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, data_ptr_t state_ptr, idx_t count) {
 	D_ASSERT(input_count == 1);
 	auto &state = *reinterpret_cast<PacCountState *>(state_ptr);
@@ -84,7 +85,6 @@ static void PacCountUpdate(Vector inputs[], AggregateInputData &, idx_t input_co
 			state.small_totals[j] += (key_hash >> j) & PAC_COUNT_MASK;
 		}
 		if (++state.update_count == 0) {
-			// update_count wrapped (256 updates), flush to totals
 			state.Flush();
 		}
 	}
@@ -304,6 +304,7 @@ static void PacSumFloatInitialize(const AggregateFunction &, data_ptr_t state_pt
 }
 
 template <class FLOAT_TYPE>
+AUTOVECTORIZE
 static void PacSumFloatUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, data_ptr_t state_ptr,
                               idx_t count) {
 	D_ASSERT(input_count == 2);
@@ -342,6 +343,7 @@ static void PacSumFloatUpdate(Vector inputs[], AggregateInputData &, idx_t input
 }
 
 template <class FLOAT_TYPE>
+AUTOVECTORIZE
 static void PacSumFloatScatterUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, Vector &states,
                                      idx_t count) {
 	D_ASSERT(input_count == 2);
@@ -532,6 +534,7 @@ static void PacSumIntegerInitialize(const AggregateFunction &, data_ptr_t state_
 }
 
 template <class INPUT_TYPE, class ACC_TYPE>
+AUTOVECTORIZE
 static void PacSumIntegerUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, data_ptr_t state_ptr,
                                 idx_t count) {
 	D_ASSERT(input_count == 2);
@@ -582,6 +585,7 @@ static void PacSumIntegerUpdate(Vector inputs[], AggregateInputData &, idx_t inp
 }
 
 template <class INPUT_TYPE, class ACC_TYPE>
+AUTOVECTORIZE
 static void PacSumIntegerScatterUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, Vector &states,
                                        idx_t count) {
 	D_ASSERT(input_count == 2);
