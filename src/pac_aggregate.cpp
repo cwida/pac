@@ -28,7 +28,7 @@ namespace duckdb {
 // ============================================================================
 // State: 64 counters, one for each bit position
 // Update: for each input key_hash, increment count[i] if bit i is set
-// Finalize: compute the variance of the 64 counters
+// Finalize: compute the PAC-noised count from the 64 counters
 //
 // Uses SIMD-friendly intermediate accumulators (small_totals) that get
 // flushed to the main totals every 256 updates.
@@ -64,62 +64,50 @@ static void PacCountInitialize(const AggregateFunction &, data_ptr_t state_ptr) 
 	memset(state.totals, 0, sizeof(state.totals));
 }
 
-// Simple update for pac_count (ungrouped aggregation)
-AUTOVECTORIZE
-static void PacCountUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, data_ptr_t state_ptr, idx_t count) {
-	D_ASSERT(input_count == 1);
-	auto &state = *reinterpret_cast<PacCountState *>(state_ptr);
-	auto &input = inputs[0];
-
-	UnifiedVectorFormat idata;
-	input.ToUnifiedFormat(count, idata);
-	auto input_data = UnifiedVectorFormat::GetData<uint64_t>(idata);
-
-	for (idx_t i = 0; i < count; i++) {
-		auto idx = idata.sel->get_index(i);
-		if (!idata.validity.RowIsValid(idx)) {
-			continue;
-		}
-		uint64_t key_hash = input_data[idx];
-		for (int j = 0; j < 8; j++) {
-			state.small_totals[j] += (key_hash >> j) & PAC_COUNT_MASK;
-		}
-		if (++state.update_count == 0) {
-			state.Flush();
-		}
+AUTOVECTORIZE static inline void
+PacCountUpdateInternal(const UnifiedVectorFormat &idata, idx_t i, const uint64_t *input_data, PacCountState &state) {
+	auto idx = idata.sel->get_index(i);
+	if (!idata.validity.RowIsValid(idx)) {
+		return;
+	}
+	// update small_totals as 64-bits integers (each contains 8 single-byte counters)
+	// the 64-bits approach is chosen because the hashkey is 64-bits
+	// this loop of 8 should auto-vectorize to a single AVX512 load/shift/and/store sequence
+	uint64_t key_hash = input_data[idx];
+	for (int j = 0; j < 8; j++) {
+		state.small_totals[j] += (key_hash >> j) & PAC_COUNT_MASK;
+	}
+	if (++state.update_count == 0) {
+		state.Flush(); // every 256 iterations we must flush the bytes to uint64_t counters to avoid overflow
 	}
 }
 
-// Scatter update for pac_count (grouped aggregation)
-AUTOVECTORIZE
-static void PacCountScatterUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, Vector &states,
-                                  idx_t count) {
+// Simple update for pac_count (ungrouped aggregation)
+static void PacCountUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, data_ptr_t state_ptr, idx_t count) {
 	D_ASSERT(input_count == 1);
-
+	auto &state = *reinterpret_cast<PacCountState *>(state_ptr);
 	UnifiedVectorFormat idata;
 	inputs[0].ToUnifiedFormat(count, idata);
 	auto input_data = UnifiedVectorFormat::GetData<uint64_t>(idata);
 
+	for (idx_t i = 0; i < count; i++) {
+		PacCountUpdateInternal(idata, i, input_data, state);
+	}
+}
+
+// Scatter update for pac_count (grouped aggregation)
+static void PacCountScatterUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, Vector &states,
+                                  idx_t count) {
+	D_ASSERT(input_count == 1);
+	UnifiedVectorFormat idata;
+	inputs[0].ToUnifiedFormat(count, idata);
+	auto input_data = UnifiedVectorFormat::GetData<uint64_t>(idata);
 	UnifiedVectorFormat sdata;
 	states.ToUnifiedFormat(count, sdata);
 	auto state_ptrs = UnifiedVectorFormat::GetData<PacCountState *>(sdata);
 
 	for (idx_t i = 0; i < count; i++) {
-		auto input_idx = idata.sel->get_index(i);
-		if (!idata.validity.RowIsValid(input_idx)) {
-			continue;
-		}
-
-		auto state_idx = sdata.sel->get_index(i);
-		auto state = state_ptrs[state_idx];
-
-		uint64_t key_hash = input_data[input_idx];
-		for (int j = 0; j < 8; j++) {
-			state->small_totals[j] += (key_hash >> j) & PAC_COUNT_MASK;
-		}
-		if (++state->update_count == 0) {
-			state->Flush();
-		}
+		PacCountUpdateInternal(idata, i, input_data, *state_ptrs[sdata.sel->get_index(i)]);
 	}
 }
 
@@ -129,13 +117,8 @@ static void PacCountCombine(Vector &source, Vector &target, AggregateInputData &
 	for (idx_t i = 0; i < count; i++) {
 		auto src = sdata[i];
 		auto tgt = tdata[i];
-		// Flush any unflushed small_totals
-		if (src->update_count != 0) {
-			src->Flush();
-		}
-		if (tgt->update_count != 0) {
-			tgt->Flush();
-		}
+		src->Flush();
+		tgt->Flush();
 		for (int j = 0; j < 64; j++) {
 			tgt->totals[j] += src->totals[j];
 		}
@@ -191,7 +174,7 @@ static double PacNoisySampleFrom64Counters(const uint64_t counters[64], double m
 
 static void PacCountFinalize(Vector &states, AggregateInputData &, Vector &result, idx_t count, idx_t offset) {
     auto sdata = FlatVector::GetData<PacCountState *>(states);
-    auto rdata = FlatVector::GetData<double>(result);
+    auto rdata = FlatVector::GetData<uint64_t>(result);
 
     // Default mi (fixme)
     const double mi_default = 128.0;
@@ -203,7 +186,7 @@ static void PacCountFinalize(Vector &states, AggregateInputData &, Vector &resul
             state->Flush();
         }
         // Compute noisy sampled result from the 64 counters
-        double res = PacNoisySampleFrom64Counters(state->totals, mi_default, gen);
+        uint64_t res = state->totals[0] + PacNoisySampleFrom64Counters(state->totals, mi_default, gen);
         rdata[offset + i] = res;
     }
 }
@@ -213,7 +196,7 @@ static void PacCountFinalize(Vector &states, AggregateInputData &, Vector &resul
 // ============================================================================
 // State: 64 sums, one for each bit position
 // Update: for each (key_hash, value), add value to sums[i] if bit i of key_hash is set
-// Finalize: compute the variance of the 64 sums
+// Finalize: compute the PAC-noised sum from the 64 counters
 //
 // For integers: uses two-level accumulation with small_totals (input type) and totals (large type)
 // For floats: uses direct accumulation in the same type
@@ -1072,9 +1055,9 @@ void RegisterPacAggregateFunctions(ExtensionLoader &loader) {
 
 	// Register pac_count aggregate function
 	// Input: UBIGINT key_hash
-	// Output: DOUBLE (variance of the 64 bit counters)
+	// Output: UBIGINT (variance of the 64 bit counters)
 	// Uses SIMD-friendly update with intermediate accumulators
-	AggregateFunction pac_count("pac_count", {LogicalType::UBIGINT}, LogicalType::DOUBLE, PacCountStateSize,
+	AggregateFunction pac_count("pac_count", {LogicalType::UBIGINT}, LogicalType::UBIGINT, PacCountStateSize,
 	                            PacCountInitialize, PacCountScatterUpdate, PacCountCombine, PacCountFinalize,
 	                            FunctionNullHandling::DEFAULT_NULL_HANDLING, PacCountUpdate);
 	loader.RegisterFunction(pac_count);
