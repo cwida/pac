@@ -12,12 +12,18 @@
 #include "duckdb/planner/operator/logical_aggregate.hpp"
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
 #include "duckdb/planner/operator/logical_projection.hpp"
+#include "duckdb/planner/operator/logical_dummy_scan.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/common/constants.hpp"
-
-#include <fstream>
-#include <cctype>
+#include <duckdb/planner/planner.hpp>
 #include <duckdb/planner/operator/logical_order.hpp>
+#include "duckdb/common/string_util.hpp"
+#include <fstream>
+#include "duckdb/optimizer/optimizer.hpp"
+
+#include <duckdb/parser/parser.hpp>
+#include <include/logical_plan_to_sql.hpp>
+#include "include/pac_optimizer.hpp"
 
 namespace duckdb {
 
@@ -32,6 +38,7 @@ static void AddRowIDColumn(LogicalGet &get) {
 	}
 	get.AddColumnId(COLUMN_IDENTIFIER_ROW_ID);
 	get.projection_ids.push_back(get.GetColumnIds().size() - 1);
+	get.returned_types.push_back(LogicalTypeId::BIGINT);
 	// We also need to add a column binding for rowid
 	get.GenerateColumnBindings(get.table_index, get.GetColumnIds().size());
 }
@@ -94,7 +101,8 @@ void CreateSampleCTE(ClientContext &context,
         m_cfg = MaxValue<int64_t>(1, m_val.GetValue<int64_t>());
     }
 
-    std::ofstream ofs(filename);
+	// Truncate existing file
+	std::ofstream ofs(filename, std::ofstream::trunc);
     if (!ofs) {
         throw ParserException("PAC: failed to write " + filename);
     }
@@ -107,9 +115,72 @@ void CreateSampleCTE(ClientContext &context,
     ofs << "  SELECT src.rowid, s.sample_id\n";
     ofs << "  FROM " << privacy_unit << " AS src\n";
     ofs << "  CROSS JOIN generate_series(1," << m_cfg << ") AS s(sample_id)\n";
-    ofs << ")\n";
+    ofs << "),\n";
 
     ofs.close();
+}
+
+void CreateQueryJoiningSampleCTE(const std::string &lpts,
+							  const std::string &output_filename) {
+	std::ofstream ofs(output_filename, std::ofstream::app);
+	if (!ofs) {
+		throw ParserException("PAC: failed to write " + output_filename);
+	}
+
+	ofs << "per_sample AS (\n";
+	// Strip the last semicolon
+	ofs << "\t" << lpts.substr(0, lpts.size() - 1) << "\n";
+	ofs << ")\n";
+	ofs.close();
+}
+
+void CreatePacAggregateQuery(const std::string &output_filename,
+							const std::vector<string> &group_names,
+							const std::vector<string> &aggregate_names) {
+	std::ofstream ofs(output_filename, std::ofstream::app);
+	if (!ofs) {
+		throw ParserException("PAC: failed to write " + output_filename);
+	}
+
+	// For each aggregate, we need to compile this query:
+	// SELECT group_key,
+	//		  pac_aggregate(array_agg(sum_val_sample ORDER BY sample_id),
+	//					    array_agg(sum_val_sample ORDER BY sample_id),
+	//						mi,
+	//						k)
+	//		  AS sum_val
+	// FROM per_sample
+	// GROUP BY group_key
+	// ORDER BY group_key;
+
+	// If there is more than one aggregate, we need to join them on group_key
+	// todo - support multiple aggregates
+
+	ofs << "SELECT ";
+	for (idx_t i = 0; i < group_names.size(); i++) {
+		ofs << group_names[i];
+		ofs << ", ";
+	}
+	ofs << "pac_aggregate(array_agg(" << aggregate_names[0] << " ORDER BY sample_id), array_agg(" << aggregate_names[0] << " ORDER BY sample_id), ";
+	// todo - mi, k
+	ofs << "1/128, 3)\n"; // hardcoded m=128, k=3 for now
+	ofs << "FROM per_sample\n";
+	ofs << "GROUP BY ";
+	for (idx_t i = 0; i < group_names.size(); i++) {
+		ofs << group_names[i];
+		if (i < group_names.size() - 1) {
+			ofs << ", ";
+		}
+	}
+	ofs << "\nORDER BY ";
+	for (idx_t i = 0; i < group_names.size(); i++) {
+		ofs << group_names[i];
+		if (i < group_names.size() - 1) {
+			ofs << ", ";
+		}
+	}
+	ofs << ";\n";
+	ofs.close();
 }
 
 // -----------------------------------------------------------------------------
@@ -203,15 +274,12 @@ static void UpdateAggregateGroups(LogicalAggregate *agg, idx_t pac_idx) {
     agg->groups.push_back(
         make_uniq<BoundColumnRefExpression>(
             LogicalType::BIGINT,
-            ColumnBinding(pac_idx, agg->groups.size() + agg->expressions.size()))); // The bottom projection will have the new column at the end
-}
-
-static void UpdateProjection(LogicalProjection *proj, idx_t pac_idx) {
-    if (!proj) return;
-    proj->expressions.push_back(
-        make_uniq<BoundColumnRefExpression>(
-            LogicalType::BIGINT,
-            ColumnBinding(pac_idx, 1)));
+            ColumnBinding(5, 1))); // The bottom projection will have the new column at the end
+	// We also need to update group_stats
+	// create a unique_ptr<BaseStatistics> and push it into agg->group_stats
+	auto sample_id_stats_ptr = BaseStatistics::CreateUnknown(LogicalType::BIGINT).ToUnique();
+	agg->group_stats.push_back(std::move(sample_id_stats_ptr));
+	agg->types.push_back(LogicalType::BIGINT);
 }
 
 // Add the sample_id column to all the projections above the aggregate
@@ -269,11 +337,13 @@ static void UpdateNodesAboveAggregate(unique_ptr<LogicalOperator> &root, Logical
             proj.expressions.push_back(
                 make_uniq<BoundColumnRefExpression>(LogicalType::BIGINT, ColumnBinding(table_idx, col_idx))
             );
+        	proj.types.push_back(LogicalType::BIGINT);
             table_idx = proj.table_index;
             col_idx = proj.expressions.size() - 1;
         } else if (search_node->type == LogicalOperatorType::LOGICAL_ORDER_BY) {
             auto &order_by = search_node->Cast<LogicalOrder>();
         	order_by.projection_map.push_back(col_idx);
+        	order_by.types.push_back(LogicalType::BIGINT);
             // Do NOT update table_idx/col_idx after this step
         }
     }
@@ -300,13 +370,59 @@ void CompilePACQuery(OptimizerExtensionInput &input,
     }
     if (!path.empty() && path.back() != '/') path.push_back('/');
     string filename = path + privacy_unit + "_" + hash + ".sql";
+	CreateSampleCTE(input.context, privacy_unit, filename, normalized);
 
-	// TODO - put filter pushdown here
-	// We can apply filter pushdown before creating the sample CTE to reduce its size
-	// However, we can only apply filters which reference ONLY the privacy unit table with simple predicates
-	// Example: WHERE privacy_unit.col = constant
-	// Complex predicates or predicates referencing other tables cannot be pushed down
-    CreateSampleCTE(input.context, privacy_unit, filename, normalized);
+	// Replan the plan without compressed materialization.
+	// We change the "disabled_optimizers" setting temporarily and re-run the optimizer. Use RAII
+	// to ensure the original setting is always restored.
+	{
+		auto &dbconf = DBConfig::GetConfig(input.context);
+		// If the optimizer extension provided a PACOptimizerInfo, use it to prevent re-entrant replans
+		PACOptimizerInfo *pac_info = nullptr;
+		if (input.info) {
+			pac_info = dynamic_cast<PACOptimizerInfo *>(input.info.get());
+		}
+		// If a replan is already in progress by this extension, skip re-optimizing to avoid recursion
+		if (pac_info && pac_info->replan_in_progress.load(std::memory_order_acquire)) {
+			// skip replan to avoid recursion
+		} else {
+			// set the in-progress flag in RAII manner if pac_info exists
+			struct ReplanGuard {
+				PACOptimizerInfo *info;
+				ReplanGuard(PACOptimizerInfo *i) : info(i) {
+					if (info) info->replan_in_progress.store(true, std::memory_order_release);
+				}
+				~ReplanGuard() {
+					if (info) info->replan_in_progress.store(false, std::memory_order_release);
+				}
+			};
+			ReplanGuard rg(pac_info);
+			Connection con(*input.context.db);
+
+			con.BeginTransaction();
+			// todo: maybe we want to disable more optimizers (internal_optimizer_types)
+			// If column_lifetime is enabled, then the existence of duplicate table indices etc etc is verified.
+			// However, it massively complicates the query tree which is not nice for further usage in OpenIVM.
+			// Therefore, it should be run for verification purposes once in a while (otherwise, turn it off).
+
+			con.Query("SET disabled_optimizers='compressed_materialization, column_lifetime, statistics_propagation, "
+						  "expression_rewriter, filter_pushdown';");
+
+			con.Commit();
+
+			Parser parser;
+			Planner planner(input.context);
+
+			parser.ParseQuery(normalized);
+			auto statement = parser.statements[0].get();
+
+			planner.CreatePlan(statement->Copy());
+
+			Optimizer optimizer(*planner.binder, input.context);
+			plan = optimizer.Optimize(std::move(planner.plan));
+			plan->Print();
+		}
+	}
 
     // 2. Create LogicalGet for sample table
     idx_t sample_idx = GetNextTableIndex(plan);
@@ -360,6 +476,9 @@ void CompilePACQuery(OptimizerExtensionInput &input,
 
     // 5. Update the aggregate node to include the sample column
     auto *agg = FindTopAggregate(plan);
+	// Before updating the aggrgate node, we fetch the group and aggregate names
+	vector<string> group_names;
+	vector<string> aggregate_names;
     UpdateAggregateGroups(agg, parent_proj_idx);
 
     // 6. Update the projection node to include the sample column
@@ -367,7 +486,45 @@ void CompilePACQuery(OptimizerExtensionInput &input,
 
 	plan->ResolveOperatorTypes();
     plan->Verify(input.context);
-    Printer::Print("done");
-}
+	plan->Print();
+    Printer::Print("LPTS output plan after PAC compilation:\n");
+	auto lp_to_sql = LogicalPlanToSql(input.context, plan);
+	auto ir = lp_to_sql.LogicalPlanToIR();
+	Printer::Print(ir->ToQuery(true));
+	CreateQueryJoiningSampleCTE(ir->ToQuery(true), filename);
+	group_names.emplace_back("group_key"); // hardcoded for now
+	aggregate_names.emplace_back("aggregate_0"); // hardcoded for now
+	CreatePacAggregateQuery(filename, group_names, aggregate_names);
+
+	// Now read, plan and execute the query from the file
+	{
+		std::ifstream ifs(filename);
+		if (!ifs) {
+			throw ParserException("PAC: failed to read " + filename);
+		}
+		std::string query((std::istreambuf_iterator<char>(ifs)),
+		                  std::istreambuf_iterator<char>());
+
+		Parser parser;
+    	parser.ParseQuery(query);
+    	auto statement = parser.statements[0].get();
+    	Planner planner(input.context);
+    	planner.CreatePlan(statement->Copy());
+    	Optimizer optimizer(*planner.binder, input.context);
+    	plan = optimizer.Optimize(std::move(planner.plan));
+    	plan->Print();
+	}
+
+	// todo:
+	// figure out how to get aggregate names
+	// run string replace from the internal table
+	// clean up this code
+	// test more queries
+	// implement filter pushdown
+	// optimize pac_aggregate not to pass the same aray twice (when vals = counts)
+	// implement pac_sum final step
+	// test everything
+	// check for robustness with null values
+ }
 
 } // namespace duckdb
