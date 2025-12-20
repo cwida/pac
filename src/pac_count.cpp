@@ -7,17 +7,19 @@
 #include "duckdb/function/aggregate_function.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "pac_aggregate.hpp"
 
 #include <cstring>
 
 namespace duckdb {
 
+AUTOVECTORIZE
 void PacCountState::Flush() {
-	const uint8_t *small = reinterpret_cast<const uint8_t *>(small_totals);
+	const uint8_t *small = reinterpret_cast<const uint8_t *>(totals8);
 	for (int i = 0; i < 64; i++) {
-		totals[i] += small[i];
+		totals64[i] += small[i];
 	}
-	memset(small_totals, 0, sizeof(small_totals));
+	memset(totals8, 0, sizeof(totals8));
 }
 
 idx_t PacCountStateSize(const AggregateFunction &) {
@@ -25,14 +27,11 @@ idx_t PacCountStateSize(const AggregateFunction &) {
 }
 
 void PacCountInitialize(const AggregateFunction &, data_ptr_t state_ptr) {
-	auto &state = *reinterpret_cast<PacCountState *>(state_ptr);
-	state.update_count = 0;
-	memset(state.small_totals, 0, sizeof(state.small_totals));
-	memset(state.totals, 0, sizeof(state.totals));
+	memset(state_ptr, 0, sizeof(PacCountState));
 }
 
 // Internal update helper
-static inline void
+AUTOVECTORIZE static inline void
 PacCountUpdateInternal(const UnifiedVectorFormat &idata, idx_t i, const uint64_t *input_data, PacCountState &state) {
 	auto idx = idata.sel->get_index(i);
 	if (!idata.validity.RowIsValid(idx)) {
@@ -40,7 +39,7 @@ PacCountUpdateInternal(const UnifiedVectorFormat &idata, idx_t i, const uint64_t
 	}
 	uint64_t key_hash = input_data[idx];
 	for (int j = 0; j < 8; j++) {
-		state.small_totals[j] += (key_hash >> j) & PAC_COUNT_MASK;
+		state.totals8[j] += (key_hash >> j) & PAC_COUNT_MASK;
 	}
 	if (++state.update_count == 0) {
 		state.Flush(); // every 256 iterations flush to avoid overflow
@@ -48,7 +47,7 @@ PacCountUpdateInternal(const UnifiedVectorFormat &idata, idx_t i, const uint64_t
 }
 
 void PacCountUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, data_ptr_t state_ptr, idx_t count) {
-	D_ASSERT(input_count == 1);
+	D_ASSERT(input_count == 1 || input_count == 2);
 	auto &state = *reinterpret_cast<PacCountState *>(state_ptr);
 	UnifiedVectorFormat idata;
 	inputs[0].ToUnifiedFormat(count, idata);
@@ -60,7 +59,7 @@ void PacCountUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, da
 }
 
 void PacCountScatterUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, Vector &states, idx_t count) {
-	D_ASSERT(input_count == 1);
+	D_ASSERT(input_count == 1 || input_count == 2);
 	UnifiedVectorFormat idata;
 	inputs[0].ToUnifiedFormat(count, idata);
 	auto input_data = UnifiedVectorFormat::GetData<uint64_t>(idata);
@@ -73,7 +72,7 @@ void PacCountScatterUpdate(Vector inputs[], AggregateInputData &, idx_t input_co
 	}
 }
 
-void PacCountCombine(Vector &source, Vector &target, AggregateInputData &, idx_t count) {
+AUTOVECTORIZE void PacCountCombine(Vector &source, Vector &target, AggregateInputData &, idx_t count) {
 	auto sdata = FlatVector::GetData<PacCountState *>(source);
 	auto tdata = FlatVector::GetData<PacCountState *>(target);
 	for (idx_t i = 0; i < count; i++) {
@@ -82,7 +81,7 @@ void PacCountCombine(Vector &source, Vector &target, AggregateInputData &, idx_t
 		src->Flush();
 		tgt->Flush();
 		for (int j = 0; j < 64; j++) {
-			tgt->totals[j] += src->totals[j];
+			tgt->totals64[j] += src->totals64[j];
 		}
 	}
 }
@@ -120,12 +119,12 @@ void PacCountFinalize(Vector &states, AggregateInputData &aggr_input, Vector &re
         if (state->update_count != 0) {
             state->Flush();
         }
-        // Convert uint64_t totals to double array
+        // Convert uint64_t totals64 to double array
         double counters_d[64];
-        ToDoubleArray(state->totals, counters_d);
-        // Compute noisy sampled result: totals[0] + noise
+        ToDoubleArray(state->totals64, counters_d);
+        // Compute noisy sampled result: totals64[0] + noise
         double noise = PacNoisySampleFrom64Counters(counters_d, mi, gen);
-        uint64_t res = static_cast<uint64_t>(static_cast<double>(state->totals[0]) + noise);
+        uint64_t res = static_cast<uint64_t>(static_cast<double>(state->totals64[0]) + noise);
         rdata[offset + i] = res;
     }
 }

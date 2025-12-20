@@ -10,20 +10,18 @@
 
 namespace duckdb {
 
-// State for pac_count: 64 counters and small_totals intermediate accumulators
+// State for pac_count: 64 counters and totals8 intermediate accumulators
 struct PacCountState {
-	// Totals first for 64-byte alignment (SIMD-friendly)
-	alignas(64) uint64_t totals[64];      // Final counters
-	alignas(64) uint64_t small_totals[8]; // SIMD-friendly intermediate accumulators (8 x 8 bytes -> 64 bytes)
-	uint8_t update_count;                 // Counts updates, flushes when wraps to 0
+	uint64_t totals8[8];   // SIMD-friendly intermediate accumulators (8 x 8 bytes)
+	uint64_t totals64[64]; // Final counters (64 x 8 bytes)
+	uint8_t update_count;  // Counts updates, flushes when wraps to 0
 
 	void Flush();
 };
 
 // Mask used by pac_count inner loops
-#define PAC_COUNT_MASK                                                                                                 \
-	((1ULL << 0) | (1ULL << 8) | (1ULL << 16) | (1ULL << 24) | (1ULL << 32) | (1ULL << 40) | (1ULL << 48) |            \
-	 (1ULL << 56))
+#define PAC_COUNT_MASK  \
+   ((1ULL << 0) | (1ULL << 8) | (1ULL << 16) | (1ULL << 24) | (1ULL << 32) | (1ULL << 40) | (1ULL << 48) | (1ULL << 56))
 
 // Declarations of functions implemented in pac_count.cpp
 idx_t PacCountStateSize(const AggregateFunction &);

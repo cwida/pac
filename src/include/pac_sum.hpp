@@ -8,6 +8,7 @@
 #include "duckdb/common/types/data_chunk.hpp"
 #include "duckdb/common/types/value.hpp"
 #include "duckdb/common/types/string_type.hpp"
+#include "pac_aggregate.hpp"
 
 #include <cstdint>
 #include <random>
@@ -17,18 +18,23 @@
 #ifndef PAC_SUM_HPP
 #define PAC_SUM_HPP
 
-// Enable AVX2 vectorization for update functions
-#define AUTOVECTORIZE __attribute__((target("avx2")))
+//#define PAC_SUM_NONCASCADING 1 seems 10x slower on Apple
+#define PAC_FILTER_MULT 1 // seems 30% faster on Apple
+#ifdef PAC_FILTER_MULT
+#define PAC_FILTER(val, tpe, key, pos) (val * static_cast<tpe>((key >> pos) & 1ULL))
+#else
+#define PAC_FILTER(val, tpe, key, pos) (val & static_cast<tpe>(((key >> pos) & 1ULL)) - 1ULL)
+#endif
 
 namespace duckdb {
 
 // Cascaded float state with float32 and float64 levels
-// Buffer: 512 (totals64) + 256 (totals32) + 64 (alignment) = 832 bytes
 struct PacSumFloatCascadeState {
-	char totals_buf[832];
-	double *totals64;
 #ifndef PAC_SUM_NONCASCADING
-	float *totals32;
+	float totals32[64];
+#endif
+	double totals64[64];
+#ifndef PAC_SUM_NONCASCADING
 	uint32_t count32;
 #endif
 	bool seen_null;
@@ -42,6 +48,7 @@ struct PacSumFloatCascadeState {
 static idx_t PacSumFloatCascadeStateSize(const AggregateFunction &) {
 	return sizeof(PacSumFloatCascadeState);
 }
+
 // Define PAC_SUM_NONCASCADING to disable cascading for benchmarking purposes
 // #define PAC_SUM_NONCASCADING
 
@@ -68,11 +75,6 @@ inline void PacSumFloatCascadeState::Flush32(bool force) {
 }
 #endif
 
-// Helper to align a pointer to 64-byte boundary
-static inline uintptr_t AlignTo64(uintptr_t ptr) {
-	return (ptr + 63) & ~static_cast<uintptr_t>(63);
-}
-
 // Inner AUTOVECTORIZE functions for float cascade
 #ifndef PAC_SUM_NONCASCADING
 AUTOVECTORIZE
@@ -90,27 +92,27 @@ AUTOVECTORIZE
 static inline void AddToTotals8Signed(int8_t *totals, int64_t value, uint64_t key_hash) {
 	int8_t v = static_cast<int8_t>(value);
 	for (int j = 0; j < 64; j++) {
-		totals[j] += v * static_cast<int8_t>((key_hash >> j) & 1ULL);
+		totals[j] += PAC_FILTER(v, int8_t, key_hash , j);
 	}
 }
 AUTOVECTORIZE
 static inline void AddToTotals16Signed(int16_t *totals, int64_t value, uint64_t key_hash) {
 	int16_t v = static_cast<int16_t>(value);
 	for (int j = 0; j < 64; j++) {
-		totals[j] += v * static_cast<int16_t>((key_hash >> j) & 1ULL);
+		totals[j] += PAC_FILTER(v, int16_t, key_hash , j);
 	}
 }
 AUTOVECTORIZE
 static inline void AddToTotals32Signed(int32_t *totals, int64_t value, uint64_t key_hash) {
 	int32_t v = static_cast<int32_t>(value);
 	for (int j = 0; j < 64; j++) {
-		totals[j] += v * static_cast<int32_t>((key_hash >> j) & 1ULL);
+		totals[j] += PAC_FILTER(v, int32_t, key_hash , j);
 	}
 }
 AUTOVECTORIZE
 static inline void AddToTotals64Signed(int64_t *totals, int64_t value, uint64_t key_hash) {
 	for (int j = 0; j < 64; j++) {
-		totals[j] += value * static_cast<int64_t>((key_hash >> j) & 1ULL);
+		totals[j] += PAC_FILTER(value, int64_t, key_hash , j);
 	}
 }
 
@@ -118,27 +120,27 @@ AUTOVECTORIZE
 static inline void AddToTotals8Unsigned(uint8_t *totals, uint64_t value, uint64_t key_hash) {
 	uint8_t v = static_cast<uint8_t>(value);
 	for (int j = 0; j < 64; j++) {
-		totals[j] += v * static_cast<uint8_t>((key_hash >> j) & 1ULL);
+		totals[j] += PAC_FILTER(value, uint8_t, key_hash , j);
 	}
 }
 AUTOVECTORIZE
 static inline void AddToTotals16Unsigned(uint16_t *totals, uint64_t value, uint64_t key_hash) {
 	uint16_t v = static_cast<uint16_t>(value);
 	for (int j = 0; j < 64; j++) {
-		totals[j] += v * static_cast<uint16_t>((key_hash >> j) & 1ULL);
+		totals[j] += PAC_FILTER(value, uint16_t, key_hash , j);
 	}
 }
 AUTOVECTORIZE
 static inline void AddToTotals32Unsigned(uint32_t *totals, uint64_t value, uint64_t key_hash) {
 	uint32_t v = static_cast<uint32_t>(value);
 	for (int j = 0; j < 64; j++) {
-		totals[j] += v * static_cast<uint32_t>((key_hash >> j) & 1ULL);
+		totals[j] += PAC_FILTER(value, uint32_t, key_hash , j);
 	}
 }
 AUTOVECTORIZE
 static inline void AddToTotals64Unsigned(uint64_t *totals, uint64_t value, uint64_t key_hash) {
 	for (int j = 0; j < 64; j++) {
-		totals[j] += value * static_cast<uint64_t>((key_hash >> j) & 1ULL);
+		totals[j] += PAC_FILTER(value, uint64_t, key_hash , j);
 	}
 }
 #endif

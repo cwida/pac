@@ -38,7 +38,7 @@ static inline void PacSumFloatCascadeUpdateInternal(PacSumFloatCascadeState &sta
 template <class FLOAT_TYPE>
 static void PacSumFloatCascadeUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, data_ptr_t state_ptr,
 									 idx_t count) {
-	D_ASSERT(input_count == 2);
+	D_ASSERT(input_count == 2 || input_count == 3);
 	auto &state = *reinterpret_cast<PacSumFloatCascadeState *>(state_ptr);
 	if (state.seen_null) {
 		return;
@@ -65,7 +65,7 @@ static void PacSumFloatCascadeUpdate(Vector inputs[], AggregateInputData &, idx_
 template <class FLOAT_TYPE>
 static void PacSumFloatCascadeScatterUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, Vector &states,
 											idx_t count) {
-	D_ASSERT(input_count == 2);
+	D_ASSERT(input_count == 2 || input_count == 3);
 
 	UnifiedVectorFormat hash_data, value_data, sdata;
 	inputs[0].ToUnifiedFormat(count, hash_data);
@@ -183,15 +183,11 @@ static idx_t PacSumFloatStateSize(const AggregateFunction &) {
 
 template <class FLOAT_TYPE>
 static void PacSumFloatInitialize(const AggregateFunction &, data_ptr_t state_ptr) {
-	auto &state = *reinterpret_cast<PacSumFloatState<FLOAT_TYPE> *>(state_ptr);
-	state.seen_null = false;
-	for (int i = 0; i < 64; i++) {
-		state.sums[i] = FLOAT_TYPE(0);
-	}
+	memset(state_ptr, 0, sizeof(PacSumFloatState<FLOAT_TYPE>));
 }
 
 template <class FLOAT_TYPE>
-static void PacSumFloatCombine(Vector &source, Vector &target, AggregateInputData &, idx_t count) {
+AUTOVECTORIZE static void PacSumFloatCombine(Vector &source, Vector &target, AggregateInputData &, idx_t count) {
 	auto sdata = FlatVector::GetData<PacSumFloatState<FLOAT_TYPE> *>(source);
 	auto tdata = FlatVector::GetData<PacSumFloatState<FLOAT_TYPE> *>(target);
 	for (idx_t i = 0; i < count; i++) {
@@ -244,15 +240,22 @@ static void PacSumFloatFinalize(Vector &states, AggregateInputData &aggr_input, 
 #ifndef PAC_SUM_NONCASCADING
 // Number of top bits reserved for overflow headroom at each level
 // Flush threshold = 2^TopBits (we can safely sum that many values without overflow)
-static constexpr int kTopBits8 = 3;   // threshold 8
-static constexpr int kTopBits16 = 4;  // threshold 16
-static constexpr int kTopBits32 = 5;  // threshold 32
-static constexpr int kTopBits64 = 8;  // threshold 256
+// For signed types, we halve the threshold to account for sign bit
+static constexpr int kTopBits8 = 3;   // threshold 8 (unsigned), 4 (signed)
+static constexpr int kTopBits16 = 4;  // threshold 16 (unsigned), 8 (signed)
+static constexpr int kTopBits32 = 5;  // threshold 32 (unsigned), 16 (signed)
+static constexpr int kTopBits64 = 8;  // threshold 256 (unsigned), 128 (signed)
 
 static constexpr uint32_t kFlushThreshold8 = 1 << kTopBits8;
 static constexpr uint32_t kFlushThreshold16 = 1 << kTopBits16;
 static constexpr uint32_t kFlushThreshold32 = 1 << kTopBits32;
 static constexpr uint32_t kFlushThreshold64 = 1 << kTopBits64;
+
+// Signed thresholds are half of unsigned to account for sign bit
+static constexpr uint32_t kFlushThreshold8Signed = kFlushThreshold8 / 2;
+static constexpr uint32_t kFlushThreshold16Signed = kFlushThreshold16 / 2;
+static constexpr uint32_t kFlushThreshold32Signed = kFlushThreshold32 / 2;
+static constexpr uint32_t kFlushThreshold64Signed = kFlushThreshold64 / 2;
 
 // Signed versions - check magnitude
 static inline bool HasTopBitsSet8(int64_t value) {
@@ -281,16 +284,14 @@ static inline bool HasTopBitsSet32(uint64_t value) {
 #endif
 
 // Signed integer state with cascaded levels
-// Buffer: 64 (totals8) + 128 (totals16) + 256 (totals32) + 512 (totals64) + 1024 (totals128) + 64 (alignment) = 2048 bytes
 struct PacSumSignedState {
-	char totals_buf[2048];
 #ifndef PAC_SUM_NONCASCADING
-	int8_t *totals8;
-	int16_t *totals16;
-	int32_t *totals32;
-	int64_t *totals64;
+	int8_t totals8[64];
+	int16_t totals16[64];
+	int32_t totals32[64];
+	int64_t totals64[64];
 #endif
-	hugeint_t *totals128;
+	hugeint_t totals128[64];
 #ifndef PAC_SUM_NONCASCADING
 	uint32_t count8;
 	uint32_t count16;
@@ -302,7 +303,7 @@ struct PacSumSignedState {
 #ifndef PAC_SUM_NONCASCADING
 	// Flush totals64 -> totals128
 	inline void Flush64(bool force) {
-		if (force || count64 >= kFlushThreshold64) {
+		if (force || count64 >= kFlushThreshold64Signed) {
 			for (int i = 0; i < 64; i++) {
 				totals128[i] += hugeint_t(totals64[i]);
 				totals64[i] = 0;
@@ -313,7 +314,7 @@ struct PacSumSignedState {
 
 	// Flush totals32 -> totals64, then cascade
 	inline void Flush32(bool force) {
-		if (force || count32 >= kFlushThreshold32) {
+		if (force || count32 >= kFlushThreshold32Signed) {
 			for (int i = 0; i < 64; i++) {
 				totals64[i] += totals32[i];
 				totals32[i] = 0;
@@ -326,7 +327,7 @@ struct PacSumSignedState {
 
 	// Flush totals16 -> totals32, then cascade
 	inline void Flush16(bool force) {
-		if (force || count16 >= kFlushThreshold16) {
+		if (force || count16 >= kFlushThreshold16Signed) {
 			for (int i = 0; i < 64; i++) {
 				totals32[i] += totals16[i];
 				totals16[i] = 0;
@@ -339,7 +340,7 @@ struct PacSumSignedState {
 
 	// Flush totals8 -> totals16, then cascade
 	inline void Flush8(bool force) {
-		if (force || count8 >= kFlushThreshold8) {
+		if (force || count8 >= kFlushThreshold8Signed) {
 			for (int i = 0; i < 64; i++) {
 				totals16[i] += totals8[i];
 				totals8[i] = 0;
@@ -353,16 +354,14 @@ struct PacSumSignedState {
 };
 
 // Unsigned integer state with cascaded levels
-// Buffer: 64 (totals8) + 128 (totals16) + 256 (totals32) + 512 (totals64) + 1024 (totals128) + 64 (alignment) = 2048 bytes
 struct PacSumUnsignedState {
-	char totals_buf[2048];
 #ifndef PAC_SUM_NONCASCADING
-	uint8_t *totals8;
-	uint16_t *totals16;
-	uint32_t *totals32;
-	uint64_t *totals64;
+	uint8_t totals8[64];
+	uint16_t totals16[64];
+	uint32_t totals32[64];
+	uint64_t totals64[64];
 #endif
-	hugeint_t *totals128;
+	hugeint_t totals128[64];
 #ifndef PAC_SUM_NONCASCADING
 	uint32_t count8;
 	uint32_t count16;
@@ -434,46 +433,11 @@ static idx_t PacSumIntegerStateSize(const AggregateFunction &) {
 }
 
 static void PacSumSignedInitialize(PacSumSignedState &state) {
-	memset(state.totals_buf, 0, sizeof(state.totals_buf));
-
-	// Compute aligned pointers into totals_buf
-	// Layout: totals128 (1024) | totals64 (512) | totals32 (256) | totals16 (128) | totals8 (64)
-	uintptr_t base = AlignTo64(reinterpret_cast<uintptr_t>(state.totals_buf));
-	state.totals128 = reinterpret_cast<hugeint_t *>(base);
-#ifndef PAC_SUM_NONCASCADING
-	state.totals8 = reinterpret_cast<int8_t *>(base);
-	state.totals16 = reinterpret_cast<int16_t *>(base + 64);
-	state.totals32 = reinterpret_cast<int32_t *>(base + 64 + 128);
-	state.totals64 = reinterpret_cast<int64_t *>(base + 64 + 128 + 256);
-	state.totals128 = reinterpret_cast<hugeint_t *>(base + 64 + 128 + 256 + 512);
-	state.count8 = 0;
-	state.count16 = 0;
-	state.count32 = 0;
-
-	state.count64 = 0;
-#endif
-	state.seen_null = false;
+	memset(&state, 0, sizeof(state));
 }
 
 static void PacSumUnsignedInitialize(PacSumUnsignedState &state) {
-	memset(state.totals_buf, 0, sizeof(state.totals_buf));
-
-	// Compute aligned pointers into totals_buf
-	// Layout: totals128 (1024) | totals64 (512) | totals32 (256) | totals16 (128) | totals8 (64)
-	uintptr_t base = AlignTo64(reinterpret_cast<uintptr_t>(state.totals_buf));
-	state.totals128 = reinterpret_cast<hugeint_t *>(base);
-#ifndef PAC_SUM_NONCASCADING
-	state.totals8 = reinterpret_cast<uint8_t *>(base);
-	state.totals16 = reinterpret_cast<uint16_t *>(base + 64);
-	state.totals32 = reinterpret_cast<uint32_t *>(base + 64 + 128);
-	state.totals64 = reinterpret_cast<uint64_t *>(base + 64 + 128 + 256);
-	state.totals128 = reinterpret_cast<hugeint_t *>(base + 64 + 128 + 256 + 512);
-	state.count8 = 0;
-	state.count16 = 0;
-	state.count32 = 0;
-	state.count64 = 0;
-#endif
-	state.seen_null = false;
+	memset(&state, 0, sizeof(state));
 }
 
 template <class INPUT_TYPE, class ACC_TYPE>
@@ -537,7 +501,7 @@ static inline void PacSumUnsignedUpdateInternal(PacSumUnsignedState &state, uint
 	template <class INPUT_TYPE>
 	static void PacSumSignedUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, data_ptr_t state_ptr,
 								   idx_t count) {
-		D_ASSERT(input_count == 2);
+		D_ASSERT(input_count == 2 || input_count == 3);
 		auto &state = *reinterpret_cast<PacSumSignedState *>(state_ptr);
 		if (state.seen_null) {
 			return;
@@ -564,7 +528,7 @@ static inline void PacSumUnsignedUpdateInternal(PacSumUnsignedState &state, uint
 	template <class INPUT_TYPE>
 	static void PacSumUnsignedUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, data_ptr_t state_ptr,
 									 idx_t count) {
-		D_ASSERT(input_count == 2);
+		D_ASSERT(input_count == 2 || input_count == 3);
 		auto &state = *reinterpret_cast<PacSumUnsignedState *>(state_ptr);
 		if (state.seen_null) {
 			return;
@@ -602,7 +566,7 @@ static inline void PacSumUnsignedUpdateInternal(PacSumUnsignedState &state, uint
 	template <class INPUT_TYPE>
 	static void PacSumSignedScatterUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, Vector &states,
 										  idx_t count) {
-		D_ASSERT(input_count == 2);
+		D_ASSERT(input_count == 2 || input_count == 3);
 
 		UnifiedVectorFormat hash_data, value_data, sdata;
 		inputs[0].ToUnifiedFormat(count, hash_data);
@@ -634,7 +598,7 @@ static inline void PacSumUnsignedUpdateInternal(PacSumUnsignedState &state, uint
 	template <class INPUT_TYPE>
 	static void PacSumUnsignedScatterUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, Vector &states,
 											idx_t count) {
-		D_ASSERT(input_count == 2);
+		D_ASSERT(input_count == 2 || input_count == 3);
 
 		UnifiedVectorFormat hash_data, value_data, sdata;
 		inputs[0].ToUnifiedFormat(count, hash_data);
@@ -815,7 +779,7 @@ static inline void PacSumUnsignedUpdateInternal(PacSumUnsignedState &state, uint
 	// UHUGEINT -> DOUBLE (like DuckDB's SUM): reads uhugeint_t, accumulates as double
 	static void PacSumUpdateUHugeIntToDouble(Vector inputs[], AggregateInputData &, idx_t input_count, data_ptr_t state_ptr,
 											 idx_t count) {
-		D_ASSERT(input_count == 2);
+		D_ASSERT(input_count == 2 || input_count == 3);
 		auto &state = *reinterpret_cast<PacSumFloatState<double> *>(state_ptr);
 
 		if (state.seen_null) {
@@ -846,7 +810,7 @@ static inline void PacSumUnsignedUpdateInternal(PacSumUnsignedState &state, uint
 
 	static void PacSumScatterUHugeIntToDouble(Vector inputs[], AggregateInputData &, idx_t input_count, Vector &states,
 											  idx_t count) {
-		D_ASSERT(input_count == 2);
+		D_ASSERT(input_count == 2 || input_count == 3);
 
 		UnifiedVectorFormat hash_data, value_data, state_data;
 		inputs[0].ToUnifiedFormat(count, hash_data);
@@ -879,17 +843,7 @@ static inline void PacSumUnsignedUpdateInternal(PacSumUnsignedState &state, uint
 	}
 
 	static void PacSumFloatCascadeInitialize(const AggregateFunction &, data_ptr_t state_ptr) {
-		auto &state = *reinterpret_cast<PacSumFloatCascadeState *>(state_ptr);
-		memset(state.totals_buf, 0, sizeof(state.totals_buf));
-
-		// Compute aligned pointers into totals_buf
-		uintptr_t base = AlignTo64(reinterpret_cast<uintptr_t>(state.totals_buf));
-		state.totals64 = reinterpret_cast<double *>(base);  // 64 * 8 = 512 bytes
-#ifndef PAC_SUM_NONCASCADING
-		state.totals32 = reinterpret_cast<float *>(base + 512);  // 64 * 4 = 256 bytes
-		state.count32 = 0;
-#endif
-		state.seen_null = false;
+		memset(state_ptr, 0, sizeof(PacSumFloatCascadeState));
 	}
 
 // Forward declarations for Combine/Finalize wrappers referenced in RegisterPacSumFunctions

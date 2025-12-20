@@ -4,6 +4,9 @@
 #include "duckdb.hpp"
 #include <vector>
 
+// Enable AVX2 vectorization for functions that get this preappended (useful for x86, harmless for arm)
+#define AUTOVECTORIZE __attribute__((target("avx2")))
+
 namespace duckdb {
 
 // Header for PAC aggregate helpers and public declarations used across pac_* files.
