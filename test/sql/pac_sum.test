@@ -19,11 +19,17 @@ SELECT pac_sum(hash(rowid)::UBIGINT, value::INTEGER) IS NOT NULL FROM test_data
 ----
 true
 
-# Verify returns DOUBLE
+# Verify returns HUGEINT for signed integers
 query I
 SELECT typeof(pac_sum(hash(rowid)::UBIGINT, value::INTEGER)) FROM test_data
 ----
-DOUBLE
+HUGEINT
+
+# Test with explicit mi parameter (128.0)
+query I
+SELECT pac_sum(hash(rowid)::UBIGINT, value::INTEGER, 128.0) IS NOT NULL FROM test_data
+----
+true
 
 # Grouped pac_sum
 query II

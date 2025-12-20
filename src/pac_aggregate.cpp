@@ -125,14 +125,14 @@ static void PacCountCombine(Vector &source, Vector &target, AggregateInputData &
 	}
 }
 
-// Finalize: compute noisy sample from the 64 counters
-static double PacNoisySampleFrom64Counters(const uint64_t counters[64], double mi, std::mt19937_64 &gen) {
+// Finalize: compute noisy sample from the 64 counters (works on double array)
+static double PacNoisySampleFrom64Counters(const double counters[64], double mi, std::mt19937_64 &gen) {
     constexpr int N = 64;
     // Compute sum and sum-of-squares in one pass (auto-vectorizable?)
     double S = 0.0;
     double Q = 0.0;
     for (int i = 0; i < N; ++i) {
-        double v = (double)counters[i];
+        double v = counters[i];
         S += v;
         Q += v * v;
     }
@@ -140,7 +140,7 @@ static double PacNoisySampleFrom64Counters(const uint64_t counters[64], double m
     // Pick random index J in [0, N-1]
     std::uniform_int_distribution<int> uid(0, N - 1);
     int J = uid(gen);
-    double yJ = (double)counters[J];
+    double yJ = counters[J];
 
     // Compute leave-one-out sums
     const double n1 = double(N - 1);           // 63.0
@@ -171,26 +171,6 @@ static double PacNoisySampleFrom64Counters(const uint64_t counters[64], double m
     return yJ + gauss(gen);
 }
 
-
-static void PacCountFinalize(Vector &states, AggregateInputData &, Vector &result, idx_t count, idx_t offset) {
-    auto sdata = FlatVector::GetData<PacCountState *>(states);
-    auto rdata = FlatVector::GetData<uint64_t>(result);
-
-    // Default mi (fixme)
-    const double mi_default = 128.0;
-    thread_local std::mt19937_64 gen(std::random_device{}());
-
-    for (idx_t i = 0; i < count; i++) {
-        auto state = sdata[i];
-        if (state->update_count != 0) {
-            state->Flush();
-        }
-        // Compute noisy sampled result from the 64 counters
-        uint64_t res = state->totals[0] + PacNoisySampleFrom64Counters(state->totals, mi_default, gen);
-        rdata[offset + i] = res;
-    }
-}
-
 // ============================================================================
 // pac_sum aggregate function
 // ============================================================================
@@ -215,6 +195,67 @@ inline double ToDouble<hugeint_t>(const hugeint_t &val) {
 template <>
 inline double ToDouble<uhugeint_t>(const uhugeint_t &val) {
 	return Uhugeint::Cast<double>(val);
+}
+
+// Bind data to store the mi parameter for pac_count and pac_sum
+struct PacBindData : public FunctionData {
+	double mi;
+	explicit PacBindData(double mi_val) : mi(mi_val) {}
+	unique_ptr<FunctionData> Copy() const override {
+		return make_uniq<PacBindData>(mi);
+	}
+	bool Equals(const FunctionData &other) const override {
+		return mi == other.Cast<PacBindData>().mi;
+	}
+};
+
+// Helper to convert any totals array to double[64]
+template <class T>
+static inline void ToDoubleArray(const T *src, double *dst) {
+	for (int i = 0; i < 64; i++) {
+		dst[i] = ToDouble(src[i]);
+	}
+}
+
+// Helper to convert double to accumulator type
+template <class T>
+static inline T FromDouble(double val);
+
+template <>
+inline hugeint_t FromDouble<hugeint_t>(double val) {
+	return Hugeint::Convert(static_cast<int64_t>(val));
+}
+
+template <>
+inline uhugeint_t FromDouble<uhugeint_t>(double val) {
+	return Uhugeint::Convert(static_cast<uint64_t>(val));
+}
+
+// pac_count finalize - moved here to have access to PacBindData and ToDoubleArray
+static void PacCountFinalize(Vector &states, AggregateInputData &aggr_input, Vector &result, idx_t count, idx_t offset) {
+    auto sdata = FlatVector::GetData<PacCountState *>(states);
+    auto rdata = FlatVector::GetData<uint64_t>(result);
+
+    // Get mi from bind data, default to 128.0
+    double mi = 128.0;
+    if (aggr_input.bind_data) {
+        mi = aggr_input.bind_data->Cast<PacBindData>().mi;
+    }
+    thread_local std::mt19937_64 gen(std::random_device{}());
+
+    for (idx_t i = 0; i < count; i++) {
+        auto state = sdata[i];
+        if (state->update_count != 0) {
+            state->Flush();
+        }
+        // Convert uint64_t totals to double array
+        double counters_d[64];
+        ToDoubleArray(state->totals, counters_d);
+        // Compute noisy sampled result: totals[0] + noise
+        double noise = PacNoisySampleFrom64Counters(counters_d, mi, gen);
+        uint64_t res = static_cast<uint64_t>(static_cast<double>(state->totals[0]) + noise);
+        rdata[offset + i] = res;
+    }
 }
 
 // =========================
@@ -387,10 +428,17 @@ static void PacSumFloatCombine(Vector &source, Vector &target, AggregateInputDat
 }
 
 template <class FLOAT_TYPE>
-static void PacSumFloatFinalize(Vector &states, AggregateInputData &, Vector &result, idx_t count, idx_t offset) {
+static void PacSumFloatFinalize(Vector &states, AggregateInputData &aggr_input, Vector &result, idx_t count, idx_t offset) {
 	auto sdata = FlatVector::GetData<PacSumFloatState<FLOAT_TYPE> *>(states);
 	auto rdata = FlatVector::GetData<double>(result);
 	auto &result_mask = FlatVector::Validity(result);
+
+	// Get mi from bind data, default to 128.0
+	double mi = 128.0;
+	if (aggr_input.bind_data) {
+		mi = aggr_input.bind_data->Cast<PacBindData>().mi;
+	}
+	thread_local std::mt19937_64 gen(std::random_device{}());
 
 	for (idx_t i = 0; i < count; i++) {
 		auto state = sdata[i];
@@ -400,20 +448,12 @@ static void PacSumFloatFinalize(Vector &states, AggregateInputData &, Vector &re
 			continue;
 		}
 
-		double total = 0.0;
-		for (int j = 0; j < 64; j++) {
-			total += static_cast<double>(state->sums[j]);
-		}
-		double mean = total / 64.0;
-
-		double variance = 0.0;
-		for (int j = 0; j < 64; j++) {
-			double diff = static_cast<double>(state->sums[j]) - mean;
-			variance += diff * diff;
-		}
-		variance /= 64.0;
-
-		rdata[offset + i] = variance;
+		// Convert sums to double array
+		double sums_d[64];
+		ToDoubleArray(state->sums, sums_d);
+		// Compute noisy sampled result: sums[0] + noise
+		double noise = PacNoisySampleFrom64Counters(sums_d, mi, gen);
+		rdata[offset + i] = static_cast<double>(state->sums[0]) + noise;
 	}
 }
 
@@ -646,10 +686,17 @@ static void PacSumIntegerCombine(Vector &source, Vector &target, AggregateInputD
 }
 
 template <class INPUT_TYPE, class ACC_TYPE>
-static void PacSumIntegerFinalize(Vector &states, AggregateInputData &, Vector &result, idx_t count, idx_t offset) {
+static void PacSumIntegerFinalize(Vector &states, AggregateInputData &aggr_input, Vector &result, idx_t count, idx_t offset) {
 	auto sdata = FlatVector::GetData<PacSumIntegerState<INPUT_TYPE, ACC_TYPE> *>(states);
-	auto rdata = FlatVector::GetData<double>(result);
+	auto rdata = FlatVector::GetData<ACC_TYPE>(result);
 	auto &result_mask = FlatVector::Validity(result);
+
+	// Get mi from bind data, default to 128.0
+	double mi = 128.0;
+	if (aggr_input.bind_data) {
+		mi = aggr_input.bind_data->Cast<PacBindData>().mi;
+	}
+	thread_local std::mt19937_64 gen(std::random_device{}());
 
 	for (idx_t i = 0; i < count; i++) {
 		auto state = sdata[i];
@@ -664,20 +711,14 @@ static void PacSumIntegerFinalize(Vector &states, AggregateInputData &, Vector &
 			state->Flush();
 		}
 
-		double total = 0.0;
-		for (int j = 0; j < 64; j++) {
-			total += ToDouble(state->totals[j]);
-		}
-		double mean = total / 64.0;
-
-		double variance = 0.0;
-		for (int j = 0; j < 64; j++) {
-			double diff = ToDouble(state->totals[j]) - mean;
-			variance += diff * diff;
-		}
-		variance /= 64.0;
-
-		rdata[offset + i] = variance;
+		// Convert totals to double array
+		double totals_d[64];
+		ToDoubleArray(state->totals, totals_d);
+		// Compute noisy sampled result: totals[0] + noise
+		double noise = PacNoisySampleFrom64Counters(totals_d, mi, gen);
+		double result_d = ToDouble(state->totals[0]) + noise;
+		// Cast back to accumulator type
+		rdata[offset + i] = FromDouble<ACC_TYPE>(result_d);
 	}
 }
 
@@ -1038,6 +1079,40 @@ DUCKDB_API void PacAggregateScalar(DataChunk &args, ExpressionState &state, Vect
 	}
 }
 
+// Bind function for pac_count with optional mi parameter
+static unique_ptr<FunctionData> PacCountBind(ClientContext &context, AggregateFunction &function,
+                                             vector<unique_ptr<Expression>> &arguments) {
+	double mi = 128.0; // default
+	if (arguments.size() >= 2) {
+		if (!arguments[1]->IsFoldable()) {
+			throw InvalidInputException("pac_count: mi parameter must be a constant");
+		}
+		auto mi_val = ExpressionExecutor::EvaluateScalar(context, *arguments[1]);
+		mi = mi_val.GetValue<double>();
+		if (mi <= 0.0) {
+			throw InvalidInputException("pac_count: mi must be > 0");
+		}
+	}
+	return make_uniq<PacBindData>(mi);
+}
+
+// Bind function for pac_sum with optional mi parameter
+static unique_ptr<FunctionData> PacSumBind(ClientContext &context, AggregateFunction &function,
+                                           vector<unique_ptr<Expression>> &arguments) {
+	double mi = 128.0; // default
+	if (arguments.size() >= 3) {
+		if (!arguments[2]->IsFoldable()) {
+			throw InvalidInputException("pac_sum: mi parameter must be a constant");
+		}
+		auto mi_val = ExpressionExecutor::EvaluateScalar(context, *arguments[2]);
+		mi = mi_val.GetValue<double>();
+		if (mi <= 0.0) {
+			throw InvalidInputException("pac_sum: mi must be > 0");
+		}
+	}
+	return make_uniq<PacBindData>(mi);
+}
+
 void RegisterPacAggregateFunctions(ExtensionLoader &loader) {
 	auto fun = ScalarFunction(
 		"pac_aggregate",
@@ -1054,85 +1129,179 @@ void RegisterPacAggregateFunctions(ExtensionLoader &loader) {
 	loader.RegisterFunction(fun);
 
 	// Register pac_count aggregate function
-	// Input: UBIGINT key_hash
-	// Output: UBIGINT (variance of the 64 bit counters)
+	// Input: UBIGINT key_hash, optional DOUBLE mi
+	// Output: UBIGINT (PAC-noised count)
 	// Uses SIMD-friendly update with intermediate accumulators
-	AggregateFunction pac_count("pac_count", {LogicalType::UBIGINT}, LogicalType::UBIGINT, PacCountStateSize,
-	                            PacCountInitialize, PacCountScatterUpdate, PacCountCombine, PacCountFinalize,
-	                            FunctionNullHandling::DEFAULT_NULL_HANDLING, PacCountUpdate);
-	loader.RegisterFunction(pac_count);
+	AggregateFunctionSet pac_count_set("pac_count");
+
+	// Without mi parameter (uses default mi=128)
+	AggregateFunction pac_count_1("pac_count", {LogicalType::UBIGINT}, LogicalType::UBIGINT, PacCountStateSize,
+	                              PacCountInitialize, PacCountScatterUpdate, PacCountCombine, PacCountFinalize,
+	                              FunctionNullHandling::DEFAULT_NULL_HANDLING, PacCountUpdate, PacCountBind);
+	pac_count_set.AddFunction(pac_count_1);
+
+	// With mi parameter
+	AggregateFunction pac_count_2("pac_count", {LogicalType::UBIGINT, LogicalType::DOUBLE}, LogicalType::UBIGINT,
+	                              PacCountStateSize, PacCountInitialize, PacCountScatterUpdate, PacCountCombine,
+	                              PacCountFinalize, FunctionNullHandling::DEFAULT_NULL_HANDLING, PacCountUpdate,
+	                              PacCountBind);
+	pac_count_set.AddFunction(pac_count_2);
+
+	loader.RegisterFunction(pac_count_set);
 
 	// Register pac_sum aggregate function set
-	// Input: (UBIGINT key_hash, <numeric> value)
-	// Output: DOUBLE (variance of the 64 sums)
+	// Input: (UBIGINT key_hash, <numeric> value, optional DOUBLE mi)
+	// Output: HUGEINT for signed integers, UHUGEINT for unsigned integers, DOUBLE for floats
 	// Supports all numeric types that SUM supports
 	AggregateFunctionSet pac_sum_set("pac_sum");
 
-	// Signed integers (use PacSumIntegerState<INPUT_TYPE, hugeint_t>)
+	// Helper macro to add both 2-arg and 3-arg versions
+#define ADD_PAC_SUM_INT(INPUT_TYPE, ACC_TYPE, RESULT_TYPE, ScatterFn, CombineFn, FinalizeFn, UpdateFn) \
+	pac_sum_set.AddFunction(AggregateFunction( \
+	    "pac_sum", {LogicalType::UBIGINT, INPUT_TYPE}, RESULT_TYPE, \
+	    PacSumIntegerStateSize<ACC_TYPE, ACC_TYPE>, PacSumIntegerInitialize<ACC_TYPE, ACC_TYPE>, ScatterFn, \
+	    CombineFn, FinalizeFn, FunctionNullHandling::DEFAULT_NULL_HANDLING, UpdateFn, PacSumBind)); \
+	pac_sum_set.AddFunction(AggregateFunction( \
+	    "pac_sum", {LogicalType::UBIGINT, INPUT_TYPE, LogicalType::DOUBLE}, RESULT_TYPE, \
+	    PacSumIntegerStateSize<ACC_TYPE, ACC_TYPE>, PacSumIntegerInitialize<ACC_TYPE, ACC_TYPE>, ScatterFn, \
+	    CombineFn, FinalizeFn, FunctionNullHandling::DEFAULT_NULL_HANDLING, UpdateFn, PacSumBind))
+
+	// Signed integers (accumulate to hugeint_t, return HUGEINT)
 	pac_sum_set.AddFunction(AggregateFunction(
-	    "pac_sum", {LogicalType::UBIGINT, LogicalType::TINYINT}, LogicalType::DOUBLE,
+	    "pac_sum", {LogicalType::UBIGINT, LogicalType::TINYINT}, LogicalType::HUGEINT,
 	    PacSumIntegerStateSize<int8_t, hugeint_t>, PacSumIntegerInitialize<int8_t, hugeint_t>, PacSumScatterTinyInt,
 	    PacSumCombineTinyInt, PacSumFinalizeTinyInt, FunctionNullHandling::DEFAULT_NULL_HANDLING,
-	    PacSumUpdateTinyInt));
+	    PacSumUpdateTinyInt, PacSumBind));
 	pac_sum_set.AddFunction(AggregateFunction(
-	    "pac_sum", {LogicalType::UBIGINT, LogicalType::SMALLINT}, LogicalType::DOUBLE,
+	    "pac_sum", {LogicalType::UBIGINT, LogicalType::TINYINT, LogicalType::DOUBLE}, LogicalType::HUGEINT,
+	    PacSumIntegerStateSize<int8_t, hugeint_t>, PacSumIntegerInitialize<int8_t, hugeint_t>, PacSumScatterTinyInt,
+	    PacSumCombineTinyInt, PacSumFinalizeTinyInt, FunctionNullHandling::DEFAULT_NULL_HANDLING,
+	    PacSumUpdateTinyInt, PacSumBind));
+
+	pac_sum_set.AddFunction(AggregateFunction(
+	    "pac_sum", {LogicalType::UBIGINT, LogicalType::SMALLINT}, LogicalType::HUGEINT,
 	    PacSumIntegerStateSize<int16_t, hugeint_t>, PacSumIntegerInitialize<int16_t, hugeint_t>, PacSumScatterSmallInt,
 	    PacSumCombineSmallInt, PacSumFinalizeSmallInt, FunctionNullHandling::DEFAULT_NULL_HANDLING,
-	    PacSumUpdateSmallInt));
+	    PacSumUpdateSmallInt, PacSumBind));
 	pac_sum_set.AddFunction(AggregateFunction(
-	    "pac_sum", {LogicalType::UBIGINT, LogicalType::INTEGER}, LogicalType::DOUBLE,
+	    "pac_sum", {LogicalType::UBIGINT, LogicalType::SMALLINT, LogicalType::DOUBLE}, LogicalType::HUGEINT,
+	    PacSumIntegerStateSize<int16_t, hugeint_t>, PacSumIntegerInitialize<int16_t, hugeint_t>, PacSumScatterSmallInt,
+	    PacSumCombineSmallInt, PacSumFinalizeSmallInt, FunctionNullHandling::DEFAULT_NULL_HANDLING,
+	    PacSumUpdateSmallInt, PacSumBind));
+
+	pac_sum_set.AddFunction(AggregateFunction(
+	    "pac_sum", {LogicalType::UBIGINT, LogicalType::INTEGER}, LogicalType::HUGEINT,
 	    PacSumIntegerStateSize<int32_t, hugeint_t>, PacSumIntegerInitialize<int32_t, hugeint_t>, PacSumScatterInteger,
 	    PacSumCombineInteger, PacSumFinalizeInteger, FunctionNullHandling::DEFAULT_NULL_HANDLING,
-	    PacSumUpdateInteger));
+	    PacSumUpdateInteger, PacSumBind));
 	pac_sum_set.AddFunction(AggregateFunction(
-	    "pac_sum", {LogicalType::UBIGINT, LogicalType::BIGINT}, LogicalType::DOUBLE,
+	    "pac_sum", {LogicalType::UBIGINT, LogicalType::INTEGER, LogicalType::DOUBLE}, LogicalType::HUGEINT,
+	    PacSumIntegerStateSize<int32_t, hugeint_t>, PacSumIntegerInitialize<int32_t, hugeint_t>, PacSumScatterInteger,
+	    PacSumCombineInteger, PacSumFinalizeInteger, FunctionNullHandling::DEFAULT_NULL_HANDLING,
+	    PacSumUpdateInteger, PacSumBind));
+
+	pac_sum_set.AddFunction(AggregateFunction(
+	    "pac_sum", {LogicalType::UBIGINT, LogicalType::BIGINT}, LogicalType::HUGEINT,
 	    PacSumIntegerStateSize<int64_t, hugeint_t>, PacSumIntegerInitialize<int64_t, hugeint_t>, PacSumScatterBigInt,
 	    PacSumCombineBigInt, PacSumFinalizeBigInt, FunctionNullHandling::DEFAULT_NULL_HANDLING,
-	    PacSumUpdateBigInt));
+	    PacSumUpdateBigInt, PacSumBind));
 	pac_sum_set.AddFunction(AggregateFunction(
-	    "pac_sum", {LogicalType::UBIGINT, LogicalType::HUGEINT}, LogicalType::DOUBLE,
+	    "pac_sum", {LogicalType::UBIGINT, LogicalType::BIGINT, LogicalType::DOUBLE}, LogicalType::HUGEINT,
+	    PacSumIntegerStateSize<int64_t, hugeint_t>, PacSumIntegerInitialize<int64_t, hugeint_t>, PacSumScatterBigInt,
+	    PacSumCombineBigInt, PacSumFinalizeBigInt, FunctionNullHandling::DEFAULT_NULL_HANDLING,
+	    PacSumUpdateBigInt, PacSumBind));
+
+	pac_sum_set.AddFunction(AggregateFunction(
+	    "pac_sum", {LogicalType::UBIGINT, LogicalType::HUGEINT}, LogicalType::HUGEINT,
 	    PacSumIntegerStateSize<hugeint_t, hugeint_t>, PacSumIntegerInitialize<hugeint_t, hugeint_t>,
 	    PacSumScatterHugeInt, PacSumCombineHugeInt, PacSumFinalizeHugeInt,
-	    FunctionNullHandling::DEFAULT_NULL_HANDLING, PacSumUpdateHugeInt));
-
-	// Unsigned integers (use PacSumIntegerState<INPUT_TYPE, uhugeint_t>)
+	    FunctionNullHandling::DEFAULT_NULL_HANDLING, PacSumUpdateHugeInt, PacSumBind));
 	pac_sum_set.AddFunction(AggregateFunction(
-	    "pac_sum", {LogicalType::UBIGINT, LogicalType::UTINYINT}, LogicalType::DOUBLE,
+	    "pac_sum", {LogicalType::UBIGINT, LogicalType::HUGEINT, LogicalType::DOUBLE}, LogicalType::HUGEINT,
+	    PacSumIntegerStateSize<hugeint_t, hugeint_t>, PacSumIntegerInitialize<hugeint_t, hugeint_t>,
+	    PacSumScatterHugeInt, PacSumCombineHugeInt, PacSumFinalizeHugeInt,
+	    FunctionNullHandling::DEFAULT_NULL_HANDLING, PacSumUpdateHugeInt, PacSumBind));
+
+	// Unsigned integers (accumulate to uhugeint_t, return UHUGEINT)
+	pac_sum_set.AddFunction(AggregateFunction(
+	    "pac_sum", {LogicalType::UBIGINT, LogicalType::UTINYINT}, LogicalType::UHUGEINT,
 	    PacSumIntegerStateSize<uint8_t, uhugeint_t>, PacSumIntegerInitialize<uint8_t, uhugeint_t>,
 	    PacSumScatterUTinyInt, PacSumCombineUTinyInt, PacSumFinalizeUTinyInt,
-	    FunctionNullHandling::DEFAULT_NULL_HANDLING, PacSumUpdateUTinyInt));
+	    FunctionNullHandling::DEFAULT_NULL_HANDLING, PacSumUpdateUTinyInt, PacSumBind));
 	pac_sum_set.AddFunction(AggregateFunction(
-	    "pac_sum", {LogicalType::UBIGINT, LogicalType::USMALLINT}, LogicalType::DOUBLE,
+	    "pac_sum", {LogicalType::UBIGINT, LogicalType::UTINYINT, LogicalType::DOUBLE}, LogicalType::UHUGEINT,
+	    PacSumIntegerStateSize<uint8_t, uhugeint_t>, PacSumIntegerInitialize<uint8_t, uhugeint_t>,
+	    PacSumScatterUTinyInt, PacSumCombineUTinyInt, PacSumFinalizeUTinyInt,
+	    FunctionNullHandling::DEFAULT_NULL_HANDLING, PacSumUpdateUTinyInt, PacSumBind));
+
+	pac_sum_set.AddFunction(AggregateFunction(
+	    "pac_sum", {LogicalType::UBIGINT, LogicalType::USMALLINT}, LogicalType::UHUGEINT,
 	    PacSumIntegerStateSize<uint16_t, uhugeint_t>, PacSumIntegerInitialize<uint16_t, uhugeint_t>,
 	    PacSumScatterUSmallInt, PacSumCombineUSmallInt, PacSumFinalizeUSmallInt,
-	    FunctionNullHandling::DEFAULT_NULL_HANDLING, PacSumUpdateUSmallInt));
+	    FunctionNullHandling::DEFAULT_NULL_HANDLING, PacSumUpdateUSmallInt, PacSumBind));
 	pac_sum_set.AddFunction(AggregateFunction(
-	    "pac_sum", {LogicalType::UBIGINT, LogicalType::UINTEGER}, LogicalType::DOUBLE,
+	    "pac_sum", {LogicalType::UBIGINT, LogicalType::USMALLINT, LogicalType::DOUBLE}, LogicalType::UHUGEINT,
+	    PacSumIntegerStateSize<uint16_t, uhugeint_t>, PacSumIntegerInitialize<uint16_t, uhugeint_t>,
+	    PacSumScatterUSmallInt, PacSumCombineUSmallInt, PacSumFinalizeUSmallInt,
+	    FunctionNullHandling::DEFAULT_NULL_HANDLING, PacSumUpdateUSmallInt, PacSumBind));
+
+	pac_sum_set.AddFunction(AggregateFunction(
+	    "pac_sum", {LogicalType::UBIGINT, LogicalType::UINTEGER}, LogicalType::UHUGEINT,
 	    PacSumIntegerStateSize<uint32_t, uhugeint_t>, PacSumIntegerInitialize<uint32_t, uhugeint_t>,
 	    PacSumScatterUInteger, PacSumCombineUInteger, PacSumFinalizeUInteger,
-	    FunctionNullHandling::DEFAULT_NULL_HANDLING, PacSumUpdateUInteger));
+	    FunctionNullHandling::DEFAULT_NULL_HANDLING, PacSumUpdateUInteger, PacSumBind));
 	pac_sum_set.AddFunction(AggregateFunction(
-	    "pac_sum", {LogicalType::UBIGINT, LogicalType::UBIGINT}, LogicalType::DOUBLE,
+	    "pac_sum", {LogicalType::UBIGINT, LogicalType::UINTEGER, LogicalType::DOUBLE}, LogicalType::UHUGEINT,
+	    PacSumIntegerStateSize<uint32_t, uhugeint_t>, PacSumIntegerInitialize<uint32_t, uhugeint_t>,
+	    PacSumScatterUInteger, PacSumCombineUInteger, PacSumFinalizeUInteger,
+	    FunctionNullHandling::DEFAULT_NULL_HANDLING, PacSumUpdateUInteger, PacSumBind));
+
+	pac_sum_set.AddFunction(AggregateFunction(
+	    "pac_sum", {LogicalType::UBIGINT, LogicalType::UBIGINT}, LogicalType::UHUGEINT,
 	    PacSumIntegerStateSize<uint64_t, uhugeint_t>, PacSumIntegerInitialize<uint64_t, uhugeint_t>,
 	    PacSumScatterUBigInt, PacSumCombineUBigInt, PacSumFinalizeUBigInt,
-	    FunctionNullHandling::DEFAULT_NULL_HANDLING, PacSumUpdateUBigInt));
+	    FunctionNullHandling::DEFAULT_NULL_HANDLING, PacSumUpdateUBigInt, PacSumBind));
 	pac_sum_set.AddFunction(AggregateFunction(
-	    "pac_sum", {LogicalType::UBIGINT, LogicalType::UHUGEINT}, LogicalType::DOUBLE,
+	    "pac_sum", {LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::DOUBLE}, LogicalType::UHUGEINT,
+	    PacSumIntegerStateSize<uint64_t, uhugeint_t>, PacSumIntegerInitialize<uint64_t, uhugeint_t>,
+	    PacSumScatterUBigInt, PacSumCombineUBigInt, PacSumFinalizeUBigInt,
+	    FunctionNullHandling::DEFAULT_NULL_HANDLING, PacSumUpdateUBigInt, PacSumBind));
+
+	pac_sum_set.AddFunction(AggregateFunction(
+	    "pac_sum", {LogicalType::UBIGINT, LogicalType::UHUGEINT}, LogicalType::UHUGEINT,
 	    PacSumIntegerStateSize<uhugeint_t, uhugeint_t>, PacSumIntegerInitialize<uhugeint_t, uhugeint_t>,
 	    PacSumScatterUHugeInt, PacSumCombineUHugeInt, PacSumFinalizeUHugeInt,
-	    FunctionNullHandling::DEFAULT_NULL_HANDLING, PacSumUpdateUHugeInt));
+	    FunctionNullHandling::DEFAULT_NULL_HANDLING, PacSumUpdateUHugeInt, PacSumBind));
+	pac_sum_set.AddFunction(AggregateFunction(
+	    "pac_sum", {LogicalType::UBIGINT, LogicalType::UHUGEINT, LogicalType::DOUBLE}, LogicalType::UHUGEINT,
+	    PacSumIntegerStateSize<uhugeint_t, uhugeint_t>, PacSumIntegerInitialize<uhugeint_t, uhugeint_t>,
+	    PacSumScatterUHugeInt, PacSumCombineUHugeInt, PacSumFinalizeUHugeInt,
+	    FunctionNullHandling::DEFAULT_NULL_HANDLING, PacSumUpdateUHugeInt, PacSumBind));
 
-	// Floating point (use PacSumFloatState<FLOAT_TYPE>)
+	// Floating point (use PacSumFloatState<FLOAT_TYPE>, return DOUBLE)
 	pac_sum_set.AddFunction(
 	    AggregateFunction("pac_sum", {LogicalType::UBIGINT, LogicalType::FLOAT}, LogicalType::DOUBLE,
 	                      PacSumFloatStateSize<float>, PacSumFloatInitialize<float>, PacSumScatterFloat,
 	                      PacSumCombineFloat, PacSumFinalizeFloat, FunctionNullHandling::DEFAULT_NULL_HANDLING,
-	                      PacSumUpdateFloat));
+	                      PacSumUpdateFloat, PacSumBind));
+	pac_sum_set.AddFunction(
+	    AggregateFunction("pac_sum", {LogicalType::UBIGINT, LogicalType::FLOAT, LogicalType::DOUBLE}, LogicalType::DOUBLE,
+	                      PacSumFloatStateSize<float>, PacSumFloatInitialize<float>, PacSumScatterFloat,
+	                      PacSumCombineFloat, PacSumFinalizeFloat, FunctionNullHandling::DEFAULT_NULL_HANDLING,
+	                      PacSumUpdateFloat, PacSumBind));
+
 	pac_sum_set.AddFunction(
 	    AggregateFunction("pac_sum", {LogicalType::UBIGINT, LogicalType::DOUBLE}, LogicalType::DOUBLE,
 	                      PacSumFloatStateSize<double>, PacSumFloatInitialize<double>, PacSumScatterDouble,
 	                      PacSumCombineDouble, PacSumFinalizeDouble, FunctionNullHandling::DEFAULT_NULL_HANDLING,
-	                      PacSumUpdateDouble));
+	                      PacSumUpdateDouble, PacSumBind));
+	pac_sum_set.AddFunction(
+	    AggregateFunction("pac_sum", {LogicalType::UBIGINT, LogicalType::DOUBLE, LogicalType::DOUBLE}, LogicalType::DOUBLE,
+	                      PacSumFloatStateSize<double>, PacSumFloatInitialize<double>, PacSumScatterDouble,
+	                      PacSumCombineDouble, PacSumFinalizeDouble, FunctionNullHandling::DEFAULT_NULL_HANDLING,
+	                      PacSumUpdateDouble, PacSumBind));
+
+#undef ADD_PAC_SUM_INT
 
 	loader.RegisterFunction(pac_sum_set);
 }

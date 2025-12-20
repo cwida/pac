@@ -20,11 +20,17 @@ SELECT pac_count(hash(rowid)::UBIGINT) IS NOT NULL FROM test_data
 ----
 true
 
-# Verify ungrouped pac_count returns a double
+# Verify ungrouped pac_count returns a ubigint
 query I
 SELECT typeof(pac_count(hash(rowid)::UBIGINT)) FROM test_data
 ----
-DOUBLE
+UBIGINT
+
+# Test with explicit mi parameter (128.0)
+query I
+SELECT pac_count(hash(rowid)::UBIGINT, 128.0) IS NOT NULL FROM test_data
+----
+true
 
 # Grouped pac_count by value (0, 1, 2)
 # Each group has ~1333 rows
@@ -38,16 +44,16 @@ ORDER BY value
 1	true
 2	true
 
-# Verify grouped results return doubles
+# Verify grouped results return ubigints
 query II
 SELECT value, typeof(pac_count(hash(rowid)::UBIGINT)) AS result_type
 FROM test_data
 GROUP BY value
 ORDER BY value
 ----
-0	DOUBLE
-1	DOUBLE
-2	DOUBLE
+0	UBIGINT
+1	UBIGINT
+2	UBIGINT
 
 # Test with NULL values - should be handled correctly
 statement ok
