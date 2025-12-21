@@ -36,15 +36,10 @@ static inline void PacSumFloatCascadeUpdateInternal(PacSumFloatCascadeState &sta
 
 // Float cascade update
 template <class FLOAT_TYPE>
-static void PacSumFloatCascadeUpdate(Vector inputs[], AggregateInputData &aggr_input, idx_t input_count, data_ptr_t state_ptr,
+static void PacSumFloatCascadeUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, data_ptr_t state_ptr,
 									 idx_t count) {
 	D_ASSERT(input_count == 2 || input_count == 3);
 	auto &state = *reinterpret_cast<PacSumFloatCascadeState *>(state_ptr);
-
-	// Store mi from bind_data into state
-	if (aggr_input.bind_data) {
-		state.mi = aggr_input.bind_data->Cast<PacBindData>().mi;
-	}
 
 	if (state.seen_null) {
 		return;
@@ -69,15 +64,9 @@ static void PacSumFloatCascadeUpdate(Vector inputs[], AggregateInputData &aggr_i
 
 // Float cascade scatter update
 template <class FLOAT_TYPE>
-static void PacSumFloatCascadeScatterUpdate(Vector inputs[], AggregateInputData &aggr_input, idx_t input_count, Vector &states,
+static void PacSumFloatCascadeScatterUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, Vector &states,
 											idx_t count) {
 	D_ASSERT(input_count == 2 || input_count == 3);
-
-	// Get mi from bind_data
-	double mi = 128.0;
-	if (aggr_input.bind_data) {
-		mi = aggr_input.bind_data->Cast<PacBindData>().mi;
-	}
 
 	UnifiedVectorFormat hash_data, value_data, sdata;
 	inputs[0].ToUnifiedFormat(count, hash_data);
@@ -93,8 +82,6 @@ static void PacSumFloatCascadeScatterUpdate(Vector inputs[], AggregateInputData 
 		auto value_idx = value_data.sel->get_index(i);
 		auto state_idx = sdata.sel->get_index(i);
 		auto state = state_ptrs[state_idx];
-
-		state->mi = mi;  // Store mi in state
 
 		if (state->seen_null) {
 			continue;
@@ -128,12 +115,18 @@ static void PacSumFloatCascadeCombine(Vector &source, Vector &target, AggregateI
 	}
 }
 
-static void PacSumFloatCascadeFinalize(Vector &states, AggregateInputData &, Vector &result, idx_t count,
+static void PacSumFloatCascadeFinalize(Vector &states, AggregateInputData &aggr_input, Vector &result, idx_t count,
 									   idx_t offset) {
 	auto sdata = FlatVector::GetData<PacSumFloatCascadeState *>(states);
 	auto rdata = FlatVector::GetData<double>(result);
 	auto &result_mask = FlatVector::Validity(result);
 	thread_local std::mt19937_64 gen(std::random_device{}());
+
+	// Get mi from bind_data (default 128.0)
+	double mi = 128.0;
+	if (aggr_input.bind_data) {
+		mi = aggr_input.bind_data->Cast<PacBindData>().mi;
+	}
 
 	for (idx_t i = 0; i < count; i++) {
 		auto state = sdata[i];
@@ -149,7 +142,7 @@ static void PacSumFloatCascadeFinalize(Vector &states, AggregateInputData &, Vec
 #endif
 
 		// PacNoisySampleFrom64Counters returns the selected counter yJ plus noise.
-		double noisy = PacNoisySampleFrom64Counters(state->totals64, state->mi, gen);
+		double noisy = PacNoisySampleFrom64Counters(state->totals64, mi, gen);
 		rdata[offset + i] = noisy;
 	}
 }
@@ -184,7 +177,6 @@ struct PacSumFloatState {
 	// Sums first for 64-byte alignment (SIMD-friendly)
 	alignas(64) FLOAT_TYPE sums[64];
 	bool seen_null;
-	double mi;  // Privacy parameter (default 128.0)
 };
 
 template <class FLOAT_TYPE>
@@ -195,8 +187,6 @@ static idx_t PacSumFloatStateSize(const AggregateFunction &) {
 template <class FLOAT_TYPE>
 static void PacSumFloatInitialize(const AggregateFunction &, data_ptr_t state_ptr) {
 	memset(state_ptr, 0, sizeof(PacSumFloatState<FLOAT_TYPE>));
-	auto &state = *reinterpret_cast<PacSumFloatState<FLOAT_TYPE> *>(state_ptr);
-	state.mi = 128.0;
 }
 
 template <class FLOAT_TYPE>
@@ -217,11 +207,17 @@ AUTOVECTORIZE static void PacSumFloatCombine(Vector &source, Vector &target, Agg
 }
 
 template <class FLOAT_TYPE>
-static void PacSumFloatFinalize(Vector &states, AggregateInputData &, Vector &result, idx_t count, idx_t offset) {
+static void PacSumFloatFinalize(Vector &states, AggregateInputData &aggr_input, Vector &result, idx_t count, idx_t offset) {
 	auto sdata = FlatVector::GetData<PacSumFloatState<FLOAT_TYPE> *>(states);
 	auto rdata = FlatVector::GetData<double>(result);
 	auto &result_mask = FlatVector::Validity(result);
 	thread_local std::mt19937_64 gen(std::random_device{}());
+
+	// Get mi from bind_data (default 128.0)
+	double mi = 128.0;
+	if (aggr_input.bind_data) {
+		mi = aggr_input.bind_data->Cast<PacBindData>().mi;
+	}
 
 	for (idx_t i = 0; i < count; i++) {
 		auto state = sdata[i];
@@ -235,7 +231,7 @@ static void PacSumFloatFinalize(Vector &states, AggregateInputData &, Vector &re
 		double sums_d[64];
 		ToDoubleArray(state->sums, sums_d);
 		// PacNoisySampleFrom64Counters returns yJ + noise
-		double noisy = PacNoisySampleFrom64Counters(sums_d, state->mi, gen);
+		double noisy = PacNoisySampleFrom64Counters(sums_d, mi, gen);
 		rdata[offset + i] = noisy;
 	}
 }
@@ -306,7 +302,6 @@ struct PacSumSignedState {
 	uint32_t count64;
 #endif
 	bool seen_null;
-	double mi;  // Privacy parameter (default 128.0)
 
 #ifndef PAC_SUM_NONCASCADING
 	// Flush totals64 -> totals128
@@ -377,7 +372,6 @@ struct PacSumUnsignedState {
 	uint32_t count64;
 #endif
 	bool seen_null;
-	double mi;  // Privacy parameter (default 128.0)
 
 #ifndef PAC_SUM_NONCASCADING
 	// Flush totals64 -> totals128
@@ -443,12 +437,10 @@ static idx_t PacSumIntegerStateSize(const AggregateFunction &) {
 
 static void PacSumSignedInitialize(PacSumSignedState &state) {
 	memset(&state, 0, sizeof(state));
-	state.mi = 128.0;
 }
 
 static void PacSumUnsignedInitialize(PacSumUnsignedState &state) {
 	memset(&state, 0, sizeof(state));
-	state.mi = 128.0;
 }
 
 template <class INPUT_TYPE, class ACC_TYPE>
@@ -510,15 +502,10 @@ static inline void PacSumUnsignedUpdateInternal(PacSumUnsignedState &state, uint
 
 	// Signed integer update
 	template <class INPUT_TYPE>
-	static void PacSumSignedUpdate(Vector inputs[], AggregateInputData &aggr_input, idx_t input_count, data_ptr_t state_ptr,
+	static void PacSumSignedUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, data_ptr_t state_ptr,
 								   idx_t count) {
 		D_ASSERT(input_count == 2 || input_count == 3);
 		auto &state = *reinterpret_cast<PacSumSignedState *>(state_ptr);
-
-		// Store mi from bind_data into state
-		if (aggr_input.bind_data) {
-			state.mi = aggr_input.bind_data->Cast<PacBindData>().mi;
-		}
 
 		if (state.seen_null) {
 			return;
@@ -543,15 +530,10 @@ static inline void PacSumUnsignedUpdateInternal(PacSumUnsignedState &state, uint
 
 	// Unsigned integer update
 	template <class INPUT_TYPE>
-	static void PacSumUnsignedUpdate(Vector inputs[], AggregateInputData &aggr_input, idx_t input_count, data_ptr_t state_ptr,
+	static void PacSumUnsignedUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, data_ptr_t state_ptr,
 									 idx_t count) {
 		D_ASSERT(input_count == 2 || input_count == 3);
 		auto &state = *reinterpret_cast<PacSumUnsignedState *>(state_ptr);
-
-		// Store mi from bind_data into state
-		if (aggr_input.bind_data) {
-			state.mi = aggr_input.bind_data->Cast<PacBindData>().mi;
-		}
 
 		if (state.seen_null) {
 			return;
@@ -587,15 +569,9 @@ static inline void PacSumUnsignedUpdateInternal(PacSumUnsignedState &state, uint
 
 	// Signed integer scatter update
 	template <class INPUT_TYPE>
-	static void PacSumSignedScatterUpdate(Vector inputs[], AggregateInputData &aggr_input, idx_t input_count, Vector &states,
+	static void PacSumSignedScatterUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, Vector &states,
 										  idx_t count) {
 		D_ASSERT(input_count == 2 || input_count == 3);
-
-		// Get mi from bind_data
-		double mi = 128.0;
-		if (aggr_input.bind_data) {
-			mi = aggr_input.bind_data->Cast<PacBindData>().mi;
-		}
 
 		UnifiedVectorFormat hash_data, value_data, sdata;
 		inputs[0].ToUnifiedFormat(count, hash_data);
@@ -612,8 +588,6 @@ static inline void PacSumUnsignedUpdateInternal(PacSumUnsignedState &state, uint
 			auto state_idx = sdata.sel->get_index(i);
 			auto state = state_ptrs[state_idx];
 
-			state->mi = mi;  // Store mi in state
-
 			if (state->seen_null) {
 				continue;
 			}
@@ -627,15 +601,9 @@ static inline void PacSumUnsignedUpdateInternal(PacSumUnsignedState &state, uint
 
 	// Unsigned integer scatter update
 	template <class INPUT_TYPE>
-	static void PacSumUnsignedScatterUpdate(Vector inputs[], AggregateInputData &aggr_input, idx_t input_count, Vector &states,
+	static void PacSumUnsignedScatterUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, Vector &states,
 											idx_t count) {
 		D_ASSERT(input_count == 2 || input_count == 3);
-
-		// Get mi from bind_data
-		double mi = 128.0;
-		if (aggr_input.bind_data) {
-			mi = aggr_input.bind_data->Cast<PacBindData>().mi;
-		}
 
 		UnifiedVectorFormat hash_data, value_data, sdata;
 		inputs[0].ToUnifiedFormat(count, hash_data);
@@ -651,8 +619,6 @@ static inline void PacSumUnsignedUpdateInternal(PacSumUnsignedState &state, uint
 			auto value_idx = value_data.sel->get_index(i);
 			auto state_idx = sdata.sel->get_index(i);
 			auto state = state_ptrs[state_idx];
-
-			state->mi = mi;  // Store mi in state
 
 			if (state->seen_null) {
 				continue;
@@ -700,11 +666,17 @@ static inline void PacSumUnsignedUpdateInternal(PacSumUnsignedState &state, uint
 	}
 
 	template <class INPUT_TYPE, class ACC_TYPE>
-	static void PacSumIntegerFinalize(Vector &states, AggregateInputData &, Vector &result, idx_t count, idx_t offset) {
+	static void PacSumIntegerFinalize(Vector &states, AggregateInputData &aggr_input, Vector &result, idx_t count, idx_t offset) {
 		auto sdata = FlatVector::GetData<PacSumIntegerState<INPUT_TYPE, ACC_TYPE> *>(states);
 		auto rdata = FlatVector::GetData<ACC_TYPE>(result);
 		auto &result_mask = FlatVector::Validity(result);
 		thread_local std::mt19937_64 gen(std::random_device{}());
+
+		// Get mi from bind_data (default 128.0)
+		double mi = 128.0;
+		if (aggr_input.bind_data) {
+			mi = aggr_input.bind_data->Cast<PacBindData>().mi;
+		}
 
 		for (idx_t i = 0; i < count; i++) {
 			auto state = sdata[i];
@@ -723,7 +695,7 @@ static inline void PacSumUnsignedUpdateInternal(PacSumUnsignedState &state, uint
 			double totals_d[64];
 			ToDoubleArray(state->totals128, totals_d);
 			// PacNoisySampleFrom64Counters returns yJ + noise
-			double noisy = PacNoisySampleFrom64Counters(totals_d, state->mi, gen);
+			double noisy = PacNoisySampleFrom64Counters(totals_d, mi, gen);
 			// Cast back to accumulator type using FromDouble
 			rdata[offset + i] = FromDouble<ACC_TYPE>(noisy);
 		}
@@ -809,15 +781,10 @@ static inline void PacSumUnsignedUpdateInternal(PacSumUnsignedState &state, uint
 		PacSumIntegerScatterUpdate<uint64_t, hugeint_t>(inputs, aggr, input_count, states, count);
 	}
 	// UHUGEINT -> DOUBLE (like DuckDB's SUM): reads uhugeint_t, accumulates as double
-	static void PacSumUpdateUHugeIntToDouble(Vector inputs[], AggregateInputData &aggr, idx_t input_count, data_ptr_t state_ptr,
+	static void PacSumUpdateUHugeIntToDouble(Vector inputs[], AggregateInputData &, idx_t input_count, data_ptr_t state_ptr,
 											 idx_t count) {
 		D_ASSERT(input_count == 2 || input_count == 3);
 		auto &state = *reinterpret_cast<PacSumFloatState<double> *>(state_ptr);
-
-		// Store mi from bind_data into state
-		if (aggr.bind_data) {
-			state.mi = aggr.bind_data->Cast<PacBindData>().mi;
-		}
 
 		if (state.seen_null) {
 			return;
@@ -845,15 +812,9 @@ static inline void PacSumUnsignedUpdateInternal(PacSumUnsignedState &state, uint
 		}
 	}
 
-	static void PacSumScatterUHugeIntToDouble(Vector inputs[], AggregateInputData &aggr, idx_t input_count, Vector &states,
+	static void PacSumScatterUHugeIntToDouble(Vector inputs[], AggregateInputData &, idx_t input_count, Vector &states,
 											  idx_t count) {
 		D_ASSERT(input_count == 2 || input_count == 3);
-
-		// Get mi from bind_data
-		double mi = 128.0;
-		if (aggr.bind_data) {
-			mi = aggr.bind_data->Cast<PacBindData>().mi;
-		}
 
 		UnifiedVectorFormat hash_data, value_data, state_data;
 		inputs[0].ToUnifiedFormat(count, hash_data);
@@ -868,7 +829,6 @@ static inline void PacSumUnsignedUpdateInternal(PacSumUnsignedState &state, uint
 			auto value_idx = value_data.sel->get_index(i);
 			auto state_idx = state_data.sel->get_index(i);
 			auto &state = *state_ptrs[state_idx];
-			state.mi = mi;  // Store mi in state
 
 			if (state.seen_null) {
 				continue;
@@ -888,8 +848,6 @@ static inline void PacSumUnsignedUpdateInternal(PacSumUnsignedState &state, uint
 
 	static void PacSumFloatCascadeInitialize(const AggregateFunction &, data_ptr_t state_ptr) {
 		memset(state_ptr, 0, sizeof(PacSumFloatCascadeState));
-		auto &state = *reinterpret_cast<PacSumFloatCascadeState *>(state_ptr);
-		state.mi = 128.0;
 	}
 
 // Forward declarations for Combine/Finalize wrappers referenced in RegisterPacSumFunctions
