@@ -1,0 +1,8 @@
+//
+// Created by ila on 12/21/25.
+//
+
+#ifndef PAC_BITSLICE_COMPILER_HPP
+#define PAC_BITSLICE_COMPILER_HPP
+
+#endif //PAC_BITSLICE_COMPILER_HPP

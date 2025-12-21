@@ -17,7 +17,7 @@ include_directories(src/include third_party/lpts)
 # Extension sources
 set(EXTENSION_SOURCES src/pac_extension.cpp src/pac_optimizer.cpp src/pac_compiler.cpp src/pac_privacy_unit.cpp
         src/pac_compatibility_check.cpp src/pac_aggregate.cpp src/pac_helpers.cpp third_party/lpts/logical_plan_to_sql.cpp
-        src/pac_count.cpp src/pac_sum.cpp)
+        src/pac_count.cpp src/pac_sum.cpp src/pac_bitslice_compiler.cpp)
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
 
@@ -33,6 +33,10 @@ install(
 
 # Add a small test runner that lives inside the pac project (does not modify duckdb sources)
 # Temporarily disabled due to ReplaceNode API changes
-# add_executable(test_update_parent_runner src/test_update_parent_runner.cpp)
+add_executable(test_update_parent_runner src/test_update_parent_runner.cpp)
 # Link against DuckDB and the pac static extension so we have access to the planner types and helpers.
-# target_link_libraries(test_update_parent_runner duckdb ${EXTENSION_NAME})
+target_link_libraries(test_update_parent_runner duckdb ${EXTENSION_NAME})
+
+add_executable(test_pac_privacy_columns src/test_pac_privacy_columns.cpp)
+target_link_libraries(test_pac_privacy_columns duckdb ${EXTENSION_NAME})
+

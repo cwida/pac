@@ -20,6 +20,10 @@
 #include <unordered_map>
 #include <algorithm>
 
+// Add include for TableCatalogEntry to access GetPrimaryKey and column APIs
+#include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
+#include "duckdb/parser/constraints/unique_constraint.hpp"
+
 using idx_set = std::unordered_set<idx_t>;
 
 namespace duckdb {
@@ -240,6 +244,63 @@ static void ApplyIndexMapToSubtree(LogicalOperator *node, const std::unordered_m
 
     // Recurse
     for (auto &c : node->children) ApplyIndexMapToSubtree(c.get(), map);
+}
+
+// Find the primary key column name for a given table. Searches the client's catalog search path
+// for the table and returns the first column name of the primary key constraint (if any).
+// Returns empty string when no primary key exists.
+vector<std::string> FindPrimaryKey(ClientContext &context, const std::string &table_name) {
+    Catalog &catalog = Catalog::GetCatalog(context, DatabaseManager::GetDefaultDatabase(context));
+
+    // If schema-qualified name is provided (schema.table), prefer that exact lookup
+    auto dot_pos = table_name.find('.');
+    if (dot_pos != std::string::npos) {
+        std::string schema = table_name.substr(0, dot_pos);
+        std::string tbl = table_name.substr(dot_pos + 1);
+        auto entry = catalog.GetEntry(context, CatalogType::TABLE_ENTRY, schema, tbl, OnEntryNotFound::RETURN_NULL);
+        if (!entry) return {};
+        auto &table_entry = entry->Cast<TableCatalogEntry>();
+        auto pk = table_entry.GetPrimaryKey();
+        if (!pk) return {};
+        if (pk->type == ConstraintType::UNIQUE) {
+            auto &unique = pk->Cast<UniqueConstraint>();
+            // Prefer explicit column names if present
+            if (!unique.GetColumnNames().empty()) {
+                return unique.GetColumnNames();
+            }
+            // Otherwise fall back to index-based single-column PK
+            if (unique.HasIndex()) {
+                auto idx = unique.GetIndex();
+                auto &col = table_entry.GetColumn(idx);
+                return {col.GetName()};
+            }
+        }
+        return {};
+    }
+
+    // Non-qualified name: walk the search path
+    CatalogSearchPath path(context);
+    for (auto &entry_path : path.Get()) {
+        auto entry = catalog.GetEntry(context, CatalogType::TABLE_ENTRY, entry_path.schema, table_name,
+                                      OnEntryNotFound::RETURN_NULL);
+        if (!entry) continue;
+        auto &table_entry = entry->Cast<TableCatalogEntry>();
+        auto pk = table_entry.GetPrimaryKey();
+        if (!pk) continue;
+        if (pk->type == ConstraintType::UNIQUE) {
+            auto &unique = pk->Cast<UniqueConstraint>();
+            if (!unique.GetColumnNames().empty()) {
+                return unique.GetColumnNames();
+            }
+            if (unique.HasIndex()) {
+                auto idx = unique.GetIndex();
+                auto &col = table_entry.GetColumn(idx);
+                return {col.GetName()};
+            }
+        }
+    }
+
+    return {};
 }
 
 } // namespace duckdb

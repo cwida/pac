@@ -32,4 +32,8 @@ DUCKDB_API void ReplaceNode(unique_ptr<LogicalOperator> &root,
                             unique_ptr<LogicalOperator> &old_node,
                             unique_ptr<LogicalOperator> &new_node);
 
+// Find the primary key column names for the given table (searching the client's catalog search path).
+// Returns a vector with the primary key column names in order; empty vector if there is no PK.
+DUCKDB_API vector<std::string> FindPrimaryKey(ClientContext &context, const std::string &table_name);
+
 } // namespace duckdb

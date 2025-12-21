@@ -24,9 +24,6 @@ DUCKDB_API unique_ptr<FunctionLocalState> PacAggregateInit(ExpressionState &stat
                                                                const BoundFunctionExpression &expr,
                                                                FunctionData *bind_data);
 
-// NOTE: PacAggregateScalar and PacAggregateScalarBigint concrete symbols were removed.
-// We now use the templated implementation PacAggregateScalar<T,C> instantiated at registration time.
-
 // Register pac_aggregate scalar function(s) with the extension loader
 void RegisterPacAggregateFunctions(ExtensionLoader &loader);
 
