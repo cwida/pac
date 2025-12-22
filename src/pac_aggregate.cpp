@@ -12,12 +12,6 @@
 #include <cstring>
 #include <type_traits>
 
-// Enable AVX2 vectorization for update functions
-#define AUTOVECTORIZE __attribute__((target("avx2")))
-
-// Define FILTER_WITH_MULT to use multiplication by 0/1 instead of mask approach
-// #define FILTER_WITH_MULT
-
 // Every argument to pac_aggregate is the output of a query evaluated on a random subsample of the privacy unit
 
 namespace duckdb {
