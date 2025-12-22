@@ -72,6 +72,7 @@ DUCKDB_API std::string GetPacPrivacyFile(ClientContext &context, const std::stri
 DUCKDB_API std::string GetPacCompiledPath(ClientContext &context, const std::string &default_path = ".");
 DUCKDB_API int64_t GetPacM(ClientContext &context, int64_t default_m = 128);
 DUCKDB_API bool IsPacNoiseEnabled(ClientContext &context, bool default_value = true);
+DUCKDB_API std::string GetPacCompileMethod(ClientContext &context, const std::string &default_method = "standard");
 
 // Helper to convert ReadPacTablesFile's unordered_set into a deterministic vector (sorted)
 // so callers don't need to repeat this conversion.

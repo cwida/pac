@@ -354,7 +354,9 @@ static void UpdateNodesAboveAggregate(unique_ptr<LogicalOperator> &root, Logical
 // Refactored CompilePACQuery: does all steps in one place
 void CompilePACQuery(OptimizerExtensionInput &input,
                      unique_ptr<LogicalOperator> &plan,
-                     const std::string &privacy_unit) {
+                     const std::string &privacy_unit,
+                     const std::string &query,
+                     const std::string &query_hash) {
 
     if (privacy_unit.empty()) return;
 
@@ -367,12 +369,10 @@ void CompilePACQuery(OptimizerExtensionInput &input,
     try {
 
     // 1. Create sample CTE file (unchanged)
-    string normalized = NormalizeQueryForHash(input.context.GetCurrentQuery());
-    string hash = HashStringToHex(normalized);
     string path = GetPacCompiledPath(input.context, ".");
     if (!path.empty() && path.back() != '/') path.push_back('/');
-    string filename = path + privacy_unit + "_" + hash + ".sql";
-	CreateSampleCTE(input.context, privacy_unit, filename, normalized);
+    string filename = path + privacy_unit + "_" + query_hash + "_standard.sql";
+	CreateSampleCTE(input.context, privacy_unit, filename, query);
 
 	// Replan the plan without compressed materialization
     	Connection con(*input.context.db);
@@ -390,7 +390,7 @@ void CompilePACQuery(OptimizerExtensionInput &input,
 			Parser parser;
 			Planner planner(input.context);
 
-			parser.ParseQuery(normalized);
+			parser.ParseQuery(query);
 			auto statement = parser.statements[0].get();
 
 			planner.CreatePlan(statement->Copy());

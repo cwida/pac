@@ -518,4 +518,20 @@ std::vector<std::string> PacTablesSetToVector(const std::unordered_set<std::stri
     return out;
 }
 
+// Add implementation for GetPacCompileMethod
+std::string GetPacCompileMethod(ClientContext &context, const std::string &default_method) {
+    Value v;
+    context.TryGetCurrentSetting("pac_compile_method", v);
+    if (v.IsNull()) return default_method;
+    try {
+        std::string s = v.ToString();
+        std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c){ return std::tolower(c); });
+        if (s == "standard" || s == "bitslice") return s;
+        // fallback
+        return default_method;
+    } catch (...) {
+        return default_method;
+    }
+}
+
 } // namespace duckdb

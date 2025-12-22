@@ -100,6 +100,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	db.config.AddExtensionOption("enforce_m_values", "enforce per-sample arrays length equals pac_m", LogicalType::BOOLEAN);
 	// Add option to set path where compiled PAC artifacts (CTEs) are written
 	db.config.AddExtensionOption("pac_compiled_path", "path to write compiled PAC artifacts", LogicalType::VARCHAR);
+	// Add option to choose compile method: "standard" or "bitslice"
+	db.config.AddExtensionOption("pac_compile_method", "PAC compile method: 'standard' or 'bitslice'", LogicalType::VARCHAR);
 
 	// Register pac_aggregate function(s)
 	RegisterPacAggregateFunctions(loader);

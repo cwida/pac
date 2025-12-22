@@ -13,14 +13,7 @@
 #include "include/pac_helpers.hpp"
 // Include PAC compiler
 #include "include/pac_compiler.hpp"
-
-// Include concrete logical operator headers and bound aggregate expression
-#include "duckdb/planner/operator/logical_aggregate.hpp"
-#include "duckdb/planner/operator/logical_get.hpp"
-#include "duckdb/planner/expression/bound_aggregate_expression.hpp"
-#include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
-
-#include <pac_compatibility_check.hpp>
+#include "include/pac_bitslice_compiler.hpp"
 
 namespace duckdb {
 
@@ -84,25 +77,21 @@ void PACRewriteRule::PACRewriteRuleFunction(OptimizerExtensionInput &input, uniq
     // Deduplicate
     std::sort(discovered_pus.begin(), discovered_pus.end());
     discovered_pus.erase(std::unique(discovered_pus.begin(), discovered_pus.end()), discovered_pus.end());
-	if (discovered_pus.empty()) {
-		// Defensive: nothing discovered
-		return;
-	}
-	if (discovered_pus.size() > 1) {
-		// Multiple privacy units referenced by the query: instead of throwing, compile for each
-		// Note: CompilePACQuery may modify the plan; we invoke it sequentially for each privacy unit.
-		for (auto &pu : discovered_pus) {
-			Printer::Print("Multiple privacy units detected; compiling for: " + pu);
+    if (discovered_pus.empty()) {
+        // Defensive: nothing discovered
+        return;
+    }
 
-			// set replan flag for duration of compilation
-			ReplanGuard scoped(pac_info);
-			CompilePACQuery(input, plan, pu);
-		}
-		// After compiling for all discovered privacy units, we stop further processing for this plan
-		return;
-	}
-	// Use a vector of privacy units (may be 1 or more); discovered_pus already has deduplicated list
-	std::vector<std::string> privacy_units = std::move(discovered_pus);
+    // compute normalized query hash once for file naming
+    std::string normalized = NormalizeQueryForHash(input.context.GetCurrentQuery());
+    std::string query_hash = HashStringToHex(normalized);
+    std::string compile_method = GetPacCompileMethod(input.context, "standard");
+
+    if (discovered_pus.size() > 1) {
+        throw InvalidInputException("PAC rewrite: multiple privacy units discovered (%s); multi-privacy-unit queries are not supported");
+    }
+
+    std::vector<std::string> privacy_units = std::move(discovered_pus);
 
 	// Print discovered PKs for diagnostics (if available) for each privacy unit
 	for (auto &pu : privacy_units) {
@@ -122,14 +111,16 @@ void PACRewriteRule::PACRewriteRuleFunction(OptimizerExtensionInput &input, uniq
 
 	bool apply_noise = IsPacNoiseEnabled(input.context, true);
 	if (apply_noise) {
-		// PAC compatible: invoke compiler to produce artifacts (e.g., sample CTE)
-		// Diagnostics: inform that this query will be compiled by PAC
 		for (auto &pu : privacy_units) {
 			Printer::Print("Query requires PAC Compilation for privacy unit: " + pu);
 
 			// set replan flag for duration of compilation
 			ReplanGuard scoped2(pac_info);
-			CompilePACQuery(input, plan, pu);
+			if (compile_method == "bitslice") {
+				CompilePacBitsliceQuery(check, input, plan, pu, query_hash);
+			} else {
+				CompilePACQuery(input, plan, pu, normalized, query_hash);
+			}
 		}
 	}
  }

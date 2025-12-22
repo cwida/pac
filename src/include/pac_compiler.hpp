@@ -14,11 +14,7 @@ namespace duckdb {
 // Compile PAC-compatible query into intermediate artifacts (entry point)
 // privacy_unit: single privacy unit name (must be non-empty to compile)
 DUCKDB_API void CompilePACQuery(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
-                                const std::string &privacy_unit);
-
-// Overload: Accept pac_idx to allow for incremental compilation updates after pac_sample insertion
-DUCKDB_API void CompilePACQuery(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
-                                const std::string &privacy_unit, idx_t pac_idx);
+                                const std::string &privacy_unit, const std::string &query, const std::string &query_hash);
 
 // Create the sample CTE and write it to a file (void): filename provided by caller
 DUCKDB_API void CreateSampleCTE(ClientContext &context, const std::string &privacy_unit,
