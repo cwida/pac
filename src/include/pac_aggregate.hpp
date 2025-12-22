@@ -5,7 +5,13 @@
 #include <vector>
 
 // Enable AVX2 vectorization for functions that get this preappended (useful for x86, harmless for arm)
+#if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
+// On x86 targets enable the attribute to allow function-level AVX2 codegen when available.
 #define AUTOVECTORIZE __attribute__((target("avx2")))
+#else
+// On non-x86 targets (ARM, etc.) the attribute is invalid — make it a no-op so code compiles.
+#define AUTOVECTORIZE
+#endif
 
 namespace duckdb {
 

@@ -25,6 +25,16 @@ build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
 target_link_libraries(${EXTENSION_NAME} OpenSSL::SSL OpenSSL::Crypto)
 target_link_libraries(${LOADABLE_EXTENSION_NAME} OpenSSL::SSL OpenSSL::Crypto)
 
+# Enable AVX2 code generation on x86 builds (GCC/Clang) — keep ARM and other architectures unchanged
+if (CMAKE_SYSTEM_PROCESSOR MATCHES "(x86_64|AMD64|i386|i686)")
+    message(STATUS "Detected x86 processor; enabling -mavx2 for PAC extension targets")
+    # Only apply for C/C++ compiles
+    target_compile_options(${EXTENSION_NAME} PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-mavx2>)
+    target_compile_options(${EXTENSION_NAME} PRIVATE $<$<COMPILE_LANGUAGE:C>:-mavx2>)
+    target_compile_options(${LOADABLE_EXTENSION_NAME} PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-mavx2>)
+    target_compile_options(${LOADABLE_EXTENSION_NAME} PRIVATE $<$<COMPILE_LANGUAGE:C>:-mavx2>)
+endif()
+
 install(
   TARGETS ${EXTENSION_NAME}
   EXPORT "${DUCKDB_EXPORT_SET}"
@@ -39,4 +49,3 @@ target_link_libraries(test_update_parent_runner duckdb ${EXTENSION_NAME})
 
 add_executable(test_pac_privacy_columns src/test_pac_privacy_columns.cpp)
 target_link_libraries(test_pac_privacy_columns duckdb ${EXTENSION_NAME})
-
