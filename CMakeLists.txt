@@ -6,7 +6,7 @@ set(TARGET_NAME pac)
 # DuckDB's extension distribution supports vcpkg. As such, dependencies can be added in ./vcpkg.json and then
 # used in cmake with find_package. Feel free to remove or replace with other dependencies.
 # Note that it should also be removed from vcpkg.json to prevent needlessly installing it..
-find_package(OpenSSL REQUIRED)
+#find_package(OpensSL REQUIRED)
 
 set(EXTENSION_NAME ${TARGET_NAME}_extension)
 set(LOADABLE_EXTENSION_NAME ${TARGET_NAME}_loadable_extension)
@@ -22,18 +22,8 @@ build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
 
 # Link OpenSSL in both the static library as the loadable extension
-target_link_libraries(${EXTENSION_NAME} OpenSSL::SSL OpenSSL::Crypto)
-target_link_libraries(${LOADABLE_EXTENSION_NAME} OpenSSL::SSL OpenSSL::Crypto)
-
-# Enable AVX2 code generation on x86 builds (GCC/Clang) — keep ARM and other architectures unchanged
-if (CMAKE_SYSTEM_PROCESSOR MATCHES "(x86_64|AMD64|i386|i686)")
-    message(STATUS "Detected x86 processor; enabling -mavx2 for PAC extension targets")
-    # Only apply for C/C++ compiles
-    target_compile_options(${EXTENSION_NAME} PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-mavx2>)
-    target_compile_options(${EXTENSION_NAME} PRIVATE $<$<COMPILE_LANGUAGE:C>:-mavx2>)
-    target_compile_options(${LOADABLE_EXTENSION_NAME} PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-mavx2>)
-    target_compile_options(${LOADABLE_EXTENSION_NAME} PRIVATE $<$<COMPILE_LANGUAGE:C>:-mavx2>)
-endif()
+#target_link_libraries(${EXTENSION_NAME} OpenSSL::SSL OpenSSL::Crypto)
+#target_link_libraries(${LOADABLE_EXTENSION_NAME} OpenSSL::SSL OpenSSL::Crypto)
 
 install(
   TARGETS ${EXTENSION_NAME}
@@ -43,9 +33,8 @@ install(
 
 # Add a small test runner that lives inside the pac project (does not modify duckdb sources)
 # Temporarily disabled due to ReplaceNode API changes
-add_executable(test_update_parent_runner src/test_update_parent_runner.cpp)
-# Link against DuckDB and the pac static extension so we have access to the planner types and helpers.
-target_link_libraries(test_update_parent_runner duckdb ${EXTENSION_NAME})
+#add_executable(test_update_parent_runner src/test_update_parent_runner.cpp)
+#target_link_libraries(test_update_parent_runner ${EXTENSION_NAME})
 
-add_executable(test_pac_privacy_columns src/test_pac_privacy_columns.cpp)
-target_link_libraries(test_pac_privacy_columns duckdb ${EXTENSION_NAME})
+#add_executable(test_pac_privacy_columns src/test_pac_privacy_columns.cpp)
+#target_link_libraries(test_pac_privacy_columns ${EXTENSION_NAME})

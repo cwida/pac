@@ -7,9 +7,10 @@
 
 #include "duckdb.hpp"
 #include "pac_aggregate.hpp"
-#include <random>
 
 namespace duckdb {
+
+void RegisterPacCountFunctions(ExtensionLoader &);
 
 // PAC_COUNT(key_hash) implements a COUNT aggregate that for each privacy-unit (identified by a key_hash)
 // computes 64 independent counts, where each independent count randomly (50% chance) includes a PU or not.
@@ -39,21 +40,21 @@ namespace duckdb {
 
 // State for pac_count: 64 counters and totals8 intermediate accumulators
 struct PacCountState {
-	uint64_t totals8[8];   // SIMD-friendly intermediate accumulators (8 x 8 bytes)
-	uint64_t totals64[64]; // Final counters (64 x 8 bytes)
-	uint8_t update_count;  // Counts updates, flushes when wraps to 0
+	uint64_t subtotals[8]; // SIMD-friendly intermediate accumulators (8 x 8 bytes)
+	uint64_t totals[64];   // Final counters (64 x 8 bytes)
+	uint32_t update_count; // Counts updates until 255
 
 	AUTOVECTORIZE void inline Flush() {
-		const uint8_t *small = reinterpret_cast<const uint8_t *>(totals8);
-		for (int i = 0; i < 64; i++) {
-			totals64[i] += small[i];
+		if (++update_count == 255) {
+			const uint8_t *subtotals8 = reinterpret_cast<const uint8_t *>(subtotals);
+			for (int i = 0; i < 64; i++) {
+				totals[i] += subtotals8[i];
+			}
+			memset(subtotals, 0, sizeof(subtotals));
+			update_count = 0;
 		}
-		memset(totals8, 0, sizeof(totals8));
 	}
 };
-
-// Register the pac_count aggregate functions with the loader
-void RegisterPacCountFunctions(ExtensionLoader &);
 
 } // namespace duckdb
 

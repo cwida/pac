@@ -2,15 +2,237 @@
 
 namespace duckdb {
 
-// Bind function for pac_sum with optional mi parameter
-static unique_ptr<FunctionData> PacSumBind(ClientContext &context, AggregateFunction &,
-                                           vector<unique_ptr<Expression>> &arguments) {
+template <bool SIGNED>
+AUTOVECTORIZE inline void // main worker function for probabilistically adding one INTEGER to the 64 sum totals
+PacSumUpdateOne(PacSumIntState<SIGNED> &state, uint64_t key_hash, typename PacSumIntState<SIGNED>::T64 value) {
+#ifndef PAC_SUM_NONCASCADING
+	if (NbitsSubtotalFitsValue<SIGNED>(value, 8, ZeroLeadingBitsForInt8)) {
+		AddToTotalsINT(state.subtotals8, value, key_hash);
+		state.Flush8(false);
+	} else if (NbitsSubtotalFitsValue<SIGNED>(value, 16, ZeroLeadingBitsForInt16)) {
+		AddToTotalsINT(state.subtotals16, value, key_hash);
+		state.Flush16(false);
+	} else if (NbitsSubtotalFitsValue<SIGNED>(value, 32, ZeroLeadingBitsForInt32)) {
+		AddToTotalsINT(state.subtotals32, value, key_hash);
+		state.Flush32(false);
+	} else {
+		AddToTotalsINT(state.subtotals64, value, key_hash);
+		state.Flush64(false);
+	}
+#else
+	AddToTotalsINT(state.totals, value, key_hash);
+#endif
+}
+
+template <bool SIGNED>
+AUTOVECTORIZE inline void // main worker function for probabilistically adding one DOUBLE to the 64 sum totals
+PacSumUpdateOne(PacSumDoubleState &state, uint64_t key_hash, double value) {
+#ifndef PAC_SUM_NONCASCADING
+	if (FloatSubtotalFitsDouble(value)) {
+		AddToTotalsDOUBLE(state.subtotals, static_cast<float>(value), key_hash);
+		state.Flush32(false);
+		return;
+	}
+#endif
+	AddToTotalsDOUBLE(state.totals, value, key_hash);
+}
+
+template <class State, bool SIGNED, class VALUE_TYPE, class INPUT_TYPE>
+static void PacSumUpdate(Vector inputs[], data_ptr_t state_p, idx_t count) {
+	auto &state = *reinterpret_cast<State *>(state_p);
+	if (state.seen_null) {
+		return;
+	}
+	UnifiedVectorFormat hash_data, value_data;
+	inputs[0].ToUnifiedFormat(count, hash_data);
+	inputs[1].ToUnifiedFormat(count, value_data);
+	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
+	auto values = UnifiedVectorFormat::GetData<INPUT_TYPE>(value_data);
+
+	for (idx_t i = 0; i < count; i++) {
+		auto hash_idx = hash_data.sel->get_index(i);
+		auto value_idx = value_data.sel->get_index(i);
+		if (!hash_data.validity.RowIsValid(hash_idx) || !value_data.validity.RowIsValid(value_idx)) {
+			state.seen_null = true;
+			return;
+		}
+		PacSumUpdateOne<SIGNED>(state, hashes[hash_idx], ConvertValue<VALUE_TYPE>::convert(values[value_idx]));
+	}
+}
+
+template <class State, bool SIGNED, class VALUE_TYPE, class INPUT_TYPE>
+static void PacSumScatterUpdate(Vector inputs[], Vector &states, idx_t count) {
+	UnifiedVectorFormat hash_data, value_data, sdata;
+	inputs[0].ToUnifiedFormat(count, hash_data);
+	inputs[1].ToUnifiedFormat(count, value_data);
+	states.ToUnifiedFormat(count, sdata);
+
+	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
+	auto values = UnifiedVectorFormat::GetData<INPUT_TYPE>(value_data);
+	auto state_ptrs = UnifiedVectorFormat::GetData<State *>(sdata);
+
+	for (idx_t i = 0; i < count; i++) {
+		auto hash_idx = hash_data.sel->get_index(i);
+		auto value_idx = value_data.sel->get_index(i);
+		auto state = state_ptrs[sdata.sel->get_index(i)];
+		if (!state->seen_null) {
+			if (!hash_data.validity.RowIsValid(hash_idx) || !value_data.validity.RowIsValid(value_idx)) {
+				state->seen_null = true;
+			} else {
+				PacSumUpdateOne<SIGNED>(*state, hashes[hash_idx], ConvertValue<VALUE_TYPE>::convert(values[value_idx]));
+			}
+		}
+	}
+}
+
+template <class State>
+AUTOVECTORIZE static void PacSumCombine(Vector &src, Vector &dst, idx_t count) {
+	auto src_state = FlatVector::GetData<State *>(src);
+	auto dst_state = FlatVector::GetData<State *>(dst);
+	for (idx_t i = 0; i < count; i++) {
+		if (src_state[i]->seen_null) {
+			dst_state[i]->seen_null = true;
+		}
+		if (!dst_state[i]->seen_null) {
+#ifndef PAC_SUM_NONCASCADING
+			src_state[i]->FlushAll(); // flush source before reading from it
+#endif
+			for (int j = 0; j < 64; j++) {
+				dst_state[i]->totals[j] += src_state[i]->totals[j];
+			}
+		}
+	}
+}
+
+template <class State, class ACC_TYPE>
+static void PacSumFinalize(Vector &states, AggregateInputData &input, Vector &result, idx_t count, idx_t offset) {
+	auto state = FlatVector::GetData<State *>(states);
+	auto data = FlatVector::GetData<ACC_TYPE>(result);
+	auto &result_mask = FlatVector::Validity(result);
+	thread_local std::mt19937_64 gen(std::random_device {}());
+	double mi = input.bind_data ? input.bind_data->Cast<PacBindData>().mi : 128.0; // 128 is default
+
+	for (idx_t i = 0; i < count; i++) {
+		if (state[i]->seen_null) {
+			result_mask.SetInvalid(offset + i);
+		} else {
+#ifndef PAC_SUM_NONCASCADING
+			state[i]->FlushAll();
+#endif
+			double totals_d[64];
+			ToDoubleArray(state[i]->totals, totals_d);
+			data[offset + i] = // when choosing any one of the totals we go for #42 (but one counts from 0 ofc)
+			    FromDouble<ACC_TYPE>(PacNoisySampleFrom64Counters(totals_d, mi, gen)) + state[i]->totals[41];
+		}
+	}
+}
+
+// instantiate Update methods
+void PacSumUpdateTinyInt(Vector inputs[], AggregateInputData &, idx_t, data_ptr_t state_p, idx_t count) {
+	PacSumUpdate<PacSumIntState<true>, true, int64_t, int8_t>(inputs, state_p, count);
+}
+void PacSumUpdateSmallInt(Vector inputs[], AggregateInputData &, idx_t, data_ptr_t state_p, idx_t count) {
+	PacSumUpdate<PacSumIntState<true>, true, int64_t, int16_t>(inputs, state_p, count);
+}
+void PacSumUpdateInteger(Vector inputs[], AggregateInputData &, idx_t, data_ptr_t state_p, idx_t count) {
+	PacSumUpdate<PacSumIntState<true>, true, int64_t, int32_t>(inputs, state_p, count);
+}
+void PacSumUpdateBigInt(Vector inputs[], AggregateInputData &, idx_t, data_ptr_t state_p, idx_t count) {
+	PacSumUpdate<PacSumIntState<true>, true, int64_t, int64_t>(inputs, state_p, count);
+}
+void PacSumUpdateHugeInt(Vector inputs[], AggregateInputData &, idx_t, data_ptr_t state_p, idx_t count) {
+	PacSumUpdate<PacSumDoubleState, true, double, hugeint_t>(inputs, state_p, count);
+}
+void PacSumUpdateUTinyInt(Vector inputs[], AggregateInputData &, idx_t, data_ptr_t state_p, idx_t count) {
+	PacSumUpdate<PacSumIntState<false>, false, uint64_t, uint8_t>(inputs, state_p, count);
+}
+void PacSumUpdateUSmallInt(Vector inputs[], AggregateInputData &, idx_t, data_ptr_t state_p, idx_t count) {
+	PacSumUpdate<PacSumIntState<false>, false, uint64_t, uint16_t>(inputs, state_p, count);
+}
+void PacSumUpdateUInteger(Vector inputs[], AggregateInputData &, idx_t, data_ptr_t state_p, idx_t count) {
+	PacSumUpdate<PacSumIntState<false>, false, uint64_t, uint32_t>(inputs, state_p, count);
+}
+void PacSumUpdateUBigInt(Vector inputs[], AggregateInputData &, idx_t, data_ptr_t state_p, idx_t count) {
+	PacSumUpdate<PacSumIntState<false>, false, uint64_t, uint64_t>(inputs, state_p, count);
+}
+void PacSumUpdateUHugeInt(Vector inputs[], AggregateInputData &, idx_t, data_ptr_t state_p, idx_t count) {
+	PacSumUpdate<PacSumDoubleState, true, double, uhugeint_t>(inputs, state_p, count);
+}
+void PacSumUpdateFloat(Vector inputs[], AggregateInputData &, idx_t, data_ptr_t state_p, idx_t count) {
+	PacSumUpdate<PacSumDoubleState, true, double, float>(inputs, state_p, count);
+}
+void PacSumUpdateDouble(Vector inputs[], AggregateInputData &, idx_t, data_ptr_t state_p, idx_t count) {
+	PacSumUpdate<PacSumDoubleState, true, double, double>(inputs, state_p, count);
+}
+
+// instantiate ScatterUpdate methods
+void PacSumScatterUpdateTinyInt(Vector inputs[], AggregateInputData &, idx_t, Vector &states, idx_t count) {
+	PacSumScatterUpdate<PacSumIntState<true>, true, int64_t, int8_t>(inputs, states, count);
+}
+void PacSumScatterUpdateSmallInt(Vector inputs[], AggregateInputData &, idx_t, Vector &states, idx_t count) {
+	PacSumScatterUpdate<PacSumIntState<true>, true, int64_t, int16_t>(inputs, states, count);
+}
+void PacSumScatterUpdateInteger(Vector inputs[], AggregateInputData &, idx_t, Vector &states, idx_t count) {
+	PacSumScatterUpdate<PacSumIntState<true>, true, int64_t, int32_t>(inputs, states, count);
+}
+void PacSumScatterUpdateBigInt(Vector inputs[], AggregateInputData &, idx_t, Vector &states, idx_t count) {
+	PacSumScatterUpdate<PacSumIntState<true>, true, int64_t, int64_t>(inputs, states, count);
+}
+void PacSumScatterUpdateHugeInt(Vector inputs[], AggregateInputData &, idx_t, Vector &states, idx_t count) {
+	PacSumScatterUpdate<PacSumDoubleState, true, double, hugeint_t>(inputs, states, count);
+}
+void PacSumScatterUpdateUTinyInt(Vector inputs[], AggregateInputData &, idx_t, Vector &states, idx_t count) {
+	PacSumScatterUpdate<PacSumIntState<false>, false, uint64_t, uint8_t>(inputs, states, count);
+}
+void PacSumScatterUpdateUSmallInt(Vector inputs[], AggregateInputData &, idx_t, Vector &states, idx_t count) {
+	PacSumScatterUpdate<PacSumIntState<false>, false, uint64_t, uint16_t>(inputs, states, count);
+}
+void PacSumScatterUpdateUInteger(Vector inputs[], AggregateInputData &, idx_t, Vector &states, idx_t count) {
+	PacSumScatterUpdate<PacSumIntState<false>, false, uint64_t, uint32_t>(inputs, states, count);
+}
+void PacSumScatterUpdateUBigInt(Vector inputs[], AggregateInputData &, idx_t, Vector &states, idx_t count) {
+	PacSumScatterUpdate<PacSumIntState<false>, false, uint64_t, uint64_t>(inputs, states, count);
+}
+void PacSumScatterUpdateUHugeInt(Vector inputs[], AggregateInputData &, idx_t, Vector &states, idx_t count) {
+	PacSumScatterUpdate<PacSumDoubleState, true, double, uhugeint_t>(inputs, states, count);
+}
+void PacSumScatterUpdateFloat(Vector inputs[], AggregateInputData &, idx_t, Vector &states, idx_t count) {
+	PacSumScatterUpdate<PacSumDoubleState, true, double, float>(inputs, states, count);
+}
+void PacSumScatterUpdateDouble(Vector inputs[], AggregateInputData &, idx_t, Vector &states, idx_t count) {
+	PacSumScatterUpdate<PacSumDoubleState, true, double, double>(inputs, states, count);
+}
+
+// instantiate Combine methods
+void PacSumCombineSigned(Vector &src, Vector &dst, AggregateInputData &, idx_t count) {
+	PacSumCombine<PacSumIntState<true>>(src, dst, count);
+}
+void PacSumCombineUnsigned(Vector &src, Vector &dst, AggregateInputData &, idx_t count) {
+	PacSumCombine<PacSumIntState<false>>(src, dst, count);
+}
+void PacSumCombineDouble(Vector &src, Vector &dst, AggregateInputData &, idx_t count) {
+	PacSumCombine<PacSumDoubleState>(src, dst, count);
+}
+
+// instantiate Finalize methods
+void PacSumFinalizeSigned(Vector &states, AggregateInputData &input, Vector &result, idx_t count, idx_t offset) {
+	PacSumFinalize<PacSumIntState<true>, hugeint_t>(states, input, result, count, offset);
+}
+void PacSumFinalizeUnsigned(Vector &states, AggregateInputData &input, Vector &result, idx_t count, idx_t offset) {
+	PacSumFinalize<PacSumIntState<false>, hugeint_t>(states, input, result, count, offset);
+}
+void PacSumFinalizeDouble(Vector &states, AggregateInputData &input, Vector &result, idx_t count, idx_t offset) {
+	PacSumFinalize<PacSumDoubleState, double>(states, input, result, count, offset);
+}
+
+static unique_ptr<FunctionData> // Bind function for pac_sum with optional mi parameter (must be constant)
+PacSumBind(ClientContext &ctx, AggregateFunction &, vector<unique_ptr<Expression>> &args) {
 	double mi = 128.0; // default
-	if (arguments.size() >= 3) {
-		if (!arguments[2]->IsFoldable()) {
+	if (args.size() >= 3) {
+		if (!args[2]->IsFoldable()) {
 			throw InvalidInputException("pac_sum: mi parameter must be a constant");
 		}
-		auto mi_val = ExpressionExecutor::EvaluateScalar(context, *arguments[2]);
+		auto mi_val = ExpressionExecutor::EvaluateScalar(ctx, *args[2]);
 		mi = mi_val.GetValue<double>();
 		if (mi <= 0.0) {
 			throw InvalidInputException("pac_sum: mi must be > 0");
@@ -27,363 +249,11 @@ static void PacSumIntInitialize(const AggregateFunction &, data_ptr_t state_p) {
 	memset(state_p, 0, sizeof(PacSumIntState<true>)); // memset to 0 works for both signed and unsigned
 }
 
-// Templated update internal - SIGNED selects signed/unsigned overflow checks
-template <bool SIGNED>
-AUTOVECTORIZE static inline void
-PacSumIntUpdateInternal(PacSumIntState<SIGNED> &state, uint64_t key_hash,
-                        typename std::conditional<SIGNED, int64_t, uint64_t>::type val) {
-#ifndef PAC_SUM_NONCASCADING
-	if (SIGNED ? VALUE_FITS_SIGNED(val, 8) : VALUE_FITS_UNSIGNED(val, 8)) {
-		AddToTotalsINT(state.totals8, val, key_hash);
-		state.Flush8(false);
-	} else if (SIGNED ? VALUE_FITS_SIGNED(val, 16) : VALUE_FITS_UNSIGNED(val, 16)) {
-		AddToTotalsINT(state.totals16, val, key_hash);
-		state.Flush16(false);
-	} else if (SIGNED ? VALUE_FITS_SIGNED(val, 32) : VALUE_FITS_UNSIGNED(val, 32)) {
-		AddToTotalsINT(state.totals32, val, key_hash);
-		state.Flush32(false);
-	} else {
-		AddToTotalsINT(state.totals64, val, key_hash);
-		state.Flush64(false);
-	}
-#else
-	AddToTotalsINT(state.totals128, val, key_hash); // directly add into int128_t (slow..)
-#endif
-}
-
-// Templated integer update - SIGNED selects state type and value cast
-template <bool SIGNED, class INPUT_TYPE>
-static inline void PacSumIntUpdate(Vector param[], AggregateInputData &, idx_t np, data_ptr_t state_p, idx_t cnt) {
-	using ValueType = typename std::conditional<SIGNED, int64_t, uint64_t>::type;
-	D_ASSERT(np == 2 || np == 3); // optional mi param (unused here) can make it 3
-	auto &state = *reinterpret_cast<PacSumIntState<SIGNED> *>(state_p);
-	if (!state.seen_null) {
-		UnifiedVectorFormat hash_data, value_data;
-		param[0].ToUnifiedFormat(cnt, hash_data);
-		param[1].ToUnifiedFormat(cnt, value_data);
-		auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
-		auto values = UnifiedVectorFormat::GetData<INPUT_TYPE>(value_data);
-
-		for (idx_t i = 0; i < cnt; i++) {
-			auto hash_idx = hash_data.sel->get_index(i);
-			auto value_idx = value_data.sel->get_index(i);
-			if (!hash_data.validity.RowIsValid(hash_idx) || !value_data.validity.RowIsValid(value_idx)) {
-				state.seen_null = true;
-			} else {
-				PacSumIntUpdateInternal<SIGNED>(state, hashes[hash_idx], static_cast<ValueType>(values[value_idx]));
-			}
-		}
-	}
-}
-
-// Templated integer scatter update - SIGNED selects state type and value cast
-template <bool SIGNED, class INPUT_TYPE>
-static inline void PacSumIntScatterUpdate(Vector param[], AggregateInputData &, idx_t np, Vector &states, idx_t cnt) {
-	using ValueType = typename std::conditional<SIGNED, int64_t, uint64_t>::type;
-	D_ASSERT(np == 2 || np == 3); // optional mi param (unused here) can make it 3
-
-	UnifiedVectorFormat hash_data, value_data, sdata;
-	param[0].ToUnifiedFormat(cnt, hash_data);
-	param[1].ToUnifiedFormat(cnt, value_data);
-	states.ToUnifiedFormat(cnt, sdata);
-
-	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
-	auto values = UnifiedVectorFormat::GetData<INPUT_TYPE>(value_data);
-	auto state_ptrs = UnifiedVectorFormat::GetData<PacSumIntState<SIGNED> *>(sdata);
-
-	for (idx_t i = 0; i < cnt; i++) {
-		auto hash_idx = hash_data.sel->get_index(i);
-		auto value_idx = value_data.sel->get_index(i);
-		auto state = state_ptrs[sdata.sel->get_index(i)];
-		if (!state->seen_null) {
-			if (!hash_data.validity.RowIsValid(hash_idx) || !value_data.validity.RowIsValid(value_idx)) {
-				state->seen_null = true;
-			} else {
-				PacSumIntUpdateInternal<SIGNED>(*state, hashes[hash_idx], static_cast<ValueType>(values[value_idx]));
-			}
-		}
-	}
-}
-
-template <bool SIGNED, class ACC_TYPE>
-AUTOVECTORIZE static inline void PacSumIntCombine(Vector &src, Vector &dst, AggregateInputData &, idx_t cnt) {
-	auto src_state = FlatVector::GetData<PacSumIntState<SIGNED> *>(src);
-	auto dst_state = FlatVector::GetData<PacSumIntState<SIGNED> *>(dst);
-	for (idx_t i = 0; i < cnt; i++) {
-		if (src_state[i]->seen_null) {
-			dst_state[i]->seen_null = true;
-		}
-		if (!dst_state[i]->seen_null) {
-#ifndef PAC_SUM_NONCASCADING
-			dst_state[i]->Flush8(true); // Force flush all levels to totals128
-#endif
-			for (int j = 0; j < 64; j++) {
-				dst_state[i]->totals128[j] += src_state[i]->totals128[j]; // combine totals128
-			}
-		}
-	}
-}
-
-template <bool SIGNED, class ACC_TYPE>
-static inline void PacSumIntFinalize(Vector &states, AggregateInputData &input, Vector &res, idx_t cnt, idx_t off) {
-	auto state = FlatVector::GetData<PacSumIntState<SIGNED> *>(states);
-	auto data = FlatVector::GetData<ACC_TYPE>(res);
-	auto &result_mask = FlatVector::Validity(res);
-	thread_local std::mt19937_64 gen(std::random_device {}());
-	double mi = input.bind_data ? input.bind_data->Cast<PacBindData>().mi : 128.0; // 128 is default
-
-	for (idx_t i = 0; i < cnt; i++) {
-		if (state[i]->seen_null) {
-			result_mask.SetInvalid(off + i);
-		} else {
-#ifndef PAC_SUM_NONCASCADING
-			state[i]->Flush8(true); // Force flush all levels to totals128
-#endif
-			double totals_d[64]; // Convert totals128 to double array
-			ToDoubleArray(state[i]->totals128, totals_d);
-			data[off + i] = // when choosing any one of the totals we go for #42 (but one counts from 0 ofc)
-			    FromDouble<ACC_TYPE>(PacNoisySampleFrom64Counters(totals_d, mi, gen)) + state[i]->totals128[41];
-		}
-	}
-}
-
 static idx_t PacSumDoubleStateSize(const AggregateFunction &) {
 	return sizeof(PacSumDoubleState);
 }
 static void PacSumDoubleInitialize(const AggregateFunction &, data_ptr_t state_ptr) {
 	memset(state_ptr, 0, sizeof(PacSumDoubleState));
-}
-
-static inline void PacSumDoubleUpdateInternal(PacSumDoubleState &state, uint64_t key_hash, double val) {
-#ifndef PAC_SUM_NONCASCADING
-	if (AdditionFitsInFloat(val)) {
-		AddToTotalsDOUBLE(state.totals32, static_cast<float>(val), key_hash);
-		state.Flush32(false);
-		return;
-	}
-#endif
-	AddToTotalsDOUBLE(state.totals64, val, key_hash);
-}
-
-// Double cascade update (ungrouped global aggregate) - also handles hugeint_t/uhugeint_t via ToDouble
-template <class INPUT_TYPE>
-static void PacSumDoubleUpdate(Vector param[], AggregateInputData &, idx_t np, data_ptr_t state_p, idx_t cnt) {
-	D_ASSERT(np == 2 || np == 3); // optional mi param (unused here) can make it 3
-	auto &state = *reinterpret_cast<PacSumDoubleState *>(state_p);
-	if (state.seen_null) {
-		return; // aggregate returns NULL after seeing a NULL value, whatever follows
-	}
-	UnifiedVectorFormat hash_data, value_data;
-	param[0].ToUnifiedFormat(cnt, hash_data);
-	param[1].ToUnifiedFormat(cnt, value_data);
-
-	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
-	auto values = UnifiedVectorFormat::GetData<INPUT_TYPE>(value_data);
-	for (idx_t i = 0; i < cnt; i++) {
-		auto hash_idx = hash_data.sel->get_index(i);
-		auto value_idx = value_data.sel->get_index(i);
-		if (!hash_data.validity.RowIsValid(hash_idx) || !value_data.validity.RowIsValid(value_idx)) {
-			state.seen_null = true;
-			return;
-		}
-		PacSumDoubleUpdateInternal(state, hashes[hash_idx], ToDouble(values[value_idx]));
-	}
-}
-
-// Double cascade scatter update (GROUP BY case) - also handles hugeint_t/uhugeint_t via ToDouble
-template <class INPUT_TYPE>
-static void PacSumDoubleScatterUpdate(Vector param[], AggregateInputData &, idx_t np, Vector &states, idx_t cnt) {
-	D_ASSERT(np == 2 || np == 3); // optional mi param (unused here) can make it 3
-	UnifiedVectorFormat hash_data, value_data, sdata;
-	param[0].ToUnifiedFormat(cnt, hash_data);
-	param[1].ToUnifiedFormat(cnt, value_data);
-	states.ToUnifiedFormat(cnt, sdata);
-
-	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
-	auto values = UnifiedVectorFormat::GetData<INPUT_TYPE>(value_data);
-	auto state_ptrs = UnifiedVectorFormat::GetData<PacSumDoubleState *>(sdata);
-
-	for (idx_t i = 0; i < cnt; i++) {
-		auto state_idx = sdata.sel->get_index(i);
-		auto state = state_ptrs[state_idx];
-		if (!state->seen_null) {
-			auto hash_idx = hash_data.sel->get_index(i);
-			auto value_idx = value_data.sel->get_index(i);
-			if (!hash_data.validity.RowIsValid(hash_idx) || !value_data.validity.RowIsValid(value_idx)) {
-				state->seen_null = true;
-			} else {
-				PacSumDoubleUpdateInternal(*state, hashes[hash_idx], ToDouble(values[value_idx]));
-			}
-		}
-	}
-}
-
-AUTOVECTORIZE static void PacSumDoubleCombine(Vector &src, Vector &dst, AggregateInputData &, idx_t cnt) {
-	auto src_state = FlatVector::GetData<PacSumDoubleState *>(src);
-	auto dst_state = FlatVector::GetData<PacSumDoubleState *>(dst);
-	for (idx_t i = 0; i < cnt; i++) {
-		if (src_state[i]->seen_null) {
-			dst_state[i]->seen_null = true;
-		}
-		if (!dst_state[i]->seen_null) {
-#ifndef PAC_SUM_NONCASCADING
-			dst_state[i]->Flush32(true); // flush all data to totals64
-#endif
-			for (int j = 0; j < 64; j++) {
-				dst_state[i]->totals64[j] += src_state[i]->totals64[j];
-			}
-		}
-	}
-}
-
-static void PacSumDoubleFinalize(Vector &states, AggregateInputData &input, Vector &res, idx_t cnt, idx_t off) {
-	auto state = FlatVector::GetData<PacSumDoubleState *>(states);
-	auto data = FlatVector::GetData<double>(res);
-	auto &result_mask = FlatVector::Validity(res);
-	thread_local std::mt19937_64 gen(std::random_device {}());
-	double mi = input.bind_data->Cast<PacBindData>().mi;
-
-	for (idx_t i = 0; i < cnt; i++) {
-		if (state[i]->seen_null) {
-			result_mask.SetInvalid(off + i);
-		} else {
-#ifndef PAC_SUM_NONCASCADING
-			state[i]->Flush32(true); // flush all data to totals64
-#endif
-			double totals_d[64];
-			ToDoubleArray(state[i]->totals64, totals_d); // (fast) dummy copy for double, conversion for hugeint
-			data[off + i] = // when choosing any one of the totals we go for #42 (but one counts from 0 ofc)
-			    FromDouble<double>(PacNoisySampleFrom64Counters(totals_d, mi, gen)) + state[i]->totals64[41];
-		}
-	}
-}
-
-// instantiate Update methods
-static void PacSumUpdateTinyInt(Vector param[], AggregateInputData &aggr, idx_t np, data_ptr_t state_p, idx_t cnt) {
-	PacSumIntUpdate<true, int8_t>(param, aggr, np, state_p, cnt);
-}
-static void PacSumUpdateSmallInt(Vector param[], AggregateInputData &aggr, idx_t np, data_ptr_t state_p, idx_t cnt) {
-	PacSumIntUpdate<true, int16_t>(param, aggr, np, state_p, cnt);
-}
-static void PacSumUpdateInteger(Vector param[], AggregateInputData &aggr, idx_t np, data_ptr_t state_p, idx_t cnt) {
-	PacSumIntUpdate<true, int32_t>(param, aggr, np, state_p, cnt);
-}
-static void PacSumUpdateBigInt(Vector param[], AggregateInputData &aggr, idx_t np, data_ptr_t state_p, idx_t cnt) {
-	PacSumIntUpdate<true, int64_t>(param, aggr, np, state_p, cnt);
-}
-static void PacSumUpdateHugeInt(Vector param[], AggregateInputData &aggr, idx_t np, data_ptr_t state_p, idx_t cnt) {
-	PacSumDoubleUpdate<hugeint_t>(param, aggr, np, state_p, cnt); // double update with conversion from hugeint_t
-}
-static void PacSumUpdateUTinyInt(Vector param[], AggregateInputData &aggr, idx_t np, data_ptr_t state_p, idx_t cnt) {
-	PacSumIntUpdate<false, uint8_t>(param, aggr, np, state_p, cnt);
-}
-static void PacSumUpdateUSmallInt(Vector param[], AggregateInputData &aggr, idx_t np, data_ptr_t state_p, idx_t cnt) {
-	PacSumIntUpdate<false, uint16_t>(param, aggr, np, state_p, cnt);
-}
-static void PacSumUpdateUInteger(Vector param[], AggregateInputData &aggr, idx_t np, data_ptr_t state_p, idx_t cnt) {
-	PacSumIntUpdate<false, uint32_t>(param, aggr, np, state_p, cnt);
-}
-static void PacSumUpdateUBigInt(Vector param[], AggregateInputData &aggr, idx_t np, data_ptr_t state_p, idx_t cnt) {
-	PacSumIntUpdate<false, uint64_t>(param, aggr, np, state_p, cnt);
-}
-static void PacSumUpdateUHugeInt(Vector param[], AggregateInputData &aggr, idx_t np, data_ptr_t state_p, idx_t cnt) {
-	PacSumDoubleUpdate<uhugeint_t>(param, aggr, np, state_p, cnt); // double update with conversion from uhugeint_t
-}
-static void PacSumUpdateFloat(Vector param[], AggregateInputData &aggr, idx_t np, data_ptr_t state_p, idx_t cnt) {
-	PacSumDoubleUpdate<float>(param, aggr, np, state_p, cnt);
-}
-static void PacSumUpdateDouble(Vector param[], AggregateInputData &aggr, idx_t np, data_ptr_t state_p, idx_t cnt) {
-	PacSumDoubleUpdate<double>(param, aggr, np, state_p, cnt);
-}
-
-// instantiate ScatterUpdate methods
-static void PacSumScatterTinyInt(Vector param[], AggregateInputData &aggr, idx_t np, Vector &state_p, idx_t cnt) {
-	PacSumIntScatterUpdate<true, int8_t>(param, aggr, np, state_p, cnt);
-}
-static void PacSumScatterSmallInt(Vector param[], AggregateInputData &aggr, idx_t np, Vector &state_p, idx_t cnt) {
-	PacSumIntScatterUpdate<true, int16_t>(param, aggr, np, state_p, cnt);
-}
-static void PacSumScatterInteger(Vector param[], AggregateInputData &aggr, idx_t np, Vector &state_p, idx_t cnt) {
-	PacSumIntScatterUpdate<true, int32_t>(param, aggr, np, state_p, cnt);
-}
-static void PacSumScatterBigInt(Vector param[], AggregateInputData &aggr, idx_t np, Vector &state_p, idx_t cnt) {
-	PacSumIntScatterUpdate<true, int64_t>(param, aggr, np, state_p, cnt);
-}
-static void PacSumScatterHugeInt(Vector param[], AggregateInputData &aggr, idx_t np, Vector &state_p, idx_t cnt) {
-	PacSumDoubleScatterUpdate<hugeint_t>(param, aggr, np, state_p, cnt); // scatter doubles after cast from hugeint_t
-}
-static void PacSumScatterUTinyInt(Vector param[], AggregateInputData &aggr, idx_t np, Vector &state_p, idx_t cnt) {
-	PacSumIntScatterUpdate<false, uint8_t>(param, aggr, np, state_p, cnt);
-}
-static void PacSumScatterUSmallInt(Vector param[], AggregateInputData &aggr, idx_t np, Vector &state_p, idx_t cnt) {
-	PacSumIntScatterUpdate<false, uint16_t>(param, aggr, np, state_p, cnt);
-}
-static void PacSumScatterUInteger(Vector param[], AggregateInputData &aggr, idx_t np, Vector &state_p, idx_t cnt) {
-	PacSumIntScatterUpdate<false, uint32_t>(param, aggr, np, state_p, cnt);
-}
-static void PacSumScatterUBigInt(Vector param[], AggregateInputData &aggr, idx_t np, Vector &state_p, idx_t cnt) {
-	PacSumIntScatterUpdate<false, uint64_t>(param, aggr, np, state_p, cnt);
-}
-static void PacSumScatterUHugeInt(Vector param[], AggregateInputData &aggr, idx_t np, Vector &state_p, idx_t cnt) {
-	PacSumDoubleScatterUpdate<uhugeint_t>(param, aggr, np, state_p, cnt); // scatter doubles after cast from uhugeint_t
-}
-static void PacSumScatterFloat(Vector param[], AggregateInputData &aggr, idx_t np, Vector &states, idx_t cnt) {
-	PacSumDoubleScatterUpdate<float>(param, aggr, np, states, cnt);
-}
-static void PacSumScatterDouble(Vector param[], AggregateInputData &aggr, idx_t np, Vector &states, idx_t cnt) {
-	PacSumDoubleScatterUpdate<double>(param, aggr, np, states, cnt);
-}
-
-// instantiate Combine methods
-static void PacSumCombineTinyInt(Vector &src, Vector &dst, AggregateInputData &aggr, idx_t cnt) {
-	PacSumIntCombine<true, hugeint_t>(src, dst, aggr, cnt);
-}
-static void PacSumCombineSmallInt(Vector &src, Vector &dst, AggregateInputData &aggr, idx_t cnt) {
-	PacSumIntCombine<true, hugeint_t>(src, dst, aggr, cnt);
-}
-static void PacSumCombineInteger(Vector &src, Vector &dst, AggregateInputData &aggr, idx_t cnt) {
-	PacSumIntCombine<true, hugeint_t>(src, dst, aggr, cnt);
-}
-static void PacSumCombineBigInt(Vector &src, Vector &dst, AggregateInputData &aggr, idx_t cnt) {
-	PacSumIntCombine<true, hugeint_t>(src, dst, aggr, cnt);
-}
-static void PacSumCombineUTinyInt(Vector &src, Vector &dst, AggregateInputData &aggr, idx_t cnt) {
-	PacSumIntCombine<false, hugeint_t>(src, dst, aggr, cnt);
-}
-static void PacSumCombineUSmallInt(Vector &src, Vector &dst, AggregateInputData &aggr, idx_t cnt) {
-	PacSumIntCombine<false, hugeint_t>(src, dst, aggr, cnt);
-}
-static void PacSumCombineUInteger(Vector &src, Vector &dst, AggregateInputData &aggr, idx_t cnt) {
-	PacSumIntCombine<false, hugeint_t>(src, dst, aggr, cnt);
-}
-static void PacSumCombineUBigInt(Vector &src, Vector &dst, AggregateInputData &aggr, idx_t cnt) {
-	PacSumIntCombine<false, hugeint_t>(src, dst, aggr, cnt);
-}
-
-// instantiate Finalize methods
-static void PacSumFinalizeTinyInt(Vector &states, AggregateInputData &aggr, Vector &res, idx_t cnt, idx_t off) {
-	PacSumIntFinalize<true, hugeint_t>(states, aggr, res, cnt, off);
-}
-static void PacSumFinalizeSmallInt(Vector &states, AggregateInputData &aggr, Vector &res, idx_t cnt, idx_t off) {
-	PacSumIntFinalize<true, hugeint_t>(states, aggr, res, cnt, off);
-}
-static void PacSumFinalizeInteger(Vector &states, AggregateInputData &aggr, Vector &res, idx_t cnt, idx_t off) {
-	PacSumIntFinalize<true, hugeint_t>(states, aggr, res, cnt, off);
-}
-static void PacSumFinalizeBigInt(Vector &states, AggregateInputData &aggr, Vector &res, idx_t cnt, idx_t off) {
-	PacSumIntFinalize<true, hugeint_t>(states, aggr, res, cnt, off);
-}
-static void PacSumFinalizeUTinyInt(Vector &states, AggregateInputData &aggr, Vector &res, idx_t cnt, idx_t off) {
-	PacSumIntFinalize<false, hugeint_t>(states, aggr, res, cnt, off);
-}
-static void PacSumFinalizeUSmallInt(Vector &states, AggregateInputData &aggr, Vector &res, idx_t cnt, idx_t off) {
-	PacSumIntFinalize<false, hugeint_t>(states, aggr, res, cnt, off);
-}
-static void PacSumFinalizeUInteger(Vector &states, AggregateInputData &aggr, Vector &res, idx_t cnt, idx_t off) {
-	PacSumIntFinalize<false, hugeint_t>(states, aggr, res, cnt, off);
-}
-static void PacSumFinalizeUBigInt(Vector &states, AggregateInputData &aggr, Vector &res, idx_t cnt, idx_t off) {
-	PacSumIntFinalize<false, hugeint_t>(states, aggr, res, cnt, off);
 }
 
 // Helper to register both 2-param and 3-param (with optional mi) versions
@@ -403,37 +273,37 @@ void RegisterPacSumFunctions(ExtensionLoader &loader) {
 
 	// Signed integers (accumulate to hugeint_t, return HUGEINT)
 	AddFcn(fcn_set, LogicalType::TINYINT, LogicalType::HUGEINT, PacSumIntStateSize, PacSumIntInitialize,
-	       PacSumScatterTinyInt, PacSumCombineTinyInt, PacSumFinalizeTinyInt, PacSumUpdateTinyInt);
+	       PacSumScatterUpdateTinyInt, PacSumCombineSigned, PacSumFinalizeSigned, PacSumUpdateTinyInt);
 	AddFcn(fcn_set, LogicalType::BOOLEAN, LogicalType::HUGEINT, PacSumIntStateSize, PacSumIntInitialize,
-	       PacSumScatterTinyInt, PacSumCombineTinyInt, PacSumFinalizeTinyInt, PacSumUpdateTinyInt);
+	       PacSumScatterUpdateTinyInt, PacSumCombineSigned, PacSumFinalizeSigned, PacSumUpdateTinyInt);
 	AddFcn(fcn_set, LogicalType::SMALLINT, LogicalType::HUGEINT, PacSumIntStateSize, PacSumIntInitialize,
-	       PacSumScatterSmallInt, PacSumCombineSmallInt, PacSumFinalizeSmallInt, PacSumUpdateSmallInt);
+	       PacSumScatterUpdateSmallInt, PacSumCombineSigned, PacSumFinalizeSigned, PacSumUpdateSmallInt);
 	AddFcn(fcn_set, LogicalType::INTEGER, LogicalType::HUGEINT, PacSumIntStateSize, PacSumIntInitialize,
-	       PacSumScatterInteger, PacSumCombineInteger, PacSumFinalizeInteger, PacSumUpdateInteger);
+	       PacSumScatterUpdateInteger, PacSumCombineSigned, PacSumFinalizeSigned, PacSumUpdateInteger);
 	AddFcn(fcn_set, LogicalType::BIGINT, LogicalType::HUGEINT, PacSumIntStateSize, PacSumIntInitialize,
-	       PacSumScatterBigInt, PacSumCombineBigInt, PacSumFinalizeBigInt, PacSumUpdateBigInt);
+	       PacSumScatterUpdateBigInt, PacSumCombineSigned, PacSumFinalizeSigned, PacSumUpdateBigInt);
 
 	// Unsigned integers (idem)
 	AddFcn(fcn_set, LogicalType::UTINYINT, LogicalType::HUGEINT, PacSumIntStateSize, PacSumIntInitialize,
-	       PacSumScatterUTinyInt, PacSumCombineUTinyInt, PacSumFinalizeUTinyInt, PacSumUpdateUTinyInt);
+	       PacSumScatterUpdateUTinyInt, PacSumCombineUnsigned, PacSumFinalizeUnsigned, PacSumUpdateUTinyInt);
 	AddFcn(fcn_set, LogicalType::USMALLINT, LogicalType::HUGEINT, PacSumIntStateSize, PacSumIntInitialize,
-	       PacSumScatterUSmallInt, PacSumCombineUSmallInt, PacSumFinalizeUSmallInt, PacSumUpdateUSmallInt);
+	       PacSumScatterUpdateUSmallInt, PacSumCombineUnsigned, PacSumFinalizeUnsigned, PacSumUpdateUSmallInt);
 	AddFcn(fcn_set, LogicalType::UINTEGER, LogicalType::HUGEINT, PacSumIntStateSize, PacSumIntInitialize,
-	       PacSumScatterUInteger, PacSumCombineUInteger, PacSumFinalizeUInteger, PacSumUpdateUInteger);
+	       PacSumScatterUpdateUInteger, PacSumCombineUnsigned, PacSumFinalizeUnsigned, PacSumUpdateUInteger);
 	AddFcn(fcn_set, LogicalType::UBIGINT, LogicalType::HUGEINT, PacSumIntStateSize, PacSumIntInitialize,
-	       PacSumScatterUBigInt, PacSumCombineUBigInt, PacSumFinalizeUBigInt, PacSumUpdateUBigInt);
+	       PacSumScatterUpdateUBigInt, PacSumCombineUnsigned, PacSumFinalizeUnsigned, PacSumUpdateUBigInt);
 
 	// [u]hugeint_t converts during the [scatter]update to double, and otherwise just uses the double logic
 	AddFcn(fcn_set, LogicalType::HUGEINT, LogicalType::DOUBLE, PacSumDoubleStateSize, PacSumDoubleInitialize,
-	       PacSumScatterHugeInt, PacSumDoubleCombine, PacSumDoubleFinalize, PacSumUpdateHugeInt);
+	       PacSumScatterUpdateHugeInt, PacSumCombineDouble, PacSumFinalizeDouble, PacSumUpdateHugeInt);
 	AddFcn(fcn_set, LogicalType::UHUGEINT, LogicalType::DOUBLE, PacSumDoubleStateSize, PacSumDoubleInitialize,
-	       PacSumScatterUHugeInt, PacSumDoubleCombine, PacSumDoubleFinalize, PacSumUpdateUHugeInt);
+	       PacSumScatterUpdateUHugeInt, PacSumCombineDouble, PacSumFinalizeDouble, PacSumUpdateUHugeInt);
 
 	// Floating point (accumulate to double, return DOUBLE)
 	AddFcn(fcn_set, LogicalType::FLOAT, LogicalType::DOUBLE, PacSumDoubleStateSize, PacSumDoubleInitialize,
-	       PacSumScatterFloat, PacSumDoubleCombine, PacSumDoubleFinalize, PacSumUpdateFloat);
+	       PacSumScatterUpdateFloat, PacSumCombineDouble, PacSumFinalizeDouble, PacSumUpdateFloat);
 	AddFcn(fcn_set, LogicalType::DOUBLE, LogicalType::DOUBLE, PacSumDoubleStateSize, PacSumDoubleInitialize,
-	       PacSumScatterDouble, PacSumDoubleCombine, PacSumDoubleFinalize, PacSumUpdateDouble);
+	       PacSumScatterUpdateDouble, PacSumCombineDouble, PacSumFinalizeDouble, PacSumUpdateDouble);
 
 	loader.RegisterFunction(fcn_set);
 }

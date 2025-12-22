@@ -6,9 +6,6 @@
 #include "duckdb/function/scalar_function.hpp"
 #include <duckdb/parser/parsed_data/create_scalar_function_info.hpp>
 
-// OpenSSL linked through vcpkg
-#include <openssl/opensslv.h>
-
 #include <fstream>
 #include <unordered_set>
 
@@ -38,14 +35,6 @@ inline void PacScalarFun(DataChunk &args, ExpressionState &state, Vector &result
 	});
 }
 
-inline void PacOpenSSLVersionScalarFun(DataChunk &args, ExpressionState &state, Vector &result) {
-	auto &name_vector = args.data[0];
-	UnaryExecutor::Execute<string_t, string_t>(name_vector, result, args.size(), [&](string_t name) {
-		return StringVector::AddString(result, "Pac " + name.GetString() + ", my linked OpenSSL version is " +
-		                                           OPENSSL_VERSION_TEXT);
-	});
-}
-
 // NOTE: add/remove PAC privacy unit helpers and functions moved to src/include/pac_privacy_unit.hpp and
 // src/pac_privacy_unit.cpp
 
@@ -53,11 +42,6 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// Register a scalar function
 	auto pac_scalar_function = ScalarFunction("pac", {LogicalType::VARCHAR}, LogicalType::VARCHAR, PacScalarFun);
 	loader.RegisterFunction(pac_scalar_function);
-
-	// Register another scalar function
-	auto pac_openssl_version_scalar_function =
-	    ScalarFunction("pac_openssl_version", {LogicalType::VARCHAR}, LogicalType::VARCHAR, PacOpenSSLVersionScalarFun);
-	loader.RegisterFunction(pac_openssl_version_scalar_function);
 
 	// Register add_pac_privacy_unit (1-arg)
 	// NOTE: scalar add/remove functions removed; prefer PRAGMA add_privacy_unit / PRAGMA remove_privacy_unit

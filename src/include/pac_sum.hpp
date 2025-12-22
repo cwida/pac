@@ -3,20 +3,14 @@
 //
 
 #include "duckdb.hpp"
-#include "duckdb/function/aggregate_function.hpp"
-#include "duckdb/common/types/vector.hpp"
-#include "duckdb/common/types/data_chunk.hpp"
-#include "duckdb/common/types/value.hpp"
-#include "duckdb/common/types/string_type.hpp"
 #include "pac_aggregate.hpp"
-
-#include <cstdint>
-#include <random>
-#include <cstring>
-#include <type_traits>
 
 #ifndef PAC_SUM_HPP
 #define PAC_SUM_HPP
+
+namespace duckdb {
+
+void RegisterPacSumFunctions(ExtensionLoader &loader);
 
 // ============================================================================
 // PAC_SUM(hash_key, value)  aggregate function
@@ -47,8 +41,6 @@
 //				DuckDB produces DOUBLE outcomes for 128-bits integer sums, so we do as well.
 //              This basically uses the DOUBLE methods where the updates perform a cast from hugeint
 
-namespace duckdb {
-
 //#define PAC_SUM_NONCASCADING 1 seems 10x slower on Apple
 
 // This macro controls how we filter the values. Rather than IF (bit_is_set) THEN totals += value
@@ -59,7 +51,7 @@ namespace duckdb {
 // - AND:  value &= (bit_is_set - 1)
 // In micro-benchmarks on Apple, MULT is 30% faster.
 // Note: AND only works for integers, not floating point, so DOUBLE always uses MULT.
-#define PAC_FILTER_MULT(val, tpe, key, pos) ((val) * static_cast<tpe>(((key) >> (pos)) & 1ULL))
+#define PAC_FILTER_MULT(val, tpe, key, pos) ((val) * (static_cast<tpe>(((key) >> (pos)) & 1ULL)))
 #define PAC_FILTER_AND(val, tpe, key, pos)  ((val) & (static_cast<tpe>(((key) >> (pos)) & 1ULL) - 1ULL))
 
 // INT filter is configurable (currently MULT, can switch to AND for benchmarking)
@@ -86,19 +78,27 @@ DEFINE_ADD_TO_TOTALS(DOUBLE)
 // =========================
 
 // Number of top bits bX for counters of uintX reserved for overflow headroom at each level
-static constexpr int kTopBits8 = 3;
-static constexpr int kTopBits16 = 4;
-static constexpr int kTopBits32 = 5;
-static constexpr int kTopBits64 = 8;
+static constexpr int ZeroLeadingBitsForInt8 = 3;
+static constexpr int ZeroLeadingBitsForInt16 = 4;
+static constexpr int ZeroLeadingBitsForInt32 = 5;
+static constexpr int ZeroLeadingBitsForInt64 = 8;
 
 // Flush threshold = 2^bX (signed types use half the threshold) - how many times can we add without overflow?
-#define FLUSH_THRESHOLD_SIGNED(X)   (1 << (kTopBits##X - 1))
-#define FLUSH_THRESHOLD_UNSIGNED(X) (1 << kTopBits##X)
+#define FLUSH_THRESHOLD_SIGNED(X)   (1 << (ZeroLeadingBitsForInt##X - 1))
+#define FLUSH_THRESHOLD_UNSIGNED(X) (1 << ZeroLeadingBitsForInt##X)
 
 // Check whether a value fits in the given bit width (top bits are 0)
-#define VALUE_FITS_SIGNED(value, bits)                                                                                 \
-	((((value) >= 0 ? static_cast<uint64_t>(value) : static_cast<uint64_t>(-(value))) >> (bits - kTopBits##bits)) == 0)
-#define VALUE_FITS_UNSIGNED(value, bits) ((static_cast<uint64_t>(value) >> (bits - kTopBits##bits)) == 0)
+// SIGNED needs absolute value check (negative numbers would become huge when cast to uint64_t)
+#define NBITS_SUBTOTAL_FITS_SIGNED(value, bits, zeroed)                                                                \
+	((((value) >= 0 ? static_cast<uint64_t>(value) : static_cast<uint64_t>(-(value))) >> (bits - zeroed)) == 0)
+// UNSIGNED can just cast directly (values are always positive)
+#define NBITS_SUBTOTAL_FITS_UNSIGNED(value, bits, zeroed) ((static_cast<uint64_t>(value) >> (bits - zeroed)) == 0)
+
+// Templated helper to check if a value safely fits in a subtotal of given bit width (= whether its topbits are free)
+template <bool SIGNED>
+static inline bool NbitsSubtotalFitsValue(int64_t value, int bits, int zeroed) {
+	return SIGNED ? NBITS_SUBTOTAL_FITS_SIGNED(value, bits, zeroed) : NBITS_SUBTOTAL_FITS_UNSIGNED(value, bits, zeroed);
+}
 
 // Templated integer state - SIGNED selects signed/unsigned types and thresholds
 template <bool SIGNED>
@@ -109,56 +109,56 @@ struct PacSumIntState {
 	using T64 = typename std::conditional<SIGNED, int64_t, uint64_t>::type;
 
 #ifndef PAC_SUM_NONCASCADING
-	T8 totals8[64];
-	T16 totals16[64];
-	T32 totals32[64];
-	T64 totals64[64];
+	T8 subtotals8[64];
+	T16 subtotals16[64];
+	T32 subtotals32[64];
+	T64 subtotals64[64];
 #endif
-	hugeint_t totals128[64]; // want this array last (smaller totals first) for sequential CPU cache access
+	hugeint_t totals[64]; // want this array last (smaller subtotals first) for sequential CPU cache access
 #ifndef PAC_SUM_NONCASCADING
-	uint32_t count8, count16, count32, count64;
+	uint32_t update_count8, update_count16, update_count32, update_count64;
 
 	AUTOVECTORIZE inline void Flush64(bool force) {
-		if (force || ++count64 >= (SIGNED ? FLUSH_THRESHOLD_SIGNED(64) : FLUSH_THRESHOLD_UNSIGNED(64))) {
+		if (force || ++update_count64 == (SIGNED ? FLUSH_THRESHOLD_SIGNED(64) : FLUSH_THRESHOLD_UNSIGNED(64))) {
 			for (int i = 0; i < 64; i++) {
-				totals128[i] += hugeint_t(totals64[i]);
-				totals64[i] = 0;
+				totals[i] += hugeint_t(subtotals64[i]);
+				subtotals64[i] = 0;
 			}
-			count64 = 0;
+			update_count64 = 0;
 		}
 	}
 	AUTOVECTORIZE inline void Flush32(bool force) {
-		if (force || ++count32 >= (SIGNED ? FLUSH_THRESHOLD_SIGNED(32) : FLUSH_THRESHOLD_UNSIGNED(32))) {
+		if (force || ++update_count32 == (SIGNED ? FLUSH_THRESHOLD_SIGNED(32) : FLUSH_THRESHOLD_UNSIGNED(32))) {
 			for (int i = 0; i < 64; i++) {
-				totals64[i] += totals32[i];
-				totals32[i] = 0;
+				subtotals64[i] += subtotals32[i];
+				subtotals32[i] = 0;
 			}
-			count64 += count32;
-			count32 = 0;
+			update_count32 = 0;
 			Flush64(force);
 		}
 	}
 	AUTOVECTORIZE inline void Flush16(bool force) {
-		if (force || ++count16 >= (SIGNED ? FLUSH_THRESHOLD_SIGNED(16) : FLUSH_THRESHOLD_UNSIGNED(16))) {
+		if (force || ++update_count16 == (SIGNED ? FLUSH_THRESHOLD_SIGNED(16) : FLUSH_THRESHOLD_UNSIGNED(16))) {
 			for (int i = 0; i < 64; i++) {
-				totals32[i] += totals16[i];
-				totals16[i] = 0;
+				subtotals32[i] += subtotals16[i];
+				subtotals16[i] = 0;
 			}
-			count32 += count16;
-			count16 = 0;
+			update_count16 = 0;
 			Flush32(force);
 		}
 	}
 	AUTOVECTORIZE inline void Flush8(bool force) {
-		if (force || ++count8 >= (SIGNED ? FLUSH_THRESHOLD_SIGNED(8) : FLUSH_THRESHOLD_UNSIGNED(8))) {
+		if (force || ++update_count8 == (SIGNED ? FLUSH_THRESHOLD_SIGNED(8) : FLUSH_THRESHOLD_UNSIGNED(8))) {
 			for (int i = 0; i < 64; i++) {
-				totals16[i] += totals8[i];
-				totals8[i] = 0;
+				subtotals16[i] += subtotals8[i];
+				subtotals8[i] = 0;
 			}
-			count16 += count8;
-			count8 = 0;
+			update_count8 = 0;
 			Flush16(force);
 		}
+	}
+	inline void FlushAll() {
+		Flush8(true);
 	}
 #endif
 	bool seen_null;
@@ -171,34 +171,34 @@ struct PacSumIntState {
 static constexpr double kDoubleMaxForFloat32 = 1000000.0;
 static constexpr uint32_t kDoubleFlushThreshold = 16;
 
-static inline bool AdditionFitsInFloat(double value) {
+static inline bool FloatSubtotalFitsDouble(double value) { // checker whether we can quickly accumulate in 32-bits float
 	double abs_v = value >= 0 ? value : -value;
-	return abs_v >= kDoubleMaxForFloat32;
+	return abs_v < kDoubleMaxForFloat32;
 }
 
 struct PacSumDoubleState {
 #ifndef PAC_SUM_NONCASCADING
-	float totals32[64];
+	float subtotals[64];
 #endif
-	double totals64[64]; // want this array last (smaller totals first) for sequential CPU cache access
+	double totals[64]; // want this array last (smaller subtotals first) for sequential CPU cache access
 #ifndef PAC_SUM_NONCASCADING
-	uint32_t count32;
+	uint32_t update_count;
 
 	AUTOVECTORIZE inline void Flush32(bool force) {
-		if (force || ++count32 >= kDoubleFlushThreshold) {
+		if (force || ++update_count >= kDoubleFlushThreshold) {
 			for (int i = 0; i < 64; i++) {
-				totals64[i] += static_cast<double>(totals32[i]);
-				totals32[i] = 0.0f;
+				totals[i] += static_cast<double>(subtotals[i]);
 			}
-			count32 = 0;
+			memset(subtotals, 0, sizeof(subtotals));
+			update_count = 0;
 		}
+	}
+	inline void FlushAll() {
+		Flush32(true);
 	}
 #endif
 	bool seen_null;
 };
-
-// Register pac_sum functions (helper implemented in pac_sum.cpp)
-void RegisterPacSumFunctions(ExtensionLoader &loader);
 
 } // namespace duckdb
 
