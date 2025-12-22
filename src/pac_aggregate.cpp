@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstring>
 #include <type_traits>
+#include <limits>
 
 // Every argument to pac_aggregate is the output of a query evaluated on a random subsample of the privacy unit
 
@@ -24,34 +25,98 @@ namespace duckdb {
 // Forward declaration for the internal variance helper so it can be used above
 static double ComputeSecondMomentVariance(const std::vector<double> &values);
 
+// Deterministic sampling helpers (use engine() bits directly so draws are identical across platforms
+// for a given mt19937_64 seed). Function names follow repository style (no snake_case).
+static inline uint64_t EngineNext(std::mt19937_64 &gen) {
+    return gen();
+}
+
+// DeterministicUniformRange: unbiased integer in [0, n-1] using rejection sampling on 64-bit engine outputs
+static inline idx_t DeterministicUniformRange(std::mt19937_64 &gen, idx_t n) {
+    if (n <= 0) {
+        return 0;
+    }
+    const uint64_t maxv = std::numeric_limits<uint64_t>::max();
+    // compute largest multiple of n that fits in uint64_t (limit = floor((maxv+1)/n)*n)
+    // to avoid overflow use division
+    uint64_t limit = (maxv / static_cast<uint64_t>(n)) * static_cast<uint64_t>(n);
+    while (true) {
+        uint64_t r = EngineNext(gen);
+        if (r < limit) {
+            return static_cast<idx_t>(r % static_cast<uint64_t>(n));
+        }
+        // otherwise retry
+    }
+}
+
+// DeterministicUniformUnit: produce a uniform double in [0,1) using 53 bits from engine
+static inline double DeterministicUniformUnit(std::mt19937_64 &gen) {
+    uint64_t r = EngineNext(gen);
+    uint64_t top53 = r >> 11; // keep top 53 bits
+    constexpr double inv2pow53 = 1.0 / 9007199254740992.0; // 1 / 2^53
+    return static_cast<double>(top53) * inv2pow53;
+}
+
+// DeterministicNormalSample: Box–Muller sampling using DeterministicUniformUnit
+static inline double DeterministicNormalSample(std::mt19937_64 &gen, bool &has_spare, double &spare, double mean, double stddev) {
+    if (has_spare) {
+        has_spare = false;
+        return mean + spare * stddev;
+    }
+    double u1 = DeterministicUniformUnit(gen);
+    double u2 = DeterministicUniformUnit(gen);
+    if (u1 <= 0.0) {
+        u1 = std::numeric_limits<double>::min();
+    }
+    double r = std::sqrt(-2.0 * std::log(u1));
+    double theta = 2.0 * M_PI * u2;
+    double z0 = r * std::cos(theta);
+    double z1 = r * std::sin(theta);
+    spare = z1;
+    has_spare = true;
+    return mean + z0 * stddev;
+}
+
 // Finalize: compute noisy sample from the 64 counters (works on double array)
 double PacNoisySampleFrom64Counters(const double counters[64], double mi, std::mt19937_64 &gen) {
-	constexpr int N = 64;
-	// Compute empirical (second-moment) variance across the 64 counters and use it
-	// to determine the noise variance. We reuse ComputeSecondMomentVariance here.
-	std::vector<double> vals(counters, counters + N);
-	// Compute delta using the shared exported helper (validates mi as well)
-	double delta = ComputeDeltaFromValues(vals, mi);
+    constexpr int N = 64;
+    // Compute empirical (second-moment) variance across the 64 counters and use it
+    // to determine the noise variance. We reuse ComputeSecondMomentVariance here.
+    std::vector<double> vals(counters, counters + N);
+    // Compute delta using the shared exported helper (validates mi as well)
+    double delta = ComputeDeltaFromValues(vals, mi);
 
-	// Pick random index J in [0, N-1] to select the base counter yJ (same semantics as before)
-	std::uniform_int_distribution<int> uid(0, N - 1);
-	int J = uid(gen);
-	double yJ = counters[J];
+    // Pick random index J in [0, N-1] to select the base counter yJ (same semantics as before)
+    int J = static_cast<int>(DeterministicUniformRange(gen, N));
+    double yJ = counters[J];
 
-	if (delta <= 0.0 || !std::isfinite(delta)) {
-		// If there's no variance, return the selected counter value without noise.
-		return yJ;
-	}
+    if (delta <= 0.0 || !std::isfinite(delta)) {
+        // If there's no variance, return the selected counter value without noise.
+        return yJ;
+    }
 
-	// Sample normal(0, sqrt(delta)).
-	std::normal_distribution<double> gauss(0.0, std::sqrt(delta));
-	return yJ + gauss(gen);
+    // Sample normal(0, sqrt(delta)) using deterministic Box–Muller
+    // We need a spare buffer for the generated pair; but PacAggregateLocalState owns that state.
+    // The helper above only uses engine/local spare passed by caller; here we can't access spare.
+    // To keep the same signature, fall back to a stateless Box–Muller that consumes two engine draws
+    // and returns one sample (no spare saved). This remains deterministic across platforms.
+
+    // draw two uniforms
+    double u1 = DeterministicUniformUnit(gen);
+    double u2 = DeterministicUniformUnit(gen);
+    if (u1 <= 0.0) u1 = std::numeric_limits<double>::min();
+    double r = std::sqrt(-2.0 * std::log(u1));
+    double theta = 2.0 * M_PI * u2;
+    double z0 = r * std::cos(theta);
+    return yJ + z0 * std::sqrt(delta);
 }
 
 struct PacAggregateLocalState : public FunctionLocalState {
-	explicit PacAggregateLocalState(uint64_t seed) : gen(seed) {
-	}
-	std::mt19937_64 gen;
+    explicit PacAggregateLocalState(uint64_t seed) : gen(seed), has_spare(false), spare(0.0) {
+    }
+    std::mt19937_64 gen;
+    bool has_spare;
+    double spare;
 };
 
 // Compute second-moment variance (not unbiased estimator)
@@ -213,8 +278,7 @@ static void PacAggregateScalar(DataChunk &args, ExpressionState &state, Vector &
 		// ---------------- PAC core ----------------
 
 		// 1. pick J
-		std::uniform_int_distribution<idx_t> unif(0, values.size() - 1);
-		idx_t J = unif(gen);
+		idx_t J = DeterministicUniformRange(gen, values.size());
 		double yJ = values[J];
 
 		// 2. empirical (second-moment) variance over the full list
@@ -227,8 +291,7 @@ static void PacAggregateScalar(DataChunk &args, ExpressionState &state, Vector &
 		}
 
 		// 3. noise
-		std::normal_distribution<double> gauss(0.0, std::sqrt(delta));
-		res[row] = yJ + gauss(gen);
+		res[row] = yJ + DeterministicNormalSample(gen, local.has_spare, local.spare, 0.0, std::sqrt(delta));
 	}
 
 	if (args.AllConstant()) {
