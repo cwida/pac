@@ -60,7 +60,7 @@ namespace duckdb {
 // In micro-benchmarks on Apple, MULT is 30% faster.
 // Note: AND only works for integers, not floating point, so DOUBLE always uses MULT.
 #define PAC_FILTER_MULT(val, tpe, key, pos) ((val) * static_cast<tpe>(((key) >> (pos)) & 1ULL))
-#define PAC_FILTER_AND(val, tpe, key, pos) ((val) & (static_cast<tpe>(((key) >> (pos)) & 1ULL) - 1ULL))
+#define PAC_FILTER_AND(val, tpe, key, pos)  ((val) & (static_cast<tpe>(((key) >> (pos)) & 1ULL) - 1ULL))
 
 // INT filter is configurable (currently MULT, can switch to AND for benchmarking)
 #define PAC_FILTER_INT PAC_FILTER_MULT
@@ -100,12 +100,12 @@ static constexpr int kTopBits64 = 8;
 #define FLUSH_THRESHOLD_UNSIGNED(X) (1 << kTopBits##X)
 
 // Check whether a value is small, i.e. top-bits are 0
-#define HAS_TOP_BITS_SET_SIGNED(value, bits) \
+#define HAS_TOP_BITS_SET_SIGNED(value, bits)                                                                           \
 	((((value) >= 0 ? static_cast<uint64_t>(value) : static_cast<uint64_t>(-(value))) >> (bits - kTopBits##bits)) != 0)
 #define HAS_TOP_BITS_SET_UNSIGNED(value, bits) ((static_cast<uint64_t>(value) >> (bits - kTopBits##bits)) != 0)
 
 // Bool parameter version - compiler optimizes away the ternary
-#define HAS_TOP_BITS_SET(value, bits, is_signed) \
+#define HAS_TOP_BITS_SET(value, bits, is_signed)                                                                       \
 	((is_signed) ? HAS_TOP_BITS_SET_SIGNED(value, bits) : HAS_TOP_BITS_SET_UNSIGNED(value, bits))
 
 // Templated integer state - SIGNED selects signed/unsigned types and thresholds
