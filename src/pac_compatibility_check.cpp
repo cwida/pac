@@ -12,8 +12,6 @@
 #include <unordered_map>
 #include <unordered_set>
 
-using namespace duckdb;
-
 namespace duckdb {
 
 static bool ContainsCrossJoinWithGenerateSeries(const LogicalOperator &op) {

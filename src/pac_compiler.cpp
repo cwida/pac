@@ -75,8 +75,9 @@ static LogicalProjection *FindTopProjection(unique_ptr<LogicalOperator> &op) {
 
 // Helper to find the parent LogicalProjection of a given child node
 static LogicalProjection *FindParentProjection(unique_ptr<LogicalOperator> &root, LogicalOperator *target_child) {
-	if (!root)
+	if (!root) {
 		return nullptr;
+	}
 	for (auto &child : root->children) {
 		if (child.get() == target_child && root->type == LogicalOperatorType::LOGICAL_PROJECTION) {
 			return &root->Cast<LogicalProjection>();
@@ -254,8 +255,9 @@ unique_ptr<LogicalOperator> CreatePacSampleJoinNode(ClientContext &context, uniq
 // -----------------------------------------------------------------------------
 
 static void UpdateAggregateGroups(LogicalAggregate *agg, idx_t pac_idx) {
-	if (!agg)
+	if (!agg) {
 		return;
+	}
 	agg->groups.push_back(make_uniq<BoundColumnRefExpression>(
 	    LogicalType::BIGINT, ColumnBinding(5, 1))); // The bottom projection will have the new column at the end
 	// We also need to update group_stats
@@ -308,13 +310,15 @@ static void UpdateNodesAboveAggregate(unique_ptr<LogicalOperator> &root, Logical
 						return;
 					}
 					find_parent(c.get(), child);
-					if (found_parent)
+					if (found_parent) {
 						return;
+					}
 				}
 			};
 			find_parent(root.get(), search_node);
-			if (!found_parent)
+			if (!found_parent) {
 				break; // reached the root
+			}
 			next_node = found_parent;
 		}
 		search_node = next_node;
@@ -343,8 +347,9 @@ static void UpdateNodesAboveAggregate(unique_ptr<LogicalOperator> &root, Logical
 void CompilePACQuery(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan, const std::string &privacy_unit,
                      const std::string &query, const std::string &query_hash) {
 
-	if (privacy_unit.empty())
+	if (privacy_unit.empty()) {
 		return;
+	}
 
 	// Determine PACOptimizerInfo (if provided) — we'll only set its flag in narrowly scoped regions
 	PACOptimizerInfo *pac_info_scope = nullptr;
@@ -356,8 +361,9 @@ void CompilePACQuery(OptimizerExtensionInput &input, unique_ptr<LogicalOperator>
 
 		// 1. Create sample CTE file (unchanged)
 		string path = GetPacCompiledPath(input.context, ".");
-		if (!path.empty() && path.back() != '/')
+		if (!path.empty() && path.back() != '/') {
 			path.push_back('/');
+		}
 		string filename = path + privacy_unit + "_" + query_hash + "_standard.sql";
 		CreateSampleCTE(input.context, privacy_unit, filename, query);
 
@@ -399,8 +405,9 @@ void CompilePACQuery(OptimizerExtensionInput &input, unique_ptr<LogicalOperator>
 				auto cur_ptr = stack.back();
 				stack.pop_back();
 				auto &cur = *cur_ptr;
-				if (!cur)
+				if (!cur) {
 					continue;
+				}
 				if (cur->type == LogicalOperatorType::LOGICAL_GET) {
 					pac_scan_ptr = cur_ptr;
 					pac_table_idx = cur->Cast<LogicalGet>().table_index;
@@ -464,20 +471,19 @@ void CompilePACQuery(OptimizerExtensionInput &input, unique_ptr<LogicalOperator>
 			if (!ifs) {
 				throw ParserException("PAC: failed to read " + filename);
 			}
-			std::string query((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+			std::string file_query((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
 
-			Parser parser;
-			parser.ParseQuery(query);
-			auto statement = parser.statements[0].get();
-			Planner planner(input.context);
-			planner.CreatePlan(statement->Copy());
+			parser.ParseQuery(file_query);
+			statement = parser.statements[0].get();
+			Planner new_planner(input.context); // reinitializing to avoid binder errors
+			new_planner.CreatePlan(statement->Copy());
 
 			// Ensure optimizer-extension rules (and our PACRewriteRule) don't re-enter while
 			// we optimize the generated query — set the replan flag in a narrow RAII scope.
 			ReplanGuard scoped_flag(pac_info_scope);
 
-			Optimizer optimizer(*planner.binder, input.context);
-			plan = optimizer.Optimize(std::move(planner.plan));
+			Optimizer new_optimizer(*new_planner.binder, input.context);
+			plan = new_optimizer.Optimize(std::move(new_planner.plan));
 			plan->Print();
 		}
 

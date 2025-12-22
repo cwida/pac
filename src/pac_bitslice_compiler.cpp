@@ -16,8 +16,9 @@ void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExten
 	Printer::Print("CompilePacBitsliceQuery called for PU=" + privacy_unit + " hash=" + query_hash);
 
 	string path = GetPacCompiledPath(input.context, ".");
-	if (!path.empty() && path.back() != '/')
+	if (!path.empty() && path.back() != '/') {
 		path.push_back('/');
+	}
 	string filename = path + privacy_unit + "_" + query_hash + "_bitslice.sql";
 }
 

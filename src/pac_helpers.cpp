@@ -59,10 +59,12 @@ std::string NormalizeQueryForHash(const std::string &query) {
 		}
 	}
 	// trim
-	if (!out.empty() && out.front() == ' ')
+	if (!out.empty() && out.front() == ' ') {
 		out.erase(out.begin());
-	if (!out.empty() && out.back() == ' ')
+	}
+	if (!out.empty() && out.back() == ' ') {
 		out.pop_back();
+	}
 	return out;
 }
 
@@ -81,8 +83,9 @@ idx_t GetNextTableIndex(unique_ptr<LogicalOperator> &plan) {
 		auto cur_ptr = stack.back();
 		stack.pop_back();
 		auto &cur = *cur_ptr;
-		if (!cur)
+		if (!cur) {
 			continue;
+		}
 		auto tbls = cur->GetTableIndex();
 		for (auto t : tbls) {
 			if (t != DConstants::INVALID_INDEX && (max_index == DConstants::INVALID_INDEX || t > max_index)) {
@@ -185,21 +188,25 @@ void ReplaceNode(unique_ptr<LogicalOperator> &root, unique_ptr<LogicalOperator> 
 }
 
 static void CollectColumnBindingsRecursive(LogicalOperator *node, vector<ColumnBinding> &out) {
-	if (!node)
+	if (!node) {
 		return;
+	}
 	auto binds = node->GetColumnBindings();
 	out.insert(out.end(), binds.begin(), binds.end());
-	for (auto &c : node->children)
+	for (auto &c : node->children) {
 		CollectColumnBindingsRecursive(c.get(), out);
+	}
 }
 
 static void CollectTableIndicesRecursive(LogicalOperator *node, idx_set &out) {
-	if (!node)
+	if (!node) {
 		return;
+	}
 	auto tbls = node->GetTableIndex();
 	for (auto t : tbls) {
-		if (t != DConstants::INVALID_INDEX)
+		if (t != DConstants::INVALID_INDEX) {
 			out.insert(t);
+		}
 	}
 	for (auto &c : node->children) {
 		CollectTableIndicesRecursive(c.get(), out);
@@ -207,14 +214,17 @@ static void CollectTableIndicesRecursive(LogicalOperator *node, idx_set &out) {
 }
 
 static void CollectTableIndicesExcluding(LogicalOperator *node, LogicalOperator *skip, idx_set &out) {
-	if (!node)
+	if (!node) {
 		return;
-	if (node == skip)
+	}
+	if (node == skip) {
 		return; // skip this subtree entirely
+	}
 	auto tbls = node->GetTableIndex();
 	for (auto t : tbls) {
-		if (t != DConstants::INVALID_INDEX)
+		if (t != DConstants::INVALID_INDEX) {
 			out.insert(t);
+		}
 	}
 	for (auto &c : node->children) {
 		CollectTableIndicesExcluding(c.get(), skip, out);
@@ -222,57 +232,73 @@ static void CollectTableIndicesExcluding(LogicalOperator *node, LogicalOperator 
 }
 
 static void ApplyIndexMapToSubtree(LogicalOperator *node, const std::unordered_map<idx_t, idx_t> &map) {
-	if (!node)
+	if (!node) {
 		return;
+	}
 	// Update operator-specific index fields where applicable
 	if (auto get_ptr = dynamic_cast<LogicalGet *>(node)) {
-		if (map.find(get_ptr->table_index) != map.end())
+		if (map.find(get_ptr->table_index) != map.end()) {
 			get_ptr->table_index = map.at(get_ptr->table_index);
+		}
 	} else if (auto proj_ptr = dynamic_cast<LogicalProjection *>(node)) {
-		if (map.find(proj_ptr->table_index) != map.end())
+		if (map.find(proj_ptr->table_index) != map.end()) {
 			proj_ptr->table_index = map.at(proj_ptr->table_index);
+		}
 	} else if (auto setop_ptr = dynamic_cast<LogicalSetOperation *>(node)) {
-		if (map.find(setop_ptr->table_index) != map.end())
+		if (map.find(setop_ptr->table_index) != map.end()) {
 			setop_ptr->table_index = map.at(setop_ptr->table_index);
+		}
 	} else if (auto insert_ptr = dynamic_cast<LogicalInsert *>(node)) {
-		if (map.find(insert_ptr->table_index) != map.end())
+		if (map.find(insert_ptr->table_index) != map.end()) {
 			insert_ptr->table_index = map.at(insert_ptr->table_index);
+		}
 	} else if (auto dummy_ptr = dynamic_cast<LogicalDummyScan *>(node)) {
-		if (map.find(dummy_ptr->table_index) != map.end())
+		if (map.find(dummy_ptr->table_index) != map.end()) {
 			dummy_ptr->table_index = map.at(dummy_ptr->table_index);
+		}
 	} else if (auto coldata_ptr = dynamic_cast<LogicalColumnDataGet *>(node)) {
-		if (map.find(coldata_ptr->table_index) != map.end())
+		if (map.find(coldata_ptr->table_index) != map.end()) {
 			coldata_ptr->table_index = map.at(coldata_ptr->table_index);
+		}
 	} else if (auto upd_ptr = dynamic_cast<LogicalUpdate *>(node)) {
-		if (map.find(upd_ptr->table_index) != map.end())
+		if (map.find(upd_ptr->table_index) != map.end()) {
 			upd_ptr->table_index = map.at(upd_ptr->table_index);
+		}
 	} else if (auto del_ptr = dynamic_cast<LogicalDelete *>(node)) {
-		if (map.find(del_ptr->table_index) != map.end())
+		if (map.find(del_ptr->table_index) != map.end()) {
 			del_ptr->table_index = map.at(del_ptr->table_index);
+		}
 	} else if (auto cte_ptr = dynamic_cast<LogicalCTE *>(node)) {
-		if (map.find(cte_ptr->table_index) != map.end())
+		if (map.find(cte_ptr->table_index) != map.end()) {
 			cte_ptr->table_index = map.at(cte_ptr->table_index);
+		}
 	} else if (auto rcte_ptr = dynamic_cast<LogicalRecursiveCTE *>(node)) {
-		if (map.find(rcte_ptr->table_index) != map.end())
+		if (map.find(rcte_ptr->table_index) != map.end()) {
 			rcte_ptr->table_index = map.at(rcte_ptr->table_index);
+		}
 	} else if (auto eg_ptr = dynamic_cast<LogicalExpressionGet *>(node)) {
-		if (map.find(eg_ptr->table_index) != map.end())
+		if (map.find(eg_ptr->table_index) != map.end()) {
 			eg_ptr->table_index = map.at(eg_ptr->table_index);
+		}
 	}
 
 	// Special handling for LogicalAggregate: multiple indices
 	if (auto agg_ptr = dynamic_cast<LogicalAggregate *>(node)) {
-		if (map.find(agg_ptr->aggregate_index) != map.end())
+		if (map.find(agg_ptr->aggregate_index) != map.end()) {
 			agg_ptr->aggregate_index = map.at(agg_ptr->aggregate_index);
-		if (map.find(agg_ptr->group_index) != map.end())
+		}
+		if (map.find(agg_ptr->group_index) != map.end()) {
 			agg_ptr->group_index = map.at(agg_ptr->group_index);
-		if (agg_ptr->groupings_index != DConstants::INVALID_INDEX && map.find(agg_ptr->groupings_index) != map.end())
+		}
+		if (agg_ptr->groupings_index != DConstants::INVALID_INDEX && map.find(agg_ptr->groupings_index) != map.end()) {
 			agg_ptr->groupings_index = map.at(agg_ptr->groupings_index);
+		}
 	}
 
 	// Recurse
-	for (auto &c : node->children)
+	for (auto &c : node->children) {
 		ApplyIndexMapToSubtree(c.get(), map);
+	}
 }
 
 // Find the primary key column name for a given table. Searches the client's catalog search path
