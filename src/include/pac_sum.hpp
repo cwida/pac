@@ -92,27 +92,27 @@ AUTOVECTORIZE
 static inline void AddToTotals8Signed(int8_t *totals, int64_t value, uint64_t key_hash) {
 	int8_t v = static_cast<int8_t>(value);
 	for (int j = 0; j < 64; j++) {
-		totals[j] += PAC_FILTER(v, int8_t, key_hash , j);
+		totals[j] += PAC_FILTER(v, int8_t, key_hash, j);
 	}
 }
 AUTOVECTORIZE
 static inline void AddToTotals16Signed(int16_t *totals, int64_t value, uint64_t key_hash) {
 	int16_t v = static_cast<int16_t>(value);
 	for (int j = 0; j < 64; j++) {
-		totals[j] += PAC_FILTER(v, int16_t, key_hash , j);
+		totals[j] += PAC_FILTER(v, int16_t, key_hash, j);
 	}
 }
 AUTOVECTORIZE
 static inline void AddToTotals32Signed(int32_t *totals, int64_t value, uint64_t key_hash) {
 	int32_t v = static_cast<int32_t>(value);
 	for (int j = 0; j < 64; j++) {
-		totals[j] += PAC_FILTER(v, int32_t, key_hash , j);
+		totals[j] += PAC_FILTER(v, int32_t, key_hash, j);
 	}
 }
 AUTOVECTORIZE
 static inline void AddToTotals64Signed(int64_t *totals, int64_t value, uint64_t key_hash) {
 	for (int j = 0; j < 64; j++) {
-		totals[j] += PAC_FILTER(value, int64_t, key_hash , j);
+		totals[j] += PAC_FILTER(value, int64_t, key_hash, j);
 	}
 }
 
@@ -120,27 +120,27 @@ AUTOVECTORIZE
 static inline void AddToTotals8Unsigned(uint8_t *totals, uint64_t value, uint64_t key_hash) {
 	uint8_t v = static_cast<uint8_t>(value);
 	for (int j = 0; j < 64; j++) {
-		totals[j] += PAC_FILTER(value, uint8_t, key_hash , j);
+		totals[j] += PAC_FILTER(value, uint8_t, key_hash, j);
 	}
 }
 AUTOVECTORIZE
 static inline void AddToTotals16Unsigned(uint16_t *totals, uint64_t value, uint64_t key_hash) {
 	uint16_t v = static_cast<uint16_t>(value);
 	for (int j = 0; j < 64; j++) {
-		totals[j] += PAC_FILTER(value, uint16_t, key_hash , j);
+		totals[j] += PAC_FILTER(value, uint16_t, key_hash, j);
 	}
 }
 AUTOVECTORIZE
 static inline void AddToTotals32Unsigned(uint32_t *totals, uint64_t value, uint64_t key_hash) {
 	uint32_t v = static_cast<uint32_t>(value);
 	for (int j = 0; j < 64; j++) {
-		totals[j] += PAC_FILTER(value, uint32_t, key_hash , j);
+		totals[j] += PAC_FILTER(value, uint32_t, key_hash, j);
 	}
 }
 AUTOVECTORIZE
 static inline void AddToTotals64Unsigned(uint64_t *totals, uint64_t value, uint64_t key_hash) {
 	for (int j = 0; j < 64; j++) {
-		totals[j] += PAC_FILTER(value, uint64_t, key_hash , j);
+		totals[j] += PAC_FILTER(value, uint64_t, key_hash, j);
 	}
 }
 #endif
@@ -186,10 +186,8 @@ static unique_ptr<FunctionData> PacSumBind(ClientContext &context, AggregateFunc
 	return make_uniq<PacBindData>(mi);
 }
 
-
-	// Register pac_sum functions (helper implemented in pac_sum.cpp)
-	void RegisterPacSumFunctions(ExtensionLoader &loader);
+// Register pac_sum functions (helper implemented in pac_sum.cpp)
+void RegisterPacSumFunctions(ExtensionLoader &loader);
 } // namespace duckdb
-
 
 #endif // PAC_SUM_HPP

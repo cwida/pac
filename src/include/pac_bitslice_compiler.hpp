@@ -18,4 +18,4 @@ DUCKDB_API void CompilePacBitsliceQuery(const PACCompatibilityResult &check, Opt
 
 } // namespace duckdb
 
-#endif //PAC_BITSLICE_COMPILER_HPP
+#endif // PAC_BITSLICE_COMPILER_HPP

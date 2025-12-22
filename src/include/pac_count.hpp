@@ -20,8 +20,9 @@ struct PacCountState {
 };
 
 // Mask used by pac_count inner loops
-#define PAC_COUNT_MASK  \
-   ((1ULL << 0) | (1ULL << 8) | (1ULL << 16) | (1ULL << 24) | (1ULL << 32) | (1ULL << 40) | (1ULL << 48) | (1ULL << 56))
+#define PAC_COUNT_MASK                                                                                                 \
+	((1ULL << 0) | (1ULL << 8) | (1ULL << 16) | (1ULL << 24) | (1ULL << 32) | (1ULL << 40) | (1ULL << 48) |            \
+	 (1ULL << 56))
 
 // Declarations of functions implemented in pac_count.cpp
 idx_t PacCountStateSize(const AggregateFunction &);
@@ -34,7 +35,8 @@ void PacCountCombine(Vector &source, Vector &target, AggregateInputData &, idx_t
 void PacCountFinalize(Vector &states, AggregateInputData &aggr_input, Vector &result, idx_t count, idx_t offset);
 
 // Bind function (returns PacBindData) implemented in pac_count.cpp
-unique_ptr<FunctionData> PacCountBind(ClientContext &context, AggregateFunction &function, vector<unique_ptr<Expression>> &arguments);
+unique_ptr<FunctionData> PacCountBind(ClientContext &context, AggregateFunction &function,
+                                      vector<unique_ptr<Expression>> &arguments);
 
 // Register the pac_count aggregate functions with the loader
 void RegisterPacCountFunctions(ExtensionLoader &loader);

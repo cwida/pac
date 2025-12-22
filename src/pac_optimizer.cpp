@@ -37,12 +37,12 @@ void PACRewriteRule::PACRewriteRuleFunction(OptimizerExtensionInput &input, uniq
 	if (!plan || plan->type != LogicalOperatorType::LOGICAL_PROJECTION) {
 		return;
 	}
-    // Load configured PAC tables once
-    string pac_privacy_file = GetPacPrivacyFile(input.context);
+	// Load configured PAC tables once
+	string pac_privacy_file = GetPacPrivacyFile(input.context);
 
 	auto pac_tables = ReadPacTablesFile(pac_privacy_file);
-    // convert unordered_set returned by ReadPacTablesFile to a vector for the compatibility check
-    std::vector<std::string> pac_table_list = PacTablesSetToVector(pac_tables);
+	// convert unordered_set returned by ReadPacTablesFile to a vector for the compatibility check
+	std::vector<std::string> pac_table_list = PacTablesSetToVector(pac_tables);
 
 	// Delegate compatibility checks (including detecting PAC table presence and internal sample scans)
 	// to PACRewriteQueryCheck. It now returns a PACCompatibilityResult with fk_paths and PKs.
@@ -60,38 +60,40 @@ void PACRewriteRule::PACRewriteRuleFunction(OptimizerExtensionInput &input, uniq
 		return;
 	}
 
-    // Determine the set of discovered privacy units (could come from privacy_unit_pks keys or fk_paths targets)
-    std::vector<std::string> discovered_pus;
-    // First, privacy units for which we have PK info
-    for (auto &kv : check.privacy_unit_pks) {
-        discovered_pus.push_back(kv.first);
-    }
-    // Also consider fk_paths targets in case pk map didn't include them
-    for (auto &kv : check.fk_paths) {
-        if (!kv.second.empty()) discovered_pus.push_back(kv.second.back());
-    }
-    // Also include any configured PAC tables that were scanned directly in the plan
-    for (auto &t : check.scanned_pac_tables) {
-        discovered_pus.push_back(t);
-    }
-    // Deduplicate
-    std::sort(discovered_pus.begin(), discovered_pus.end());
-    discovered_pus.erase(std::unique(discovered_pus.begin(), discovered_pus.end()), discovered_pus.end());
-    if (discovered_pus.empty()) {
-        // Defensive: nothing discovered
-        return;
-    }
+	// Determine the set of discovered privacy units (could come from privacy_unit_pks keys or fk_paths targets)
+	std::vector<std::string> discovered_pus;
+	// First, privacy units for which we have PK info
+	for (auto &kv : check.privacy_unit_pks) {
+		discovered_pus.push_back(kv.first);
+	}
+	// Also consider fk_paths targets in case pk map didn't include them
+	for (auto &kv : check.fk_paths) {
+		if (!kv.second.empty())
+			discovered_pus.push_back(kv.second.back());
+	}
+	// Also include any configured PAC tables that were scanned directly in the plan
+	for (auto &t : check.scanned_pac_tables) {
+		discovered_pus.push_back(t);
+	}
+	// Deduplicate
+	std::sort(discovered_pus.begin(), discovered_pus.end());
+	discovered_pus.erase(std::unique(discovered_pus.begin(), discovered_pus.end()), discovered_pus.end());
+	if (discovered_pus.empty()) {
+		// Defensive: nothing discovered
+		return;
+	}
 
-    // compute normalized query hash once for file naming
-    std::string normalized = NormalizeQueryForHash(input.context.GetCurrentQuery());
-    std::string query_hash = HashStringToHex(normalized);
-    std::string compile_method = GetPacCompileMethod(input.context, "standard");
+	// compute normalized query hash once for file naming
+	std::string normalized = NormalizeQueryForHash(input.context.GetCurrentQuery());
+	std::string query_hash = HashStringToHex(normalized);
+	std::string compile_method = GetPacCompileMethod(input.context, "standard");
 
-    if (discovered_pus.size() > 1) {
-        throw InvalidInputException("PAC rewrite: multiple privacy units discovered (%s); multi-privacy-unit queries are not supported");
-    }
+	if (discovered_pus.size() > 1) {
+		throw InvalidInputException(
+		    "PAC rewrite: multiple privacy units discovered (%s); multi-privacy-unit queries are not supported");
+	}
 
-    std::vector<std::string> privacy_units = std::move(discovered_pus);
+	std::vector<std::string> privacy_units = std::move(discovered_pus);
 
 	// Print discovered PKs for diagnostics (if available) for each privacy unit
 	for (auto &pu : privacy_units) {
@@ -123,6 +125,6 @@ void PACRewriteRule::PACRewriteRuleFunction(OptimizerExtensionInput &input, uniq
 			}
 		}
 	}
- }
+}
 
- } // namespace duckdb
+} // namespace duckdb

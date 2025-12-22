@@ -29,8 +29,7 @@ DUCKDB_API idx_t GetNextTableIndex(unique_ptr<LogicalOperator> &plan);
 // - `new_parent` must not have any children prior to calling this function.
 // The function will try to propagate column binding changes using ColumnBindingReplacer so that
 // expressions above the insertion point keep referring to the correct ColumnBindings.
-DUCKDB_API void ReplaceNode(unique_ptr<LogicalOperator> &root,
-                            unique_ptr<LogicalOperator> &old_node,
+DUCKDB_API void ReplaceNode(unique_ptr<LogicalOperator> &root, unique_ptr<LogicalOperator> &old_node,
                             unique_ptr<LogicalOperator> &new_node);
 
 // Find the primary key column names for the given table (searching the client's catalog search path).
@@ -39,13 +38,15 @@ DUCKDB_API vector<std::string> FindPrimaryKey(ClientContext &context, const std:
 
 // Find foreign keys declared on the given table (searching the client's catalog search path).
 // Returns a vector of pairs: (referenced_table_name, list_of_fk_column_names) for each FK constraint.
-DUCKDB_API vector<std::pair<std::string, vector<std::string>>> FindForeignKeys(ClientContext &context, const std::string &table_name);
+DUCKDB_API vector<std::pair<std::string, vector<std::string>>> FindForeignKeys(ClientContext &context,
+                                                                               const std::string &table_name);
 
 // Find foreign-key path(s) from any of `table_names` to any of `privacy_units`.
-// Returns a map: start_table (as provided) -> path (vector of qualified table names from start to privacy unit, inclusive).
-// If no path exists for a start table, it will not appear in the returned map.
-DUCKDB_API std::unordered_map<std::string, std::vector<std::string>> FindForeignKeyBetween(
-    ClientContext &context, const std::vector<std::string> &privacy_units, const std::vector<std::string> &table_names);
+// Returns a map: start_table (as provided) -> path (vector of qualified table names from start to privacy unit,
+// inclusive). If no path exists for a start table, it will not appear in the returned map.
+DUCKDB_API std::unordered_map<std::string, std::vector<std::string>>
+FindForeignKeyBetween(ClientContext &context, const std::vector<std::string> &privacy_units,
+                      const std::vector<std::string> &table_names);
 
 // -----------------------------------------------------------------------------
 // PAC-specific small helpers
@@ -56,19 +57,21 @@ DUCKDB_API std::unordered_map<std::string, std::vector<std::string>> FindForeign
 struct PACOptimizerInfo; // forward-declare to avoid including pac_optimizer.hpp here
 DUCKDB_API class ReplanGuard {
 public:
-    explicit ReplanGuard(PACOptimizerInfo *info);
-    ~ReplanGuard();
+	explicit ReplanGuard(PACOptimizerInfo *info);
+	~ReplanGuard();
 
-    ReplanGuard(const ReplanGuard &) = delete;
-    ReplanGuard &operator=(const ReplanGuard &) = delete;
+	ReplanGuard(const ReplanGuard &) = delete;
+	ReplanGuard &operator=(const ReplanGuard &) = delete;
+
 private:
-    PACOptimizerInfo *info;
-    bool prev;
+	PACOptimizerInfo *info;
+	bool prev;
 };
 
 // Configuration helpers that read PAC-related settings from the client's context and
 // return a canonicalized value or a default when not configured.
-DUCKDB_API std::string GetPacPrivacyFile(ClientContext &context, const std::string &default_filename = "pac_tables.csv");
+DUCKDB_API std::string GetPacPrivacyFile(ClientContext &context,
+                                         const std::string &default_filename = "pac_tables.csv");
 DUCKDB_API std::string GetPacCompiledPath(ClientContext &context, const std::string &default_path = ".");
 DUCKDB_API int64_t GetPacM(ClientContext &context, int64_t default_m = 128);
 DUCKDB_API bool IsPacNoiseEnabled(ClientContext &context, bool default_value = true);

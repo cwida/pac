@@ -31,8 +31,8 @@ void PacCountInitialize(const AggregateFunction &, data_ptr_t state_ptr) {
 }
 
 // Internal update helper
-AUTOVECTORIZE static inline void
-PacCountUpdateInternal(const UnifiedVectorFormat &idata, idx_t i, const uint64_t *input_data, PacCountState &state) {
+AUTOVECTORIZE static inline void PacCountUpdateInternal(const UnifiedVectorFormat &idata, idx_t i,
+                                                        const uint64_t *input_data, PacCountState &state) {
 	auto idx = idata.sel->get_index(i);
 	if (!idata.validity.RowIsValid(idx)) {
 		return;
@@ -106,29 +106,29 @@ unique_ptr<FunctionData> PacCountBind(ClientContext &context, AggregateFunction 
 }
 
 void PacCountFinalize(Vector &states, AggregateInputData &aggr_input, Vector &result, idx_t count, idx_t offset) {
-    auto sdata = FlatVector::GetData<PacCountState *>(states);
-    auto rdata = FlatVector::GetData<uint64_t>(result);
-    thread_local std::mt19937_64 gen(std::random_device{}());
+	auto sdata = FlatVector::GetData<PacCountState *>(states);
+	auto rdata = FlatVector::GetData<uint64_t>(result);
+	thread_local std::mt19937_64 gen(std::random_device {}());
 
-    // Get mi from bind_data (default 128.0)
-    double mi = 128.0;
-    if (aggr_input.bind_data) {
-        mi = aggr_input.bind_data->Cast<PacBindData>().mi;
-    }
+	// Get mi from bind_data (default 128.0)
+	double mi = 128.0;
+	if (aggr_input.bind_data) {
+		mi = aggr_input.bind_data->Cast<PacBindData>().mi;
+	}
 
-    for (idx_t i = 0; i < count; i++) {
-        auto state = sdata[i];
-        if (state->update_count != 0) {
-            state->Flush();
-        }
-        // Convert uint64_t totals64 to double array
-        double counters_d[64];
-        ToDoubleArray(state->totals64, counters_d);
-        // Compute noisy sampled result using PacNoisySampleFrom64Counters (returns yJ + noise)
-        double noisy = PacNoisySampleFrom64Counters(counters_d, mi, gen);
-        uint64_t res = static_cast<uint64_t>(noisy);
-        rdata[offset + i] = res;
-    }
+	for (idx_t i = 0; i < count; i++) {
+		auto state = sdata[i];
+		if (state->update_count != 0) {
+			state->Flush();
+		}
+		// Convert uint64_t totals64 to double array
+		double counters_d[64];
+		ToDoubleArray(state->totals64, counters_d);
+		// Compute noisy sampled result using PacNoisySampleFrom64Counters (returns yJ + noise)
+		double noisy = PacNoisySampleFrom64Counters(counters_d, mi, gen);
+		uint64_t res = static_cast<uint64_t>(noisy);
+		rdata[offset + i] = res;
+	}
 }
 
 void RegisterPacCountFunctions(ExtensionLoader &loader) {

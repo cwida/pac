@@ -1,4 +1,4 @@
-# name: test/sql/pac.test
+# name: test/sql/pac_compatible.test
 # description: test pac extension
 # group: [sql]
 

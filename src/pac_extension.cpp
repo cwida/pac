@@ -42,7 +42,7 @@ inline void PacOpenSSLVersionScalarFun(DataChunk &args, ExpressionState &state, 
 	auto &name_vector = args.data[0];
 	UnaryExecutor::Execute<string_t, string_t>(name_vector, result, args.size(), [&](string_t name) {
 		return StringVector::AddString(result, "Pac " + name.GetString() + ", my linked OpenSSL version is " +
-		                                   OPENSSL_VERSION_TEXT);
+		                                           OPENSSL_VERSION_TEXT);
 	});
 }
 
@@ -55,8 +55,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(pac_scalar_function);
 
 	// Register another scalar function
-	auto pac_openssl_version_scalar_function = ScalarFunction("pac_openssl_version", {LogicalType::VARCHAR},
-	                                                            LogicalType::VARCHAR, PacOpenSSLVersionScalarFun);
+	auto pac_openssl_version_scalar_function =
+	    ScalarFunction("pac_openssl_version", {LogicalType::VARCHAR}, LogicalType::VARCHAR, PacOpenSSLVersionScalarFun);
 	loader.RegisterFunction(pac_openssl_version_scalar_function);
 
 	// Register add_pac_privacy_unit (1-arg)
@@ -66,20 +66,16 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// (removed scalar variants)
 
 	// Register pragma variants so they can be invoked as PRAGMA add_privacy_unit(...) / PRAGMA remove_privacy_unit(...)
-	auto add_privacy_unit_pragma = PragmaFunction::PragmaCall("add_pac_privacy_unit", AddPrivacyUnitPragma,
-	                                                           {LogicalType::VARCHAR});
+	auto add_privacy_unit_pragma =
+	    PragmaFunction::PragmaCall("add_pac_privacy_unit", AddPrivacyUnitPragma, {LogicalType::VARCHAR});
 	loader.RegisterFunction(add_privacy_unit_pragma);
-	auto remove_privacy_unit_pragma = PragmaFunction::PragmaCall("remove_pac_privacy_unit", RemovePrivacyUnitPragma,
-	                                                              {LogicalType::VARCHAR});
+	auto remove_privacy_unit_pragma =
+	    PragmaFunction::PragmaCall("remove_pac_privacy_unit", RemovePrivacyUnitPragma, {LogicalType::VARCHAR});
 	loader.RegisterFunction(remove_privacy_unit_pragma);
 
 	// Register scalar helper to delete file (tests use this cleanup helper)
-	auto delete_privacy_unit_file = ScalarFunction(
-		"delete_privacy_unit_file",
-		{LogicalType::VARCHAR},
-		LogicalType::VARCHAR,
-		DeletePrivacyUnitFileFun
-	);
+	auto delete_privacy_unit_file = ScalarFunction("delete_privacy_unit_file", {LogicalType::VARCHAR},
+	                                               LogicalType::VARCHAR, DeletePrivacyUnitFileFun);
 	loader.RegisterFunction(delete_privacy_unit_file);
 
 	auto pac_rewrite_rule = PACRewriteRule();
@@ -90,18 +86,21 @@ static void LoadInternal(ExtensionLoader &loader) {
 	db.config.optimizer_extensions.push_back(pac_rewrite_rule);
 
 	db.config.AddExtensionOption("pac_privacy_file", "path for privacy units", LogicalType::VARCHAR);
-	// Add option to enable/disable PAC noise application (this is useful for testing, since noise affects result determinism)
+	// Add option to enable/disable PAC noise application (this is useful for testing, since noise affects result
+	// determinism)
 	db.config.AddExtensionOption("pac_noise", "apply PAC noise", LogicalType::BOOLEAN);
 	// Add option to set deterministic RNG seed for PAC functions (useful for tests)
 	db.config.AddExtensionOption("pac_seed", "deterministic RNG seed for PAC functions", LogicalType::BIGINT);
 	// Add option to configure the number of samples (m) used by PAC (default 128)
 	db.config.AddExtensionOption("pac_m", "number of per-sample subsets (m)", LogicalType::INTEGER);
 	// Add option to toggle enforcement of per-sample array length == pac_m (default true)
-	db.config.AddExtensionOption("enforce_m_values", "enforce per-sample arrays length equals pac_m", LogicalType::BOOLEAN);
+	db.config.AddExtensionOption("enforce_m_values", "enforce per-sample arrays length equals pac_m",
+	                             LogicalType::BOOLEAN);
 	// Add option to set path where compiled PAC artifacts (CTEs) are written
 	db.config.AddExtensionOption("pac_compiled_path", "path to write compiled PAC artifacts", LogicalType::VARCHAR);
 	// Add option to choose compile method: "standard" or "bitslice"
-	db.config.AddExtensionOption("pac_compile_method", "PAC compile method: 'standard' or 'bitslice'", LogicalType::VARCHAR);
+	db.config.AddExtensionOption("pac_compile_method", "PAC compile method: 'standard' or 'bitslice'",
+	                             LogicalType::VARCHAR);
 
 	// Register pac_aggregate function(s)
 	RegisterPacAggregateFunctions(loader);

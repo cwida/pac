@@ -8,9 +8,9 @@ namespace duckdb {
 
 // PAC-specific optimizer info used to prevent re-entrant replanning from the extension
 struct PACOptimizerInfo : public OptimizerExtensionInfo {
-    std::atomic<bool> replan_in_progress{false};
-    PACOptimizerInfo() = default;
-    ~PACOptimizerInfo() override = default;
+	std::atomic<bool> replan_in_progress {false};
+	PACOptimizerInfo() = default;
+	~PACOptimizerInfo() override = default;
 };
 
 class PACRewriteRule : public OptimizerExtension {
