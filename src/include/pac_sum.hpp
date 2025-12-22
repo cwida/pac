@@ -45,7 +45,7 @@
 //              of even standard DuckDB SUM on floating-point numbers is unstable anyway.
 // 3) huge-int: PAC_SUM(key_hash, [U]HUGEINT -> DOUBLE
 //				DuckDB produces DOUBLE outcomes for 128-bits integer sums (avoiding debate here)
-//              so we do as well. This basically uses the DOUBLE 
+//              so we do as well. This basically uses the DOUBLE
 
 namespace duckdb {
 
@@ -87,34 +87,33 @@ static constexpr int kTopBits32 = 5;
 static constexpr int kTopBits64 = 8;
 
 // Flush threshold = 2^bX (signed types use half the threshold) - how many times can we add without overflow?
-#define FLUSH_THRESHOLD_SIGNED(X) (1 << (kTopBits##X - 1))
-#define FLUSH_THRESHOLD_UNSIGNED(X) (1<< kTopBits##X)
+#define FLUSH_THRESHOLD_SIGNED(X)   (1 << (kTopBits##X - 1))
+#define FLUSH_THRESHOLD_UNSIGNED(X) (1 << kTopBits##X)
 
 // Check whether a value is small, i.e. top-bits are 0
-#define HAS_TOP_BITS_SET_SIGNED(value, bits) \
+#define HAS_TOP_BITS_SET_SIGNED(value, bits)                                                                           \
 	((((value) >= 0 ? static_cast<uint64_t>(value) : static_cast<uint64_t>(-(value))) >> (bits - kTopBits##bits)) != 0)
-#define HAS_TOP_BITS_SET_UNSIGNED(value, bits) \
-	((static_cast<uint64_t>(value) >> (bits - kTopBits##bits)) != 0)
+#define HAS_TOP_BITS_SET_UNSIGNED(value, bits) ((static_cast<uint64_t>(value) >> (bits - kTopBits##bits)) != 0)
 
 // Bool parameter version - compiler optimizes away the ternary
-#define HAS_TOP_BITS_SET(value, bits, is_signed) \
+#define HAS_TOP_BITS_SET(value, bits, is_signed)                                                                       \
 	((is_signed) ? HAS_TOP_BITS_SET_SIGNED(value, bits) : HAS_TOP_BITS_SET_UNSIGNED(value, bits))
 
 // Templated integer state - SIGNED selects signed/unsigned types and thresholds
 template <bool SIGNED>
 struct PacSumIntState {
-	using T8  = typename std::conditional<SIGNED, int8_t,  uint8_t>::type;
+	using T8 = typename std::conditional<SIGNED, int8_t, uint8_t>::type;
 	using T16 = typename std::conditional<SIGNED, int16_t, uint16_t>::type;
 	using T32 = typename std::conditional<SIGNED, int32_t, uint32_t>::type;
 	using T64 = typename std::conditional<SIGNED, int64_t, uint64_t>::type;
 
 #ifndef PAC_SUM_NONCASCADING
-	T8  totals8[64];
+	T8 totals8[64];
 	T16 totals16[64];
 	T32 totals32[64];
 	T64 totals64[64];
 #endif
-	hugeint_t totals128[64];  // want this array last (smaller totals first) for sequential CPU cache access
+	hugeint_t totals128[64]; // want this array last (smaller totals first) for sequential CPU cache access
 #ifndef PAC_SUM_NONCASCADING
 	uint32_t count8, count16, count32, count64;
 
@@ -163,9 +162,6 @@ struct PacSumIntState {
 #endif
 	bool seen_null;
 };
-
-
-
 
 // Double pac_sum (cascaded float32/float64 accumulation)
 //

@@ -5,7 +5,13 @@
 #include <vector>
 
 // Enable AVX2 vectorization for functions that get this preappended (useful for x86, harmless for arm)
+#if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
+// On x86 targets enable the attribute to allow function-level AVX2 codegen when available.
 #define AUTOVECTORIZE __attribute__((target("avx2")))
+#else
+// On non-x86 targets (ARM, etc.) the attribute is invalid — make it a no-op so code compiles.
+#define AUTOVECTORIZE
+#endif
 
 namespace duckdb {
 
@@ -20,9 +26,8 @@ struct PacAggregateLocalState;
 DUCKDB_API double ComputeDeltaFromValues(const std::vector<double> &values, double mi);
 
 // Initialize thread-local state for pac_aggregate (reads pac_seed setting).
-DUCKDB_API unique_ptr<FunctionLocalState> PacAggregateInit(ExpressionState &state,
-                                                               const BoundFunctionExpression &expr,
-                                                               FunctionData *bind_data);
+DUCKDB_API unique_ptr<FunctionLocalState> PacAggregateInit(ExpressionState &state, const BoundFunctionExpression &expr,
+                                                           FunctionData *bind_data);
 
 // Register pac_aggregate scalar function(s) with the extension loader
 void RegisterPacAggregateFunctions(ExtensionLoader &loader);
@@ -33,7 +38,8 @@ DUCKDB_API double PacNoisySampleFrom64Counters(const double counters[64], double
 // Bind data used by PAC aggregates to carry the `mi` parameter.
 struct PacBindData : public FunctionData {
 	double mi;
-	explicit PacBindData(double mi_val) : mi(mi_val) {}
+	explicit PacBindData(double mi_val) : mi(mi_val) {
+	}
 	unique_ptr<FunctionData> Copy() const override {
 		return make_uniq<PacBindData>(mi);
 	}
@@ -45,7 +51,7 @@ struct PacBindData : public FunctionData {
 // Helper to convert double to accumulator type (used by pac_sum finalizers)
 template <class T>
 static inline T FromDouble(double val) {
-    return static_cast<T>(val);
+	return static_cast<T>(val);
 }
 
 // Specializations for hugeint_t and uhugeint_t
@@ -70,7 +76,6 @@ template <>
 inline double ToDouble<uhugeint_t>(const uhugeint_t &val) {
 	return Uhugeint::Cast<double>(val);
 }
-
 
 // Helper to convert any totals array to double[64]
 template <class T>

@@ -1,6 +1,6 @@
 # name: test/sql/pac_sum.test
 # description: Test pac_sum aggregate function
-# group: [pac]
+# group: [sql]
 
 require pac
 

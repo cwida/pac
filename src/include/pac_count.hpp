@@ -27,8 +27,9 @@ namespace duckdb {
 // However, to help auto-vectorizing compilers get this right, we use not 64 x uint8_t totals, but 8 x uint64_t
 // totals because key_hash is already uint64_t. We apply this mask to key_hash:
 
-#define PAC_COUNT_MASK  \
-   ((1ULL << 0) | (1ULL << 8) | (1ULL << 16) | (1ULL << 24) | (1ULL << 32) | (1ULL << 40) | (1ULL << 48) | (1ULL << 56))
+#define PAC_COUNT_MASK                                                                                                 \
+	((1ULL << 0) | (1ULL << 8) | (1ULL << 16) | (1ULL << 24) | (1ULL << 32) | (1ULL << 40) | (1ULL << 48) |            \
+	 (1ULL << 56))
 
 // for each of the 8 iterations i, we then do (hash_key>>i) & PAC_COUNT_MASK which selects 8 bits, and then add these
 // with a single uint64_t add to a uint64 total8. You can only do that 255 times before overflow starts to happen.

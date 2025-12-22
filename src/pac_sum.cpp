@@ -129,7 +129,7 @@ static void PacSumIntFinalize(Vector &states, AggregateInputData &aggr_input, Ve
 	auto state = FlatVector::GetData<PacSumIntState<SIGNED> *>(states);
 	auto data = FlatVector::GetData<ACC_TYPE>(res);
 	auto &result_mask = FlatVector::Validity(res);
-	thread_local std::mt19937_64 gen(std::random_device{}());
+	thread_local std::mt19937_64 gen(std::random_device {}());
 	double mi = aggr_input.bind_data ? aggr_input.bind_data->Cast<PacBindData>().mi : 128.0; // 128 is default
 
 	for (idx_t i = 0; i < cnt; i++) {
@@ -141,8 +141,8 @@ static void PacSumIntFinalize(Vector &states, AggregateInputData &aggr_input, Ve
 #endif
 			double totals_d[64]; // Convert totals128 to double array
 			ToDoubleArray(state[i]->totals128, totals_d);
-			data[off + i] = FromDouble<ACC_TYPE>(PacNoisySampleFrom64Counters(totals_d, mi, gen))
-			                + state[i]->totals128[42];
+			data[off + i] =
+			    FromDouble<ACC_TYPE>(PacNoisySampleFrom64Counters(totals_d, mi, gen)) + state[i]->totals128[42];
 		}
 	}
 }
@@ -161,7 +161,7 @@ static inline void PacSumDoubleUpdateInternal(PacSumDoubleState &state, uint64_t
 		state.Flush32(false);
 	} else
 #endif
-	AddToTotals(state.totals64, val, key_hash);
+		AddToTotals(state.totals64, val, key_hash);
 }
 
 // Double cascade update (ungrouped global aggregate) - also handles hugeint_t/uhugeint_t via ToDouble
@@ -239,7 +239,7 @@ static void PacSumDoubleFinalize(Vector &states, AggregateInputData &input, Vect
 	auto state = FlatVector::GetData<PacSumDoubleState *>(states);
 	auto data = FlatVector::GetData<double>(res);
 	auto &result_mask = FlatVector::Validity(res);
-	thread_local std::mt19937_64 gen(std::random_device{}());
+	thread_local std::mt19937_64 gen(std::random_device {}());
 	double mi = input.bind_data->Cast<PacBindData>().mi;
 
 	for (idx_t i = 0; i < cnt; i++) {
@@ -251,12 +251,11 @@ static void PacSumDoubleFinalize(Vector &states, AggregateInputData &input, Vect
 #endif
 			double totals_d[64];
 			ToDoubleArray(state[i]->totals64, totals_d);
-			data[off + i] = FromDouble<double>(PacNoisySampleFrom64Counters(totals_d, mi, gen))
-			                + state[i]->totals64[42];
+			data[off + i] =
+			    FromDouble<double>(PacNoisySampleFrom64Counters(totals_d, mi, gen)) + state[i]->totals64[42];
 		}
 	}
 }
-
 
 // instantiate Update methods
 static void PacSumUpdateTinyInt(Vector param[], AggregateInputData &aggr, idx_t np, data_ptr_t state_p, idx_t cnt) {
@@ -390,10 +389,12 @@ void PacSumFinalizeUBigInt(Vector &states, AggregateInputData &aggr, Vector &res
 static void AddFcn(AggregateFunctionSet &set, const LogicalType &value_type, const LogicalType &result_type,
                    aggregate_size_t state_size, aggregate_initialize_t init, aggregate_update_t scatter,
                    aggregate_combine_t combine, aggregate_finalize_t finalize, aggregate_simple_update_t update) {
-	set.AddFunction(AggregateFunction("pac_sum", {LogicalType::UBIGINT, value_type}, result_type,
-		state_size, init, scatter, combine, finalize, FunctionNullHandling::DEFAULT_NULL_HANDLING, update, PacSumBind));
+	set.AddFunction(AggregateFunction("pac_sum", {LogicalType::UBIGINT, value_type}, result_type, state_size, init,
+	                                  scatter, combine, finalize, FunctionNullHandling::DEFAULT_NULL_HANDLING, update,
+	                                  PacSumBind));
 	set.AddFunction(AggregateFunction("pac_sum", {LogicalType::UBIGINT, value_type, LogicalType::DOUBLE}, result_type,
-		state_size, init, scatter, combine, finalize, FunctionNullHandling::DEFAULT_NULL_HANDLING, update, PacSumBind));
+	                                  state_size, init, scatter, combine, finalize,
+	                                  FunctionNullHandling::DEFAULT_NULL_HANDLING, update, PacSumBind));
 }
 
 void RegisterPacSumFunctions(ExtensionLoader &loader) {
@@ -427,12 +428,11 @@ void RegisterPacSumFunctions(ExtensionLoader &loader) {
 
 	// Floating point (accumulate to double, return DOUBLE)
 	AddFcn(fcn_set, LogicalType::FLOAT, LogicalType::DOUBLE, PacSumDoubleStateSize, PacSumDoubleInitialize,
-	          PacSumScatterFloat, PacSumDoubleCombine, PacSumDoubleFinalize, PacSumUpdateFloat);
+	       PacSumScatterFloat, PacSumDoubleCombine, PacSumDoubleFinalize, PacSumUpdateFloat);
 	AddFcn(fcn_set, LogicalType::DOUBLE, LogicalType::DOUBLE, PacSumDoubleStateSize, PacSumDoubleInitialize,
-	          PacSumScatterDouble, PacSumDoubleCombine, PacSumDoubleFinalize, PacSumUpdateDouble);
+	       PacSumScatterDouble, PacSumDoubleCombine, PacSumDoubleFinalize, PacSumUpdateDouble);
 
 	loader.RegisterFunction(fcn_set);
 }
 
 } // namespace duckdb
-

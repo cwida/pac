@@ -12,8 +12,8 @@
 
 namespace duckdb {
 
-unique_ptr<FunctionData>
-PacCountBind(ClientContext &context, AggregateFunction &, vector<unique_ptr<Expression>> &arguments) {
+unique_ptr<FunctionData> PacCountBind(ClientContext &context, AggregateFunction &,
+                                      vector<unique_ptr<Expression>> &arguments) {
 	double mi = 128.0; // default
 	if (arguments.size() >= 2) {
 		if (!arguments[1]->IsFoldable()) {
@@ -35,8 +35,8 @@ void PacCountInitialize(const AggregateFunction &, data_ptr_t state_ptr) {
 	memset(state_ptr, 0, sizeof(PacCountState));
 }
 
-AUTOVECTORIZE static inline void
-PacCountUpdateInternal(const UnifiedVectorFormat &idata, idx_t i, const uint64_t *input_data, PacCountState &state) {
+AUTOVECTORIZE static inline void PacCountUpdateInternal(const UnifiedVectorFormat &idata, idx_t i,
+                                                        const uint64_t *input_data, PacCountState &state) {
 	auto idx = idata.sel->get_index(i);
 	if (!idata.validity.RowIsValid(idx)) {
 		return;
@@ -90,32 +90,31 @@ AUTOVECTORIZE void PacCountCombine(Vector &src, Vector &dst, AggregateInputData 
 }
 
 void PacCountFinalize(Vector &states, AggregateInputData &aggr_input, Vector &res, idx_t cnt, idx_t off) {
-    auto state = FlatVector::GetData<PacCountState *>(states);
-    auto data = FlatVector::GetData<uint64_t>(res);
-    thread_local std::mt19937_64 gen(std::random_device{}());
+	auto state = FlatVector::GetData<PacCountState *>(states);
+	auto data = FlatVector::GetData<uint64_t>(res);
+	thread_local std::mt19937_64 gen(std::random_device {}());
 	double mi = aggr_input.bind_data->Cast<PacBindData>().mi;
 
-    for (idx_t i = 0; i < cnt; i++) {
-        state[i]->Flush(); // flush any remaining small totals into the big totals
-        double counters_d[64];
-        ToDoubleArray(state[i]->totals64, counters_d); // Convert uint64_t totals64 to double array
-		data[off + i] = static_cast<uint64_t>(PacNoisySampleFrom64Counters(counters_d, mi, gen))
-		                + state[i]->totals64[42];
-    }
+	for (idx_t i = 0; i < cnt; i++) {
+		state[i]->Flush(); // flush any remaining small totals into the big totals
+		double counters_d[64];
+		ToDoubleArray(state[i]->totals64, counters_d); // Convert uint64_t totals64 to double array
+		data[off + i] =
+		    static_cast<uint64_t>(PacNoisySampleFrom64Counters(counters_d, mi, gen)) + state[i]->totals64[42];
+	}
 }
 
 void RegisterPacCountFunctions(ExtensionLoader &loader) {
 	AggregateFunctionSet fcn_set("pac_count");
 
-	fcn_set.AddFunction(AggregateFunction(
-	    "pac_count", {LogicalType::UBIGINT}, LogicalType::UBIGINT, PacCountStateSize,
-	    PacCountInitialize, PacCountScatterUpdate, PacCountCombine, PacCountFinalize,
-	    FunctionNullHandling::DEFAULT_NULL_HANDLING, PacCountUpdate, PacCountBind));
+	fcn_set.AddFunction(AggregateFunction("pac_count", {LogicalType::UBIGINT}, LogicalType::UBIGINT, PacCountStateSize,
+	                                      PacCountInitialize, PacCountScatterUpdate, PacCountCombine, PacCountFinalize,
+	                                      FunctionNullHandling::DEFAULT_NULL_HANDLING, PacCountUpdate, PacCountBind));
 
-	fcn_set.AddFunction(AggregateFunction(
-	    "pac_count", {LogicalType::UBIGINT, LogicalType::DOUBLE}, LogicalType::UBIGINT, PacCountStateSize,
-	    PacCountInitialize, PacCountScatterUpdate, PacCountCombine, PacCountFinalize,
-	    FunctionNullHandling::DEFAULT_NULL_HANDLING, PacCountUpdate, PacCountBind));
+	fcn_set.AddFunction(AggregateFunction("pac_count", {LogicalType::UBIGINT, LogicalType::DOUBLE},
+	                                      LogicalType::UBIGINT, PacCountStateSize, PacCountInitialize,
+	                                      PacCountScatterUpdate, PacCountCombine, PacCountFinalize,
+	                                      FunctionNullHandling::DEFAULT_NULL_HANDLING, PacCountUpdate, PacCountBind));
 
 	loader.RegisterFunction(fcn_set);
 }
