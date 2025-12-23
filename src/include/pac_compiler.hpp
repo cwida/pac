@@ -13,13 +13,12 @@ namespace duckdb {
 
 // Compile PAC-compatible query into intermediate artifacts (entry point)
 // privacy_unit: single privacy unit name (must be non-empty to compile)
-void CompilePACQuery(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
-                                const std::string &privacy_unit, const std::string &query,
-                                const std::string &query_hash);
+void CompilePACQuery(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan, const std::string &privacy_unit,
+                     const std::string &query, const std::string &query_hash);
 
 // Create the sample CTE and write it to a file (void): filename provided by caller
 void CreateSampleCTE(ClientContext &context, const std::string &privacy_unit, const std::string &filename,
-                                const std::string &query_normalized);
+                     const std::string &query_normalized);
 
 // Modify the logical query plan to join in the per-sample table (pac_sample) and extend
 // group-by keys / projections as needed. Implemented as an in-place modification of `plan`.
@@ -28,16 +27,14 @@ idx_t JoinWithSampleTable(ClientContext &context, unique_ptr<LogicalOperator> &p
 
 // Create a pac_sample LogicalGet node for the plan using the next available table index
 unique_ptr<LogicalGet> CreatePacSampleGetNode(ClientContext &context, unique_ptr<LogicalOperator> &plan,
-                                                         const std::string &privacy_table_name);
+                                              const std::string &privacy_table_name);
 
 // Overload: Accept a prebuilt pac_sample LogicalGet (caller can construct it first and pass via move)
 // Returns the pac table index assigned when inserting the provided pac_get (or INVALID_INDEX).
-idx_t JoinWithSampleTable(ClientContext &context, unique_ptr<LogicalOperator> &plan,
-                                     unique_ptr<LogicalGet> pac_get);
+idx_t JoinWithSampleTable(ClientContext &context, unique_ptr<LogicalOperator> &plan, unique_ptr<LogicalGet> pac_get);
 
 // Overload: Accept a privacy unit name and create/insert the pac_sample get; returns pac_idx or INVALID_INDEX
-idx_t JoinWithSampleTable(ClientContext &context, unique_ptr<LogicalOperator> &plan,
-                                     const std::string &privacy_unit);
+idx_t JoinWithSampleTable(ClientContext &context, unique_ptr<LogicalOperator> &plan, const std::string &privacy_unit);
 
 // Modify aggregate operators to add sample_id as a grouping key where pac_sample participates
 void ModifyAggregateForSample(ClientContext &context, unique_ptr<LogicalOperator> &plan, idx_t pac_idx);

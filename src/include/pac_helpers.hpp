@@ -30,7 +30,7 @@ idx_t GetNextTableIndex(unique_ptr<LogicalOperator> &plan);
 // The function will try to propagate column binding changes using ColumnBindingReplacer so that
 // expressions above the insertion point keep referring to the correct ColumnBindings.
 void ReplaceNode(unique_ptr<LogicalOperator> &root, unique_ptr<LogicalOperator> &old_node,
-                            unique_ptr<LogicalOperator> &new_node);
+                 unique_ptr<LogicalOperator> &new_node);
 
 // Find the primary key column names for the given table (searching the client's catalog search path).
 // Returns a vector with the primary key column names in order; empty vector if there is no PK.
@@ -39,7 +39,7 @@ vector<std::string> FindPrimaryKey(ClientContext &context, const std::string &ta
 // Find foreign keys declared on the given table (searching the client's catalog search path).
 // Returns a vector of pairs: (referenced_table_name, list_of_fk_column_names) for each FK constraint.
 vector<std::pair<std::string, vector<std::string>>> FindForeignKeys(ClientContext &context,
-                                                                               const std::string &table_name);
+                                                                    const std::string &table_name);
 
 // Find foreign-key path(s) from any of `table_names` to any of `privacy_units`.
 // Returns a map: start_table (as provided) -> path (vector of qualified table names from start to privacy unit,
@@ -70,8 +70,7 @@ private:
 
 // Configuration helpers that read PAC-related settings from the client's context and
 // return a canonicalized value or a default when not configured.
-std::string GetPacPrivacyFile(ClientContext &context,
-                                         const std::string &default_filename = "pac_tables.csv");
+std::string GetPacPrivacyFile(ClientContext &context, const std::string &default_filename = "pac_tables.csv");
 std::string GetPacCompiledPath(ClientContext &context, const std::string &default_path = ".");
 int64_t GetPacM(ClientContext &context, int64_t default_m = 128);
 bool IsPacNoiseEnabled(ClientContext &context, bool default_value = true);

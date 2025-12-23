@@ -33,10 +33,9 @@ void RegisterPacSumFunctions(ExtensionLoader &loader);
 //              In combine/finalize, we flush out all subtotalsX[] into totals[]
 //              In Finalize() the noised result is computed from totals[]
 // 2) floating: PAC_SUM(key_hash, (FLOAT|DOUBLE)) -> DOUBLE
-//              similar, but with two levels only (float,double), and 16 additions of |val| < 1M
-//              into the float-subtotals. This is a compromise based on some rather rough
-//	            numerical analysis. It should be noted that (e.g. due to parallelism) the outcome
-//              of even standard DuckDB SUM on floating-point numbers is unstable anyway.
+//              similar, but with only two levels (float,double), and 16 additions of |val| < 1M into  float-subtotals.
+//              This is a compromise between speed and precision based on a rough numerical analysis. Please do note
+//              that (e.g. due to parallelism) the outcome of even standard SUM on floating-point numbers is unstable.
 // 3) huge-int: PAC_SUM(key_hash, [U]HUGEINT) -> DOUBLE
 //				DuckDB produces DOUBLE outcomes for 128-bits integer sums, so we do as well.
 //              This basically uses the DOUBLE methods where the updates perform a cast from hugeint
@@ -122,8 +121,8 @@ struct PacSumIntState {
 		if (force || ++update_count64 == (SIGNED ? FLUSH_THRESHOLD_SIGNED(64) : FLUSH_THRESHOLD_UNSIGNED(64))) {
 			for (int i = 0; i < 64; i++) {
 				totals[i] += hugeint_t(subtotals64[i]);
-				subtotals64[i] = 0;
 			}
+			memset(subtotals64, 0, sizeof(subtotals64));
 			update_count64 = 0;
 		}
 	}
@@ -131,8 +130,8 @@ struct PacSumIntState {
 		if (force || ++update_count32 == (SIGNED ? FLUSH_THRESHOLD_SIGNED(32) : FLUSH_THRESHOLD_UNSIGNED(32))) {
 			for (int i = 0; i < 64; i++) {
 				subtotals64[i] += subtotals32[i];
-				subtotals32[i] = 0;
 			}
+			memset(subtotals32, 0, sizeof(subtotals32));
 			update_count32 = 0;
 			Flush64(force);
 		}
@@ -141,8 +140,8 @@ struct PacSumIntState {
 		if (force || ++update_count16 == (SIGNED ? FLUSH_THRESHOLD_SIGNED(16) : FLUSH_THRESHOLD_UNSIGNED(16))) {
 			for (int i = 0; i < 64; i++) {
 				subtotals32[i] += subtotals16[i];
-				subtotals16[i] = 0;
 			}
+			memset(subtotals16, 0, sizeof(subtotals16));
 			update_count16 = 0;
 			Flush32(force);
 		}
@@ -151,8 +150,8 @@ struct PacSumIntState {
 		if (force || ++update_count8 == (SIGNED ? FLUSH_THRESHOLD_SIGNED(8) : FLUSH_THRESHOLD_UNSIGNED(8))) {
 			for (int i = 0; i < 64; i++) {
 				subtotals16[i] += subtotals8[i];
-				subtotals8[i] = 0;
 			}
+			memset(subtotals8, 0, sizeof(subtotals8));
 			update_count8 = 0;
 			Flush16(force);
 		}

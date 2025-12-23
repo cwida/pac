@@ -24,7 +24,7 @@ struct PACCompatibilityResult {
 // Returns a PACCompatibilityResult with fk_paths empty when no PAC rewrite is needed.
 // If `replan_in_progress` is true the function will return an empty result immediately to avoid recursion.
 PACCompatibilityResult PACRewriteQueryCheck(LogicalOperator &plan, ClientContext &context,
-                                                       const std::vector<std::string> &pac_tables,
-                                                       bool replan_in_progress = false);
+                                            const std::vector<std::string> &pac_tables,
+                                            bool replan_in_progress = false);
 
 } // namespace duckdb

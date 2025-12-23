@@ -160,7 +160,7 @@ double ComputeDeltaFromValues(const std::vector<double> &values, double mi) {
 }
 
 unique_ptr<FunctionLocalState> PacAggregateInit(ExpressionState &state, const BoundFunctionExpression &,
-                                                           FunctionData *) {
+                                                FunctionData *) {
 	uint64_t seed = std::random_device {}();
 	Value pac_seed;
 	if (state.GetContext().TryGetCurrentSetting("pac_seed", pac_seed) && !pac_seed.IsNull()) {
