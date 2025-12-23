@@ -150,7 +150,7 @@ static double ComputeSecondMomentVariance(const std::vector<double> &values) {
 
 // Exported helper: compute the PAC noise variance (delta) from values and mi.
 // This implements the header-declared ComputeDeltaFromValues and is reused by other files.
-DUCKDB_API double ComputeDeltaFromValues(const std::vector<double> &values, double mi) {
+double ComputeDeltaFromValues(const std::vector<double> &values, double mi) {
 	if (mi <= 0.0) {
 		throw InvalidInputException("ComputeDeltaFromValues: mi must be > 0");
 	}
@@ -159,7 +159,7 @@ DUCKDB_API double ComputeDeltaFromValues(const std::vector<double> &values, doub
 	return delta;
 }
 
-DUCKDB_API unique_ptr<FunctionLocalState> PacAggregateInit(ExpressionState &state, const BoundFunctionExpression &,
+unique_ptr<FunctionLocalState> PacAggregateInit(ExpressionState &state, const BoundFunctionExpression &,
                                                            FunctionData *) {
 	uint64_t seed = std::random_device {}();
 	Value pac_seed;

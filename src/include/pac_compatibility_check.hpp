@@ -23,7 +23,7 @@ struct PACCompatibilityResult {
 // The caller should pass in the list of configured PAC table names (read once).
 // Returns a PACCompatibilityResult with fk_paths empty when no PAC rewrite is needed.
 // If `replan_in_progress` is true the function will return an empty result immediately to avoid recursion.
-DUCKDB_API PACCompatibilityResult PACRewriteQueryCheck(LogicalOperator &plan, ClientContext &context,
+PACCompatibilityResult PACRewriteQueryCheck(LogicalOperator &plan, ClientContext &context,
                                                        const std::vector<std::string> &pac_tables,
                                                        bool replan_in_progress = false);
 

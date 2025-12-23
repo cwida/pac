@@ -24,17 +24,17 @@ struct PacAggregateLocalState;
 
 // Compute the PAC noise variance (delta) from per-sample values and mutual information budget mi.
 // Throws InvalidInputException if mi <= 0.
-DUCKDB_API double ComputeDeltaFromValues(const std::vector<double> &values, double mi);
+double ComputeDeltaFromValues(const std::vector<double> &values, double mi);
 
 // Initialize thread-local state for pac_aggregate (reads pac_seed setting).
-DUCKDB_API unique_ptr<FunctionLocalState> PacAggregateInit(ExpressionState &state, const BoundFunctionExpression &expr,
-                                                           FunctionData *bind_data);
+unique_ptr<FunctionLocalState> PacAggregateInit(ExpressionState &state, const BoundFunctionExpression &expr,
+                                                FunctionData *bind_data);
 
 // Register pac_aggregate scalar function(s) with the extension loader
 void RegisterPacAggregateFunctions(ExtensionLoader &loader);
 
 // Declare the noisy-sample helper so other translation units (pac_count.cpp) can call it.
-DUCKDB_API double PacNoisySampleFrom64Counters(const double counters[64], double mi, std::mt19937_64 &gen);
+double PacNoisySampleFrom64Counters(const double counters[64], double mi, std::mt19937_64 &gen);
 
 // Bind data used by PAC aggregates to carry the `mi` parameter.
 struct PacBindData : public FunctionData {

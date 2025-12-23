@@ -12,7 +12,7 @@
 namespace duckdb {
 
 // Bitslice-style PAC compiler entrypoint (currently a stub)
-DUCKDB_API void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExtensionInput &input,
+void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExtensionInput &input,
                                         unique_ptr<LogicalOperator> &plan, const std::string &privacy_unit,
                                         const std::string &query_hash);
 
