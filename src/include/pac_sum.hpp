@@ -82,14 +82,12 @@ static constexpr int ZeroLeadingBitsForInt16 = 4;
 static constexpr int ZeroLeadingBitsForInt32 = 5;
 static constexpr int ZeroLeadingBitsForInt64 = 8;
 
-// Flush threshold = 2^bX (signed types use half the threshold) - how many times can we add without overflow?
-#define FLUSH_THRESHOLD_SIGNED(X)   (1 << (ZeroLeadingBitsForInt##X - 1))
-#define FLUSH_THRESHOLD_UNSIGNED(X) (1 << ZeroLeadingBitsForInt##X)
+// Branchless absolute value: mask = -1 if negative, 0 if positive; abs = (v ^ mask) - mask
+#define BRANCHLESS_ABS64(v) (static_cast<uint64_t>(((v) ^ ((v) >> 63)) - ((v) >> 63)))
 
 // Check whether a value fits in the given bit width (top bits are 0)
-// SIGNED needs absolute value check (negative numbers would become huge when cast to uint64_t)
-#define NBITS_SUBTOTAL_FITS_SIGNED(value, bits, zeroed)                                                                \
-	((((value) >= 0 ? static_cast<uint64_t>(value) : static_cast<uint64_t>(-(value))) >> (bits - zeroed)) == 0)
+// SIGNED uses branchless abs (negative numbers would become huge when cast directly to uint64_t)
+#define NBITS_SUBTOTAL_FITS_SIGNED(value, bits, zeroed) ((BRANCHLESS_ABS64(value) >> (bits - zeroed)) == 0)
 // UNSIGNED can just cast directly (values are always positive)
 #define NBITS_SUBTOTAL_FITS_UNSIGNED(value, bits, zeroed) ((static_cast<uint64_t>(value) >> (bits - zeroed)) == 0)
 
@@ -118,7 +116,7 @@ struct PacSumIntState {
 	uint32_t update_count8, update_count16, update_count32, update_count64;
 
 	AUTOVECTORIZE inline void Flush64(bool force) {
-		if (force || ++update_count64 == (SIGNED ? FLUSH_THRESHOLD_SIGNED(64) : FLUSH_THRESHOLD_UNSIGNED(64))) {
+		if (force || ++update_count64 == (1 << ZeroLeadingBitsForInt64)) {
 			for (int i = 0; i < 64; i++) {
 				totals[i] += hugeint_t(subtotals64[i]);
 			}
@@ -127,7 +125,7 @@ struct PacSumIntState {
 		}
 	}
 	AUTOVECTORIZE inline void Flush32(bool force) {
-		if (force || ++update_count32 == (SIGNED ? FLUSH_THRESHOLD_SIGNED(32) : FLUSH_THRESHOLD_UNSIGNED(32))) {
+		if (force || ++update_count32 == (1 << ZeroLeadingBitsForInt32)) {
 			for (int i = 0; i < 64; i++) {
 				subtotals64[i] += subtotals32[i];
 			}
@@ -137,7 +135,7 @@ struct PacSumIntState {
 		}
 	}
 	AUTOVECTORIZE inline void Flush16(bool force) {
-		if (force || ++update_count16 == (SIGNED ? FLUSH_THRESHOLD_SIGNED(16) : FLUSH_THRESHOLD_UNSIGNED(16))) {
+		if (force || ++update_count16 == (1 << ZeroLeadingBitsForInt16)) {
 			for (int i = 0; i < 64; i++) {
 				subtotals32[i] += subtotals16[i];
 			}
@@ -147,7 +145,7 @@ struct PacSumIntState {
 		}
 	}
 	AUTOVECTORIZE inline void Flush8(bool force) {
-		if (force || ++update_count8 == (SIGNED ? FLUSH_THRESHOLD_SIGNED(8) : FLUSH_THRESHOLD_UNSIGNED(8))) {
+		if (force || ++update_count8 == (1 << ZeroLeadingBitsForInt8)) {
 			for (int i = 0; i < 64; i++) {
 				subtotals16[i] += subtotals8[i];
 			}
