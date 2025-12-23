@@ -41,18 +41,18 @@ void RegisterPacCountFunctions(ExtensionLoader &);
 
 // State for pac_count: 64 full uint64_t totals and just 8 uint64_t subtotals (where each consists of 8 byte-counters)
 struct PacCountState {
-	uint64_t subtotals[8]; // SIMD-friendly intermediate accumulators (8 x uint64_t, containing byte sub-counters)
-	uint64_t totals[64];   // Final counters (64 x uint64_t full counters)
-	uint32_t update_count; // Counts updates until 255
+	uint64_t probabilistic_subtotals[8]; // SIMD-friendly accumulators (8 x uint64_t, containing byte sub-counters)
+	uint64_t probabilistic_totals[64];   // Final counters (64 x uint64_t full counters)
+	uint32_t exact_subtotal;             // Counts updates until 255
 
 	AUTOVECTORIZE void inline Flush() {
-		if (++update_count == 255) {
-			const uint8_t *subtotals8 = reinterpret_cast<const uint8_t *>(subtotals);
+		if (++exact_subtotal == 255) {
+			const uint8_t *probabilistic_subtotals8 = reinterpret_cast<const uint8_t *>(probabilistic_subtotals);
 			for (int i = 0; i < 64; i++) {
-				totals[i] += subtotals8[i];
+				probabilistic_totals[i] += probabilistic_subtotals8[i];
 			}
-			memset(subtotals, 0, sizeof(subtotals));
-			update_count = 0;
+			memset(probabilistic_subtotals, 0, sizeof(probabilistic_subtotals));
+			exact_subtotal = 0;
 		}
 	}
 };

@@ -30,7 +30,7 @@ PacCountUpdateOne(const UnifiedVectorFormat &idata, idx_t i, const uint64_t *inp
 	if (idata.validity.RowIsValid(idx)) {
 		uint64_t key_hash = input_data[idx];
 		for (int j = 0; j < 8; j++) {
-			state.subtotals[j] += (key_hash >> j) & PAC_COUNT_MASK;
+			state.probabilistic_subtotals[j] += (key_hash >> j) & PAC_COUNT_MASK;
 		}
 		state.Flush();
 	}
@@ -67,7 +67,7 @@ AUTOVECTORIZE void PacCountCombine(Vector &src, Vector &dst, AggregateInputData 
 	for (idx_t i = 0; i < count; i++) {
 		src_state[i]->Flush(); // flush source before reading from it
 		for (int j = 0; j < 64; j++) {
-			dst_state[i]->totals[j] += src_state[i]->totals[j];
+			dst_state[i]->probabilistic_totals[j] += src_state[i]->probabilistic_totals[j];
 		}
 	}
 }
@@ -80,10 +80,10 @@ void PacCountFinalize(Vector &states, AggregateInputData &input, Vector &result,
 
 	for (idx_t i = 0; i < count; i++) {
 		state[i]->Flush(); // flush any remaining small totals into the big totals
-		double counters_d[64];
-		ToDoubleArray(state[i]->totals, counters_d); // Convert uint64_t totals64 to double array
+		double buf[64];
+		ToDoubleArray(state[i]->probabilistic_totals, buf); // Convert uint64_t totals64 to double array
 		data[offset + i] = // when choosing any one of the totals we go for #42 (but one counts from 0 ofc)
-		    static_cast<uint64_t>(PacNoisySampleFrom64Counters(counters_d, mi, gen)) + state[i]->totals[41];
+		    static_cast<uint64_t>(PacNoisySampleFrom64Counters(buf, mi, gen)) + state[i]->probabilistic_totals[41];
 	}
 }
 

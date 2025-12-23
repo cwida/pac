@@ -2,25 +2,30 @@
 
 namespace duckdb {
 
+// SIGNED is compile-time known, so for unsigned the negative cases (value < 0) will be compiled away
+#define ACCUMULATE_BITMARGIN      2 // val must be 2 bits shorter than the accumulator to allow >=4 updates without overflow
+#define UPPERBOUND_BITWIDTH(bits) (1LL << ((bits - SIGNED) - ACCUMULATE_BITMARGIN))
+#define LOWERBOUND_BITWIDTH(bits) -(static_cast<int64_t>(SIGNED) << ((bits - SIGNED) - ACCUMULATE_BITMARGIN))
+
 template <bool SIGNED>
-AUTOVECTORIZE inline void // main worker function for probabilistically adding one INTEGER to the 64 sum totals
+AUTOVECTORIZE inline void // main worker function for probabilistically adding one INTEGER to the 64 (sub)totals
 PacSumUpdateOne(PacSumIntState<SIGNED> &state, uint64_t key_hash, typename PacSumIntState<SIGNED>::T64 value) {
 #ifndef PAC_SUM_NONCASCADING
-	if (NbitsSubtotalFitsValue<SIGNED>(value, 8, ZeroLeadingBitsForInt8)) {
-		AddToTotalsINT(state.subtotals8, value, key_hash);
-		state.Flush8(false);
-	} else if (NbitsSubtotalFitsValue<SIGNED>(value, 16, ZeroLeadingBitsForInt16)) {
-		AddToTotalsINT(state.subtotals16, value, key_hash);
-		state.Flush16(false);
-	} else if (NbitsSubtotalFitsValue<SIGNED>(value, 32, ZeroLeadingBitsForInt32)) {
-		AddToTotalsINT(state.subtotals32, value, key_hash);
-		state.Flush32(false);
+	if ((SIGNED && value < 0) ? (value >= LOWERBOUND_BITWIDTH(8)) : (value < UPPERBOUND_BITWIDTH(8))) {
+		state.Flush8(value);
+		AddToTotalsSWAR<int8_t, uint8_t, 0x0101010101010101ULL>(state.subtotals8, value, key_hash);
+	} else if ((SIGNED && value < 0) ? (value >= LOWERBOUND_BITWIDTH(16)) : (value < UPPERBOUND_BITWIDTH(16))) {
+		state.Flush16(value);
+		AddToTotalsSWAR<int16_t, uint16_t, 0x0001000100010001ULL>(state.subtotals16, value, key_hash);
+	} else if ((SIGNED && value < 0) ? (value >= LOWERBOUND_BITWIDTH(32)) : (value < UPPERBOUND_BITWIDTH(32))) {
+		state.Flush32(value);
+		AddToTotalsSWAR<int32_t, uint32_t, 0x0000000100000001ULL>(state.subtotals32, value, key_hash);
 	} else {
-		AddToTotalsINT(state.subtotals64, value, key_hash);
-		state.Flush64(false);
+		state.Flush64(value);
+		AddToTotalsSimple(state.subtotals64, value, key_hash);
 	}
 #else
-	AddToTotalsINT(state.totals, value, key_hash);
+	AddToTotalsSimple(state.probabilistic_totals, value, key_hash);
 #endif
 }
 
@@ -29,12 +34,12 @@ AUTOVECTORIZE inline void // main worker function for probabilistically adding o
 PacSumUpdateOne(PacSumDoubleState &state, uint64_t key_hash, double value) {
 #ifndef PAC_SUM_NONCASCADING
 	if (FloatSubtotalFitsDouble(value)) {
-		AddToTotalsDOUBLE(state.subtotals, static_cast<float>(value), key_hash);
-		state.Flush32(false);
+		AddToTotalsSimple(state.probabilistic_subtotals, static_cast<float>(value), key_hash);
+		state.Flush32(value);
 		return;
 	}
 #endif
-	AddToTotalsDOUBLE(state.totals, value, key_hash);
+	AddToTotalsSimple(state.probabilistic_totals, value, key_hash);
 }
 
 template <class State, bool SIGNED, class VALUE_TYPE, class INPUT_TYPE>
@@ -95,10 +100,10 @@ AUTOVECTORIZE static void PacSumCombine(Vector &src, Vector &dst, idx_t count) {
 		}
 		if (!dst_state[i]->seen_null) {
 #ifndef PAC_SUM_NONCASCADING
-			src_state[i]->FlushAll(); // flush source before reading from it
+			src_state[i]->Flush(); // flush source before reading from it
 #endif
 			for (int j = 0; j < 64; j++) {
-				dst_state[i]->totals[j] += src_state[i]->totals[j];
+				dst_state[i]->probabilistic_totals[j] += src_state[i]->probabilistic_totals[j];
 			}
 		}
 	}
@@ -117,12 +122,12 @@ static void PacSumFinalize(Vector &states, AggregateInputData &input, Vector &re
 			result_mask.SetInvalid(offset + i);
 		} else {
 #ifndef PAC_SUM_NONCASCADING
-			state[i]->FlushAll();
+			state[i]->Flush();
 #endif
-			double totals_d[64];
-			ToDoubleArray(state[i]->totals, totals_d);
+			double buf[64];
+			ToDoubleArray(state[i]->probabilistic_totals, buf);
 			data[offset + i] = // when choosing any one of the totals we go for #42 (but one counts from 0 ofc)
-			    FromDouble<ACC_TYPE>(PacNoisySampleFrom64Counters(totals_d, mi, gen)) + state[i]->totals[41];
+			    FromDouble<ACC_TYPE>(PacNoisySampleFrom64Counters(buf, mi, gen)) + state[i]->probabilistic_totals[41];
 		}
 	}
 }

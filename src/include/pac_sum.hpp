@@ -40,122 +40,151 @@ void RegisterPacSumFunctions(ExtensionLoader &loader);
 //				DuckDB produces DOUBLE outcomes for 128-bits integer sums, so we do as well.
 //              This basically uses the DOUBLE methods where the updates perform a cast from hugeint
 
-//#define PAC_SUM_NONCASCADING 1 seems 10x slower on Apple
+//#define PAC_SUM_NONCASCADING 1 // seems 10x slower on Apple
 
-// The below macro controls how we filter the values. Rather than IF (bit_is_set) THEN totals += value
-// we rather set value to 0 if !bit_is_set and always do totals += value. This is SIMD-friendly.
-//
-// We have two ways to set value to 0 if !bit_is_set:
-// - MULT: value *= bit_is_set
-// - AND:  value &= (bit_is_set - 1)
-// In micro-benchmarks on Apple, MULT is 30% faster.
-// Note: AND only works for integers, not floating point, so DOUBLE always uses MULT.
-#define PAC_FILTER_MULT(val, tpe, key, pos) ((val) * (static_cast<tpe>(((key) >> (pos)) & 1ULL)))
-#define PAC_FILTER_AND(val, tpe, key, pos)  ((val) & (static_cast<tpe>(((key) >> (pos)) & 1ULL) - 1ULL))
-
-// INT filter is configurable (currently MULT, can switch to AND for benchmarking)
-#define PAC_FILTER_INT PAC_FILTER_MULT
-// DOUBLE filter must always be MULT (AND doesn't work for floating point)
-#define PAC_FILTER_DOUBLE PAC_FILTER_MULT
-
-// Inner AUTOVECTORIZE function for the 64-element loops - generated via macro
+// Inner AUTOVECTORIZE functions for the 64-element accumulation
 // This is the hot path that benefits from SIMD
-#define DEFINE_ADD_TO_TOTALS(KIND)                                                                                     \
-	template <typename ACCUM_T, typename VALUE_T>                                                                      \
-	AUTOVECTORIZE static inline void AddToTotals##KIND(ACCUM_T *totals, VALUE_T value, uint64_t key_hash) {            \
-		ACCUM_T v = static_cast<ACCUM_T>(value);                                                                       \
-		for (int j = 0; j < 64; j++) {                                                                                 \
-			totals[j] += PAC_FILTER_##KIND(v, ACCUM_T, key_hash, j);                                                   \
-		}                                                                                                              \
-	}
+//
+// SWAR (SIMD Within A Register) idea in case of int8_t:
+// - Pack 8 int8_t counters into each uint64_t (totals[8] instead of totals[64])
+// - totals[i] holds counters for bit positions i, i+8, i+16, i+24, i+32, i+40, i+48, i+56
+// - 8 iterations instead of 64
+//
+// Unified SWAR (SIMD Within A Register) for all integer bit widths
+// - BITS=8:  8 values packed per uint64_t, totals[8],  8 iterations
+// - BITS=16: 4 values packed per uint64_t, totals[16], 16 iterations
+// - BITS=32: 2 values packed per uint64_t, totals[32], 32 iterations
+// - BITS=64: 1 value per uint64_t,         totals[64], 64 iterations
+//
+// totals[i] holds counters for bits i, i+BITS, i+2*BITS, ... (interleaved layout)
 
-DEFINE_ADD_TO_TOTALS(INT)
-DEFINE_ADD_TO_TOTALS(DOUBLE)
+// SWAR accumulation: pack multiple counters into uint64_t registers (for 8/16/32-bit elements)
+// SIGNED_T/UNSIGNED_T: types for the packed elements (e.g., int8_t/uint8_t)
+// MASK: broadcast mask (one bit per element, e.g., 0x0101010101010101 for 8-bit)
+// VALUE_T: input value type
+template <typename SIGNED_T, typename UNSIGNED_T, uint64_t MASK, typename VALUE_T>
+AUTOVECTORIZE static inline void AddToTotalsSWAR(uint64_t *totals, VALUE_T value, uint64_t key_hash) {
+	constexpr int BITS = sizeof(SIGNED_T) * 8;
+	// Cast to unsigned type to avoid sign extension, then broadcast to all lanes
+	uint64_t val_packed = static_cast<UNSIGNED_T>(static_cast<SIGNED_T>(value)) * MASK;
+	for (int i = 0; i < BITS; i++) {
+		uint64_t bits = (key_hash >> i) & MASK;
+		uint64_t expanded = (bits << BITS) - bits; // 0x01 -> 0xFF, 0x0001 -> 0xFFFF, etc.
+		totals[i] += val_packed & expanded;
+	}
+}
+
+// Simple version for double/hugeint (uses multiplication for conditional add)
+template <typename ACCUM_T, typename VALUE_T>
+AUTOVECTORIZE static inline void AddToTotalsSimple(ACCUM_T *totals, VALUE_T value, uint64_t key_hash) {
+	ACCUM_T v = static_cast<ACCUM_T>(value);
+	for (int j = 0; j < 64; j++) {
+		totals[j] += v * static_cast<ACCUM_T>((key_hash >> j) & 1ULL);
+	}
+}
 
 // =========================
 // Integer pac_sum (cascaded multi-level accumulation for SIMD efficiency)
 // =========================
 
-// Number of top bits bX for counters of uintX reserved for overflow headroom at each level
-static constexpr int ZeroLeadingBitsForInt8 = 3;
-static constexpr int ZeroLeadingBitsForInt16 = 4;
-static constexpr int ZeroLeadingBitsForInt32 = 5;
-static constexpr int ZeroLeadingBitsForInt64 = 8;
-
-// Branchless absolute value: mask = -1 if negative, 0 if positive; abs = (v ^ mask) - mask
-#define BRANCHLESS_ABS64(v) (static_cast<uint64_t>(((v) ^ ((v) >> 63)) - ((v) >> 63)))
-
-// Check whether a value fits in the given bit width (top bits are 0)
-// SIGNED uses branchless abs (negative numbers would become huge when cast directly to uint64_t)
-#define NBITS_SUBTOTAL_FITS_SIGNED(value, bits, zeroed) ((BRANCHLESS_ABS64(value) >> (bits - zeroed)) == 0)
-// UNSIGNED can just cast directly (values are always positive)
-#define NBITS_SUBTOTAL_FITS_UNSIGNED(value, bits, zeroed) ((static_cast<uint64_t>(value) >> (bits - zeroed)) == 0)
-
-// Templated helper to check if a value safely fits in a subtotal of given bit width (= whether its topbits are free)
-template <bool SIGNED>
-static inline bool NbitsSubtotalFitsValue(int64_t value, int bits, int zeroed) {
-	return SIGNED ? NBITS_SUBTOTAL_FITS_SIGNED(value, bits, zeroed) : NBITS_SUBTOTAL_FITS_UNSIGNED(value, bits, zeroed);
-}
+// SIGNED is compile-time known, so will be compiled away (signed is then left with 2 comparisons, unsigned with 1)
+#define CHECK_BOUNDS_32(val) ((val > (SIGNED ? INT32_MAX : UINT32_MAX)) || (SIGNED && (val < INT32_MIN)))
+#define CHECK_BOUNDS_16(val) ((val > (SIGNED ? INT16_MAX : UINT16_MAX)) || (SIGNED && (val < INT16_MIN)))
+#define CHECK_BOUNDS_8(val)  ((val > (SIGNED ? INT8_MAX : UINT8_MAX)) || (SIGNED && (val < INT8_MIN)))
 
 // Templated integer state - SIGNED selects signed/unsigned types and thresholds
 template <bool SIGNED>
 struct PacSumIntState {
-	using T8 = typename std::conditional<SIGNED, int8_t, uint8_t>::type;
-	using T16 = typename std::conditional<SIGNED, int16_t, uint16_t>::type;
-	using T32 = typename std::conditional<SIGNED, int32_t, uint32_t>::type;
-	using T64 = typename std::conditional<SIGNED, int64_t, uint64_t>::type;
+	// Type alias for the value type (int64_t for signed, uint64_t for unsigned)
+	typedef typename std::conditional<SIGNED, int64_t, uint64_t>::type T64;
 
 #ifndef PAC_SUM_NONCASCADING
-	T8 subtotals8[64];
-	T16 subtotals16[64];
-	T32 subtotals32[64];
-	T64 subtotals64[64];
+	// All levels use SWAR packed format: uint64_t arrays holding packed values
+	// subtotals_X[i] holds counters for bits i, i+X, i+2*X, ... (interleaved layout)
+	uint64_t subtotals8[8];   // 8 x uint64_t, each holds 8 packed int8_t
+	uint64_t subtotals16[16]; // 16 x uint64_t, each holds 4 packed int16_t
+	uint64_t subtotals32[32]; // 32 x uint64_t, each holds 2 packed int32_t
+	uint64_t subtotals64[64]; // 64 x uint64_t, each holds 1 int64_t (no packing benefit but unified interface)
 #endif
-	hugeint_t totals[64]; // want this array last (smaller subtotals first) for sequential CPU cache access
+	hugeint_t probabilistic_totals[64]; // final totals, want last for sequential cache access
 #ifndef PAC_SUM_NONCASCADING
-	uint32_t update_count8, update_count16, update_count32, update_count64;
+	// these hold the exact subtotal of each aggregation level, we flush once we see this overflow
+	int64_t exact_subtotal8, exact_subtotal16, exact_subtotal32, exact_subtotal64;
 
-	AUTOVECTORIZE inline void Flush64(bool force) {
-		if (force || ++update_count64 == (1 << ZeroLeadingBitsForInt64)) {
+	AUTOVECTORIZE inline void Flush64(int64_t value, bool force = false) {
+		uint64_t new_total = value + exact_subtotal64;
+		bool would_overflow = ((SIGNED && value < 0) ? (new_total > exact_subtotal64) : (new_total < exact_subtotal64));
+		if (would_overflow || force) {
+			// Unpack: subtotals64[i] holds int64_t for bit i (no unpacking needed, just cast)
+			const int64_t *src = reinterpret_cast<const int64_t *>(subtotals64);
 			for (int i = 0; i < 64; i++) {
-				totals[i] += hugeint_t(subtotals64[i]);
+				probabilistic_totals[i] += src[i];
 			}
 			memset(subtotals64, 0, sizeof(subtotals64));
-			update_count64 = 0;
+			exact_subtotal64 = value;
+		} else {
+			exact_subtotal64 = new_total;
 		}
 	}
-	AUTOVECTORIZE inline void Flush32(bool force) {
-		if (force || ++update_count32 == (1 << ZeroLeadingBitsForInt32)) {
-			for (int i = 0; i < 64; i++) {
-				subtotals64[i] += subtotals32[i];
+	AUTOVECTORIZE inline void Flush32(int64_t value, bool force = false) {
+		int64_t new_total = value + exact_subtotal32;
+		bool would_overflow = CHECK_BOUNDS_32(new_total);
+		if (would_overflow || force) {
+			// Unpack: subtotals32[i] word j -> subtotals64[j*32 + i]
+			const int32_t *src = reinterpret_cast<const int32_t *>(subtotals32);
+			int64_t *dst = reinterpret_cast<int64_t *>(subtotals64);
+			for (int i = 0; i < 32; i++) {
+				for (int j = 0; j < 2; j++) {
+					dst[j * 32 + i] += src[i * 2 + j];
+				}
 			}
 			memset(subtotals32, 0, sizeof(subtotals32));
-			update_count32 = 0;
-			Flush64(force);
+			Flush64(exact_subtotal32, force);
+			exact_subtotal32 = value;
+		} else {
+			exact_subtotal32 = new_total;
 		}
 	}
-	AUTOVECTORIZE inline void Flush16(bool force) {
-		if (force || ++update_count16 == (1 << ZeroLeadingBitsForInt16)) {
-			for (int i = 0; i < 64; i++) {
-				subtotals32[i] += subtotals16[i];
+	AUTOVECTORIZE inline void Flush16(int64_t value, bool force = false) {
+		int64_t new_total = value + exact_subtotal16;
+		bool would_overflow = CHECK_BOUNDS_16(new_total);
+		if (would_overflow || force) {
+			// Unpack: subtotals16[i] halfword j -> subtotals32[j*16 + i]
+			const int16_t *src = reinterpret_cast<const int16_t *>(subtotals16);
+			int32_t *dst = reinterpret_cast<int32_t *>(subtotals32);
+			for (int i = 0; i < 16; i++) {
+				for (int j = 0; j < 4; j++) {
+					dst[j * 16 + i] += src[i * 4 + j];
+				}
 			}
 			memset(subtotals16, 0, sizeof(subtotals16));
-			update_count16 = 0;
-			Flush32(force);
+			Flush32(exact_subtotal16, force);
+			exact_subtotal16 = value;
+		} else {
+			exact_subtotal16 = new_total;
 		}
 	}
-	AUTOVECTORIZE inline void Flush8(bool force) {
-		if (force || ++update_count8 == (1 << ZeroLeadingBitsForInt8)) {
-			for (int i = 0; i < 64; i++) {
-				subtotals16[i] += subtotals8[i];
+	AUTOVECTORIZE inline void Flush8(int64_t value, bool force = false) {
+		int64_t new_total = value + exact_subtotal8;
+		bool would_overflow = CHECK_BOUNDS_8(new_total);
+		if (would_overflow || force) {
+			// Unpack: subtotals8[i] byte j -> subtotals16[j*8 + i]
+			const int8_t *src = reinterpret_cast<const int8_t *>(subtotals8);
+			int16_t *dst = reinterpret_cast<int16_t *>(subtotals16);
+			for (int i = 0; i < 8; i++) {
+				for (int j = 0; j < 8; j++) {
+					dst[j * 8 + i] += src[i * 8 + j];
+				}
 			}
 			memset(subtotals8, 0, sizeof(subtotals8));
-			update_count8 = 0;
-			Flush16(force);
+			Flush16(exact_subtotal8, force);
+			exact_subtotal8 = value;
+		} else {
+			exact_subtotal8 = new_total;
 		}
 	}
-	inline void FlushAll() {
-		Flush8(true);
+	void Flush() {
+		Flush8(0ULL, true);
 	}
 #endif
 	bool seen_null;
@@ -163,35 +192,38 @@ struct PacSumIntState {
 
 // Double pac_sum (cascaded float32/float64 accumulation)
 //
-// Cascade constants: values with |value| < kDoubleMaxForFloat32 use float, otherwise double
-// We can safely sum kDoubleFlushThreshold float values before flushing to double
-static constexpr double kDoubleMaxForFloat32 = 1000000.0;
-static constexpr uint32_t kDoubleFlushThreshold = 16;
+// Cascade constants: values with |value| < MaxIncrementFloat32 use float, otherwise double
+// We can safely sum MinIncrementsFloat32 float values before flushing to double
+static constexpr double MaxIncrementFloat32 = 1000000.0;
+static constexpr double MinIncrementsFloat32 = 16;
 
-static inline bool FloatSubtotalFitsDouble(double value) { // checker whether we can quickly accumulate in 32-bits float
-	double abs_v = value >= 0 ? value : -value;
-	return abs_v < kDoubleMaxForFloat32;
+static inline bool FloatSubtotalFitsDouble(double value, double num = 1) {
+	return (value > -MaxIncrementFloat32 * num) && (value < MaxIncrementFloat32 * num);
 }
 
 struct PacSumDoubleState {
 #ifndef PAC_SUM_NONCASCADING
-	float subtotals[64];
+	float probabilistic_subtotals[64];
 #endif
-	double totals[64]; // want this array last (smaller subtotals first) for sequential CPU cache access
+	double probabilistic_totals[64]; // want this array last for sequential CPU cache access: smaller subtotals first
 #ifndef PAC_SUM_NONCASCADING
-	uint32_t update_count;
+	double exact_subtotal;
 
-	AUTOVECTORIZE inline void Flush32(bool force) {
-		if (force || ++update_count >= kDoubleFlushThreshold) {
+	AUTOVECTORIZE inline void Flush32(double value, bool force = false) {
+		double raw_subtotal = exact_subtotal + value;
+		bool would_overflow = FloatSubtotalFitsDouble(raw_subtotal, MinIncrementsFloat32);
+		if (would_overflow || force) {
 			for (int i = 0; i < 64; i++) {
-				totals[i] += static_cast<double>(subtotals[i]);
+				probabilistic_totals[i] += static_cast<double>(probabilistic_subtotals[i]);
 			}
-			memset(subtotals, 0, sizeof(subtotals));
-			update_count = 0;
+			memset(probabilistic_subtotals, 0, sizeof(probabilistic_subtotals));
+			exact_subtotal = value;
+		} else {
+			exact_subtotal = raw_subtotal;
 		}
 	}
-	inline void FlushAll() {
-		Flush32(true);
+	void Flush() {
+		Flush32(0, true);
 	}
 #endif
 	bool seen_null;
