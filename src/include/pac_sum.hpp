@@ -95,16 +95,19 @@ AUTOVECTORIZE static inline void AddToTotalsSimple(ACCUM_T *totals, VALUE_T valu
 // Templated integer state - SIGNED selects signed/unsigned types and thresholds
 template <bool SIGNED>
 struct PacSumIntState {
-	// Type alias for the value type (int64_t for signed, uint64_t for unsigned)
+	// Type aliases based on signedness
+	typedef typename std::conditional<SIGNED, int8_t, uint8_t>::type T8;
+	typedef typename std::conditional<SIGNED, int16_t, uint16_t>::type T16;
+	typedef typename std::conditional<SIGNED, int32_t, uint32_t>::type T32;
 	typedef typename std::conditional<SIGNED, int64_t, uint64_t>::type T64;
 
 #ifndef PAC_SUM_NONCASCADING
 	// All levels use SWAR packed format: uint64_t arrays holding packed values
 	// subtotals_X[i] holds counters for bits i, i+X, i+2*X, ... (interleaved layout)
-	uint64_t subtotals8[8];   // 8 x uint64_t, each holds 8 packed int8_t
-	uint64_t subtotals16[16]; // 16 x uint64_t, each holds 4 packed int16_t
-	uint64_t subtotals32[32]; // 32 x uint64_t, each holds 2 packed int32_t
-	uint64_t subtotals64[64]; // 64 x uint64_t, each holds 1 int64_t (no packing benefit but unified interface)
+	uint64_t subtotals8[8];   // 8 x uint64_t, each holds 8 packed T8
+	uint64_t subtotals16[16]; // 16 x uint64_t, each holds 4 packed T16
+	uint64_t subtotals32[32]; // 32 x uint64_t, each holds 2 packed T32
+	uint64_t subtotals64[64]; // 64 x uint64_t, each holds 1 T64
 #endif
 	hugeint_t probabilistic_totals[64]; // final totals, want last for sequential cache access
 #ifndef PAC_SUM_NONCASCADING
@@ -115,8 +118,7 @@ struct PacSumIntState {
 		uint64_t new_total = value + exact_subtotal64;
 		bool would_overflow = ((SIGNED && value < 0) ? (new_total > exact_subtotal64) : (new_total < exact_subtotal64));
 		if (would_overflow || force) {
-			// Unpack: subtotals64[i] holds int64_t for bit i (no unpacking needed, just cast)
-			const int64_t *src = reinterpret_cast<const int64_t *>(subtotals64);
+			const T64 *src = reinterpret_cast<const T64 *>(subtotals64);
 			for (int i = 0; i < 64; i++) {
 				probabilistic_totals[i] += src[i];
 			}
@@ -130,13 +132,10 @@ struct PacSumIntState {
 		int64_t new_total = value + exact_subtotal32;
 		bool would_overflow = CHECK_BOUNDS_32(new_total);
 		if (would_overflow || force) {
-			// Unpack: subtotals32[i] word j -> subtotals64[j*32 + i]
-			const int32_t *src = reinterpret_cast<const int32_t *>(subtotals32);
-			int64_t *dst = reinterpret_cast<int64_t *>(subtotals64);
-			for (int i = 0; i < 32; i++) {
-				for (int j = 0; j < 2; j++) {
-					dst[j * 32 + i] += src[i * 2 + j];
-				}
+			const T32 *src = reinterpret_cast<const T32 *>(subtotals32);
+			T64 *dst = reinterpret_cast<T64 *>(subtotals64);
+			for (int bit = 0; bit < 64; bit++) {
+				dst[bit] += src[(bit % 32) * 2 + (bit / 32)];
 			}
 			memset(subtotals32, 0, sizeof(subtotals32));
 			Flush64(exact_subtotal32, force);
@@ -149,13 +148,12 @@ struct PacSumIntState {
 		int64_t new_total = value + exact_subtotal16;
 		bool would_overflow = CHECK_BOUNDS_16(new_total);
 		if (would_overflow || force) {
-			// Unpack: subtotals16[i] halfword j -> subtotals32[j*16 + i]
-			const int16_t *src = reinterpret_cast<const int16_t *>(subtotals16);
-			int32_t *dst = reinterpret_cast<int32_t *>(subtotals32);
-			for (int i = 0; i < 16; i++) {
-				for (int j = 0; j < 4; j++) {
-					dst[j * 16 + i] += src[i * 4 + j];
-				}
+			const T16 *src = reinterpret_cast<const T16 *>(subtotals16);
+			T32 *dst = reinterpret_cast<T32 *>(subtotals32);
+			for (int bit = 0; bit < 64; bit++) {
+				int dst_idx = (bit % 32) * 2 + (bit / 32);
+				int src_idx = (bit % 16) * 4 + (bit / 16);
+				dst[dst_idx] += src[src_idx];
 			}
 			memset(subtotals16, 0, sizeof(subtotals16));
 			Flush32(exact_subtotal16, force);
@@ -168,13 +166,12 @@ struct PacSumIntState {
 		int64_t new_total = value + exact_subtotal8;
 		bool would_overflow = CHECK_BOUNDS_8(new_total);
 		if (would_overflow || force) {
-			// Unpack: subtotals8[i] byte j -> subtotals16[j*8 + i]
-			const int8_t *src = reinterpret_cast<const int8_t *>(subtotals8);
-			int16_t *dst = reinterpret_cast<int16_t *>(subtotals16);
-			for (int i = 0; i < 8; i++) {
-				for (int j = 0; j < 8; j++) {
-					dst[j * 8 + i] += src[i * 8 + j];
-				}
+			const T8 *src = reinterpret_cast<const T8 *>(subtotals8);
+			T16 *dst = reinterpret_cast<T16 *>(subtotals16);
+			for (int bit = 0; bit < 64; bit++) {
+				int dst_idx = (bit % 16) * 4 + (bit / 16);
+				int src_idx = (bit % 8) * 8 + (bit / 8);
+				dst[dst_idx] += src[src_idx];
 			}
 			memset(subtotals8, 0, sizeof(subtotals8));
 			Flush16(exact_subtotal8, force);

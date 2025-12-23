@@ -127,7 +127,8 @@ void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExten
 		arg_types.push_back(value_child->return_type);
 
 		// Lookup the pac_sum aggregate in the system catalog
-		auto &entry = Catalog::GetSystemCatalog(input.context).GetEntry<AggregateFunctionCatalogEntry>(input.context, DEFAULT_SCHEMA, "pac_sum");
+		auto &entry = Catalog::GetSystemCatalog(input.context)
+		                  .GetEntry<AggregateFunctionCatalogEntry>(input.context, DEFAULT_SCHEMA, "pac_sum");
 		auto &aggr_catalog = entry.Cast<AggregateFunctionCatalogEntry>();
 
 		auto best = function_binder.BindFunction(aggr_catalog.name, aggr_catalog.functions, arg_types, error);
@@ -141,7 +142,7 @@ void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExten
 		aggr_children.push_back(std::move(value_child));
 
 		auto new_aggr = function_binder.BindAggregateFunction(bound_aggr_func, std::move(aggr_children), nullptr,
-		                                                     AggregateType::NON_DISTINCT);
+		                                                      AggregateType::NON_DISTINCT);
 
 		// Replace the aggregate expression with the newly bound pac_sum aggregate
 		agg->expressions[0] = std::move(new_aggr);
@@ -151,13 +152,10 @@ void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExten
 		throw NotImplementedException("PacBitsliceQuery does not support multiple PKs yet!");
 	}
 
-
-
-
 	plan->ResolveOperatorTypes();
 	plan->Verify(input.context);
-	//plan->Print();
-	//Printer::Print("ok");
+	// plan->Print();
+	// Printer::Print("ok");
 }
 
 } // namespace duckdb
