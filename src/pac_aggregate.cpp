@@ -8,7 +8,11 @@
 #include "duckdb/function/aggregate_function.hpp"
 
 #include <random>
+#define _USE_MATH_DEFINES // for M_PI on MSVC
 #include <cmath>
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 #include <cstring>
 #include <type_traits>
 #include <limits>

@@ -24,14 +24,14 @@ void RegisterPacSumFunctions(ExtensionLoader &loader);
 // auto-vectorization. (Rather than naive FOR(i=0;i<64;i++) IF (keybit[i]) totals[i]+=val
 // we rewrite into SIMD-friendly multiplication FOR(i=0;i<64;i++) totals[i]+=keybit[i]*val),
 //
-// mimicking what DuckDB's SUM() normally does we have the following cases:
-// 1) integers: PAC_SUM(key_hash, [U](BIG||SMALL|TINY)INT) -> [U]HUGEINT
-//              We keep sub-totals8/16/32/64/128 and sum each value in smallest subtotal that fits.
-//				We ensure "things fit" by flushing totalsX into the next wider total every 2^bX
-//	 			additions, and only by allowing values to be added into totalsX if they have the
-//	 			highest bX bits unset, so overflow cannot happen (b8=3, b16=5, b32=6, b64=8).
-//              In combine/finalize, we flush out all totalsX<128 into totals128
-//              In Finalize() the noised result is computed from totals128
+// mimicking what DuckDB's SUM() normally does, we have the following cases:
+// 1) integers: PAC_SUM(key_hash, [U](BIG||SMALL|TINY)INT) -> HUGEINT
+//              We keep sub-totals8/16/32/64 and uint128_t totals and sum each value in smallest subtotal that fits.
+//				We ensure "things fit" by flushing totalsX into the next wider total every 2^bX additions, and only
+//				by allowing values to be added into totalsX if they have the highest bX bits unset, so overflow cannot
+//				happen (b8=3, b16=5, b32=6, b64=8).
+//              In combine/finalize, we flush out all subtotalsX[] into totals[]
+//              In Finalize() the noised result is computed from totals[]
 // 2) floating: PAC_SUM(key_hash, (FLOAT|DOUBLE)) -> DOUBLE
 //              similar, but with two levels only (float,double), and 16 additions of |val| < 1M
 //              into the float-subtotals. This is a compromise based on some rather rough
@@ -43,7 +43,7 @@ void RegisterPacSumFunctions(ExtensionLoader &loader);
 
 //#define PAC_SUM_NONCASCADING 1 seems 10x slower on Apple
 
-// This macro controls how we filter the values. Rather than IF (bit_is_set) THEN totals += value
+// The below macro controls how we filter the values. Rather than IF (bit_is_set) THEN totals += value
 // we rather set value to 0 if !bit_is_set and always do totals += value. This is SIMD-friendly.
 //
 // We have two ways to set value to 0 if !bit_is_set:

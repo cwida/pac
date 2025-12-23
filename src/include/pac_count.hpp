@@ -21,27 +21,28 @@ void RegisterPacCountFunctions(ExtensionLoader &);
 //
 // PAC_COUNT() needs to do for(i=0; i<64; i++) total[i] += (key_hash >> i) & 1; (extract bit i)
 //
-// We want to do this in a SIMD-friendly way. Therefore, we want to create 64 totals of uint8_t (i.e. bytes),
+// We want to do this in a SIMD-friendly way. Therefore, we want to create 64 subtotals of uint8_t (i.e. bytes),
 // and perform 64 byte-additions, because in the widest SIMD implementation, AVX512, this means that this
 // could be done in a *SINGLE* instruction (AVX512 has 64 lanes of uint8, as 64x8=512)
 //
-// However, to help auto-vectorizing compilers get this right, we use not 64 x uint8_t totals, but 8 x uint64_t
-// totals because key_hash is already uint64_t. We apply this mask to key_hash:
+// However, to help auto-vectorizing compilers, we do not use uint8_t subtotals[64], but uint64_t subtotals[8]
+// because key_hash is also uint64_t. We apply the below mask to key_hash to extract the lowest bit of each byte:
 
 #define PAC_COUNT_MASK                                                                                                 \
 	(1ULL | (1ULL << 8) | (1ULL << 16) | (1ULL << 24) | (1ULL << 32) | (1ULL << 40) | (1ULL << 48) | (1ULL << 56))
 
-// for each of the 8 iterations i, we then do (hash_key>>i) & PAC_COUNT_MASK which selects 8 bits, and then add these
-// with a single uint64_t add to a uint64 total8. You can only do that 255 times before overflow starts to happen.
-// So after 255 iterations, the totals8  are added to full (uint64_t) totals64 and reset to 0.
+// For each of the 8 iterations i, we then do (hash_key>>i) & PAC_COUNT_MASK which selects 8 bits, and then add these
+// with a single uint64_t ADD to a uint64 subtotals[]. You can only do that 255 times before the bytes in this uint64_t
+// start touching each other (causing overflow).
+// So after 255 iterations, the subtotals[] are added to full uint64_t totals[64] and reset to 0.
 //
-// This means we get very fast performance 254 times and slower performance once every 255 only.
-// This SIMD-friendly implementation should make PAC counting almost as fast as normal counting.
+// The idea is that we get very fast performance 254 times and slower performance once every 255 only.
+// This SIMD-friendly implementation can make PAC counting almost as fast as normal counting.
 
-// State for pac_count: 64 counters and totals8 intermediate accumulators
+// State for pac_count: 64 full uint64_t totals and just 8 uint64_t subtotals (where each consists of 8 byte-counters)
 struct PacCountState {
-	uint64_t subtotals[8]; // SIMD-friendly intermediate accumulators (8 x 8 bytes)
-	uint64_t totals[64];   // Final counters (64 x 8 bytes)
+	uint64_t subtotals[8]; // SIMD-friendly intermediate accumulators (8 x uint64_t, containing byte sub-counters)
+	uint64_t totals[64];   // Final counters (64 x uint64_t full counters)
 	uint32_t update_count; // Counts updates until 255
 
 	AUTOVECTORIZE void inline Flush() {
