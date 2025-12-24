@@ -29,11 +29,12 @@ install(
   ARCHIVE DESTINATION "${INSTALL_LIB_DIR}")
 
 # Test runners
-add_executable(test_update_parent_runner src/test_update_parent_runner.cpp)
-target_link_libraries(test_update_parent_runner ${EXTENSION_NAME})
-
-add_executable(test_pac_privacy_columns src/test_pac_privacy_columns.cpp)
-target_link_libraries(test_pac_privacy_columns ${EXTENSION_NAME})
+# Build a single unified test executable that invokes all tests via src/test/test_runner.cpp
+add_executable(pac_test_runner
+    src/test/test_runner.cpp
+    src/test/test_compiler_functions.cpp
+    src/test/test_pac_privacy_columns.cpp)
+target_link_libraries(pac_test_runner ${EXTENSION_NAME})
 
 # TPCH + PAC benchmark runner
 add_executable(pac_tpch_benchmark benchmark/pac_tpch_benchmark.cpp)

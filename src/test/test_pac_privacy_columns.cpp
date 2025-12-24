@@ -1,3 +1,4 @@
+// filepath: /home/ila/Code/pac/src/test/test_pac_privacy_columns.cpp
 // filepath: /home/ila/Code/pac/src/pac_privacy_columns_test.cpp
 // Small standalone test runner for FindPrimaryKey (pac_helpers)
 
@@ -8,7 +9,8 @@
 
 #include "duckdb.hpp"
 #include "duckdb/main/connection.hpp"
-#include "include/pac_helpers.hpp"
+#include "../include/pac_helpers.hpp"
+#include "include/test_runner.hpp"
 
 using namespace duckdb;
 
@@ -30,7 +32,7 @@ static std::string Basename(const std::string &qname) {
 	return qname.substr(pos + 1);
 }
 
-int main() {
+int RunPrivacyColumnsTests() {
 	DuckDB db(nullptr);
 	Connection con(db);
 	con.BeginTransaction();
@@ -155,8 +157,8 @@ int main() {
 		          "t_b(id));");
 		con.Query("CREATE TABLE IF NOT EXISTS t_unrelated(x INTEGER);");
 
-		std::vector<std::string> privacy_units = {"t_c"};
-		std::vector<std::string> table_names = {"t_a", "t_b", "t_unrelated"};
+		auto privacy_units = std::vector<std::string>{"t_c"};
+		auto table_names = std::vector<std::string>{"t_a", "t_b", "t_unrelated"};
 
 		auto paths = FindForeignKeyBetween(*con.context, privacy_units, table_names);
 
@@ -242,8 +244,8 @@ int main() {
 		con.Query("CREATE TABLE IF NOT EXISTS t_long_0(id INTEGER PRIMARY KEY, n1 INTEGER, FOREIGN KEY(n1) REFERENCES "
 		          "t_long_1(id));");
 
-		std::vector<std::string> privacy_long = {"t_c_long"};
-		std::vector<std::string> start_long = {"t_long_0"};
+		auto privacy_long = std::vector<std::string>{"t_c_long"};
+		auto start_long = std::vector<std::string>{"t_long_0"};
 		auto paths_long = FindForeignKeyBetween(*con.context, privacy_long, start_long);
 		auto it_long = paths_long.find("t_long_0");
 		if (it_long == paths_long.end()) {
@@ -254,7 +256,7 @@ int main() {
 			const size_t expected_len = 13; // t_long_0..t_long_11 + t_c_long
 			if (path.size() != expected_len) {
 				std::cerr << "FAIL: expected path length " << expected_len << " for t_long_0, got " << path.size()
-				          << "\n";
+					<< "\n";
 				failures++;
 			} else {
 				bool ok = true;
@@ -283,8 +285,8 @@ int main() {
 		con.Query("CREATE TABLE IF NOT EXISTS t_unrelated_base(id INTEGER PRIMARY KEY);");
 		con.Query("CREATE TABLE IF NOT EXISTS t_unrelated2(id INTEGER PRIMARY KEY, bid INTEGER, FOREIGN KEY(bid) "
 		          "REFERENCES t_unrelated_base(id));");
-		std::vector<std::string> privacy_none = {"t_c"};
-		std::vector<std::string> starts_none = {"t_unrelated2"};
+		auto privacy_none = std::vector<std::string>{"t_c"};
+		auto starts_none = std::vector<std::string>{"t_unrelated2"};
 		auto paths_none = FindForeignKeyBetween(*con.context, privacy_none, starts_none);
 		if (paths_none.find("t_unrelated2") != paths_none.end()) {
 			std::cerr << "FAIL: unexpected path found for t_unrelated2\n";

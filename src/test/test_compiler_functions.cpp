@@ -3,22 +3,23 @@
 #include <memory>
 #include <functional>
 #include <map>
-#include "duckdb/planner/expression_iterator.hpp"
+#include "../../duckdb/src/include/duckdb/planner/expression_iterator.hpp"
 #include <set>
 
-#include "include/pac_helpers.hpp"
-#include "duckdb/planner/operator/logical_projection.hpp"
-#include "duckdb/planner/operator/logical_dummy_scan.hpp"
-#include "duckdb/planner/expression/bound_columnref_expression.hpp"
-#include "duckdb/planner/operator/logical_join.hpp"
-#include "duckdb/planner/operator/logical_filter.hpp"
-#include "duckdb/planner/operator/logical_aggregate.hpp"
-#include "duckdb/common/enums/join_type.hpp"
-#include "duckdb.hpp"
-#include "duckdb/main/connection.hpp"
-#include "duckdb/common/constants.hpp"
+#include "../include/pac_helpers.hpp"
+#include "../../duckdb/src/include/duckdb/planner/operator/logical_projection.hpp"
+#include "../../duckdb/src/include/duckdb/planner/operator/logical_dummy_scan.hpp"
+#include "../../duckdb/src/include/duckdb/planner/expression/bound_columnref_expression.hpp"
+#include "../../duckdb/src/include/duckdb/planner/operator/logical_join.hpp"
+#include "../../duckdb/src/include/duckdb/planner/operator/logical_filter.hpp"
+#include "../../duckdb/src/include/duckdb/planner/operator/logical_aggregate.hpp"
+#include "../../duckdb/src/include/duckdb/common/enums/join_type.hpp"
+#include "../../duckdb/src/include/duckdb.hpp"
+#include "../../duckdb/src/include/duckdb/main/connection.hpp"
+#include "../../duckdb/src/include/duckdb/common/constants.hpp"
+#include "include/test_runner.hpp"
 
-using namespace duckdb;
+namespace duckdb {
 // Use DuckDB-provided vector/unique_ptr/make_uniq; do NOT import std::vector/std::unique_ptr/make_uniq
 
 // Helper to run a test and print a message on failure
@@ -757,7 +758,7 @@ static int Test_VerifierDetectsDuplicateProducers() {
 	return 0;
 }
 
-int main() {
+int RunCompilerFunctionTests() {
 	int code = 0;
 	code = RunTest("Test_BasicUpdateParent", Test_BasicUpdateParent);
 	if (code != 0)
@@ -787,3 +788,4 @@ int main() {
 	std::cout << "All UpdateParent tests passed\n";
 	return 0;
 }
+} // namespace duckdb
