@@ -40,7 +40,9 @@ void RegisterPacSumFunctions(ExtensionLoader &loader);
 
 //#define PAC_SUM_NONCASCADING 1 // seems 10x slower on Apple
 
-// Enable float cascading only on x86 (ARM showed no benefit)
+// Float cascading: accumulate in float subtotals, periodically flush to double totals
+// Only beneficial on x86 which has variable-shift SIMD (vpsrlvq). ARM lacks this and
+// showed no benefit from float cascading approaches (SWAR, lookup tables, etc.)
 #if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
 #define PAC_SUM_FLOAT_CASCADING 1
 #endif
@@ -85,19 +87,31 @@ AUTOVECTORIZE static inline void AddToTotalsSWAR(uint64_t *totals, VALUE_T value
 }
 
 #ifdef PAC_SUM_FLOAT_CASCADING
-// Float nibble expansion: extract 4 bits at a time, expand to 4 floats (128-bit SIMD friendly)
-// Only used on x86 where it shows benefit over direct double accumulation
+// SWAR approach for x86: extract bytes, expand bits to float masks via union, multiply-accumulate
+// x86 has variable-shift SIMD (vpsrlvq) so this vectorizes well
 AUTOVECTORIZE static inline void AddToTotalsFloat(float *totals, float value, uint64_t key_hash) {
-	for (int i = 0; i < 16; i++) {
-		uint32_t nibble = (key_hash >> (i * 4)) & 0xF;
-		float *dst = totals + i * 4;
-		dst[0] += value * static_cast<float>((nibble >> 0) & 1);
-		dst[1] += value * static_cast<float>((nibble >> 1) & 1);
-		dst[2] += value * static_cast<float>((nibble >> 2) & 1);
-		dst[3] += value * static_cast<float>((nibble >> 3) & 1);
+	union {
+		uint64_t u64;
+		uint8_t u8[8];
+	} key = {key_hash};
+
+	for (int byte = 0; byte < 8; byte++) {
+		uint32_t b = key.u8[byte];
+		float *dst = totals + byte * 8;
+		// Use union for proper type punning: bit -> 0x00000000 or 0x3F800000 (1.0f)
+		union {
+			uint32_t u[8];
+			float f[8];
+		} masks;
+		for (int bit = 0; bit < 8; bit++) {
+			masks.u[bit] = ((b >> bit) & 1u) * 0x3F800000u;
+		}
+		for (int bit = 0; bit < 8; bit++) {
+			dst[bit] += value * masks.f[bit];
+		}
 	}
 }
-#endif
+#endif // PAC_SUM_FLOAT_CASCADING
 
 // =========================
 // Integer pac_sum (cascaded multi-level accumulation for SIMD efficiency)
