@@ -40,7 +40,7 @@ double PacNoisySampleFrom64Counters(const double counters[64], double mi, std::m
 struct PacBindData : public FunctionData {
 	double mi;
 	uint64_t seed; // deterministic RNG seed for PAC aggregates
-	explicit PacBindData(double mi_val, uint64_t seed_val = std::random_device{}()) : mi(mi_val), seed(seed_val) {
+	explicit PacBindData(double mi_val, uint64_t seed_val = std::random_device {}()) : mi(mi_val), seed(seed_val) {
 	}
 	unique_ptr<FunctionData> Copy() const override {
 		return make_uniq<PacBindData>(mi, seed);

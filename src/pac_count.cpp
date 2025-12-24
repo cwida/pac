@@ -15,7 +15,7 @@ PacCountBind(ClientContext &ctx, AggregateFunction &, vector<unique_ptr<Expressi
 		}
 	}
 	// Read pac_seed setting (optional) to produce deterministic RNG seed for tests
-	uint64_t seed = std::random_device{}();
+	uint64_t seed = std::random_device {}();
 	Value pac_seed_val;
 	if (ctx.TryGetCurrentSetting("pac_seed", pac_seed_val) && !pac_seed_val.IsNull()) {
 		seed = uint64_t(pac_seed_val.GetValue<int64_t>());
@@ -71,7 +71,7 @@ AUTOVECTORIZE void PacCountCombine(Vector &src, Vector &dst, AggregateInputData 
 	auto src_state = FlatVector::GetData<PacCountState *>(src);
 	auto dst_state = FlatVector::GetData<PacCountState *>(dst);
 	for (idx_t i = 0; i < count; i++) {
-		src_state[i]->Flush(); // flush source before reading from it
+		src_state[i]->Flush(true); // force flush source before reading from it
 		for (int j = 0; j < 64; j++) {
 			dst_state[i]->probabilistic_totals[j] += src_state[i]->probabilistic_totals[j];
 		}
@@ -82,12 +82,12 @@ void PacCountFinalize(Vector &states, AggregateInputData &input, Vector &result,
 	auto state = FlatVector::GetData<PacCountState *>(states);
 	auto data = FlatVector::GetData<int64_t>(result);
 	// Use deterministic seed from bind_data if present
-	uint64_t seed = input.bind_data ? input.bind_data->Cast<PacBindData>().seed : std::random_device{}();
+	uint64_t seed = input.bind_data ? input.bind_data->Cast<PacBindData>().seed : std::random_device {}();
 	std::mt19937_64 gen(seed);
 	double mi = input.bind_data->Cast<PacBindData>().mi;
 
 	for (idx_t i = 0; i < count; i++) {
-		state[i]->Flush(); // flush any remaining small totals into the big totals
+		state[i]->Flush(true); // force flush any remaining small totals into the big totals
 		double buf[64];
 		ToDoubleArray(state[i]->probabilistic_totals, buf); // Convert uint64_t totals64 to double array
 		data[offset + i] = // when choosing any one of the totals we go for #42 (but one counts from 0 ofc)

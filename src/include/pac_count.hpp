@@ -45,8 +45,8 @@ struct PacCountState {
 	uint64_t probabilistic_totals[64];   // Final counters (64 x uint64_t full counters)
 	uint32_t exact_subtotal;             // Counts updates until 255
 
-	AUTOVECTORIZE void inline Flush() {
-		if (++exact_subtotal == 255) {
+	AUTOVECTORIZE void inline Flush(bool force = false) {
+		if (++exact_subtotal == 255 || force) {
 			const uint8_t *probabilistic_subtotals8 = reinterpret_cast<const uint8_t *>(probabilistic_subtotals);
 			for (int i = 0; i < 64; i++) {
 				probabilistic_totals[i] += probabilistic_subtotals8[i];

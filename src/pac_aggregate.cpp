@@ -162,13 +162,13 @@ double ComputeDeltaFromValues(const std::vector<double> &values, double mi) {
 
 unique_ptr<FunctionLocalState> PacAggregateInit(ExpressionState &state, const BoundFunctionExpression &,
                                                 FunctionData *bind_data) {
-    // Single source-of-truth: prefer seed supplied via bind_data (PacBindData). Do NOT read the session
-    // setting here. If bind_data is not provided, fall back to non-deterministic random_device.
-    uint64_t seed = std::random_device{}();
-    if (bind_data) {
-        seed = bind_data->Cast<PacBindData>().seed;
-    }
-    return make_uniq<PacAggregateLocalState>(seed);
+	// Single source-of-truth: prefer seed supplied via bind_data (PacBindData). Do NOT read the session
+	// setting here. If bind_data is not provided, fall back to non-deterministic random_device.
+	uint64_t seed = std::random_device {}();
+	if (bind_data) {
+		seed = bind_data->Cast<PacBindData>().seed;
+	}
+	return make_uniq<PacAggregateLocalState>(seed);
 }
 
 // Templated implementation that reads list entries of arbitrary numeric type T for values
@@ -307,8 +307,9 @@ static void PacAggregateScalar(DataChunk &args, ExpressionState &state, Vector &
 	}
 }
 
-static unique_ptr<FunctionData> PacAggregateBind(ClientContext &ctx, ScalarFunction &, vector<unique_ptr<Expression>> &args) {
-	uint64_t seed = std::random_device{}();
+static unique_ptr<FunctionData> PacAggregateBind(ClientContext &ctx, ScalarFunction &,
+                                                 vector<unique_ptr<Expression>> &args) {
+	uint64_t seed = std::random_device {}();
 	Value pac_seed_val;
 	if (ctx.TryGetCurrentSetting("pac_seed", pac_seed_val) && !pac_seed_val.IsNull()) {
 		seed = uint64_t(pac_seed_val.GetValue<int64_t>());
