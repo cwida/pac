@@ -40,6 +40,11 @@ void RegisterPacSumFunctions(ExtensionLoader &loader);
 
 //#define PAC_SUM_NONCASCADING 1 // seems 10x slower on Apple
 
+// Enable float cascading only on x86 (ARM showed no benefit)
+#if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
+#define PAC_SUM_FLOAT_CASCADING 1
+#endif
+
 // Simple version for double/[u]int64_t/hugeint (uses multiplication for conditional add)
 // This auto-vectorizes well for 64-bits data-types because key_hash is also 64-bits
 template <typename ACCUM_T, typename VALUE_T>
@@ -78,6 +83,21 @@ AUTOVECTORIZE static inline void AddToTotalsSWAR(uint64_t *totals, VALUE_T value
 		totals[i] += val_packed & expanded;
 	}
 }
+
+#ifdef PAC_SUM_FLOAT_CASCADING
+// Float nibble expansion: extract 4 bits at a time, expand to 4 floats (128-bit SIMD friendly)
+// Only used on x86 where it shows benefit over direct double accumulation
+AUTOVECTORIZE static inline void AddToTotalsFloat(float *totals, float value, uint64_t key_hash) {
+	for (int i = 0; i < 16; i++) {
+		uint32_t nibble = (key_hash >> (i * 4)) & 0xF;
+		float *dst = totals + i * 4;
+		dst[0] += value * static_cast<float>((nibble >> 0) & 1);
+		dst[1] += value * static_cast<float>((nibble >> 1) & 1);
+		dst[2] += value * static_cast<float>((nibble >> 2) & 1);
+		dst[3] += value * static_cast<float>((nibble >> 3) & 1);
+	}
+}
+#endif
 
 // =========================
 // Integer pac_sum (cascaded multi-level accumulation for SIMD efficiency)
@@ -185,14 +205,47 @@ struct PacSumIntState {
 	bool seen_null;
 };
 
-// Double pac_sum state - simple accumulation into double totals
+// Double pac_sum state
 struct PacSumDoubleState {
+#ifdef PAC_SUM_FLOAT_CASCADING
+	// Float cascading: accumulate small values in float subtotals, flush to double totals
+	float probabilistic_subtotals[64];
+#endif
 	double probabilistic_totals[64];
-	bool seen_null;
+#ifdef PAC_SUM_FLOAT_CASCADING
+	double exact_subtotal;
 
-	// Empty Flush() for compatibility with templated Combine/Finalize
+	// Cascade constants for float cascading
+	static constexpr double MaxIncrementFloat32 = 1000000.0;
+	static constexpr double MinIncrementsFloat32 = 16;
+
+	static inline bool FloatSubtotalFitsDouble(double value, double num = 1) {
+		return (value > -MaxIncrementFloat32 * num) && (value < MaxIncrementFloat32 * num);
+	}
+
+	AUTOVECTORIZE inline void Flush32(double value, bool force = false) {
+		double raw_subtotal = exact_subtotal + value;
+		bool would_overflow = FloatSubtotalFitsDouble(raw_subtotal, MinIncrementsFloat32);
+		if (would_overflow || force) {
+			for (int i = 0; i < 64; i++) {
+				probabilistic_totals[i] += static_cast<double>(probabilistic_subtotals[i]);
+			}
+			memset(probabilistic_subtotals, 0, sizeof(probabilistic_subtotals));
+			exact_subtotal = value;
+		} else {
+			exact_subtotal = raw_subtotal;
+		}
+	}
+
+	void Flush() {
+		Flush32(0, true);
+	}
+#else
+	// No-op Flush for compatibility with templated Combine/Finalize
 	void Flush() {
 	}
+#endif
+	bool seen_null;
 };
 
 } // namespace duckdb
