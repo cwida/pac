@@ -109,8 +109,9 @@ double PacNoisySampleFrom64Counters(const double counters[64], double mi, std::m
 	// draw two uniforms
 	double u1 = DeterministicUniformUnit(gen);
 	double u2 = DeterministicUniformUnit(gen);
-	if (u1 <= 0.0)
+	if (u1 <= 0.0) {
 		u1 = std::numeric_limits<double>::min();
+	}
 	double r = std::sqrt(-2.0 * std::log(u1));
 	double theta = 2.0 * M_PI * u2;
 	double z0 = r * std::cos(theta);
@@ -160,13 +161,14 @@ double ComputeDeltaFromValues(const std::vector<double> &values, double mi) {
 }
 
 unique_ptr<FunctionLocalState> PacAggregateInit(ExpressionState &state, const BoundFunctionExpression &,
-                                                FunctionData *) {
-	uint64_t seed = std::random_device {}();
-	Value pac_seed;
-	if (state.GetContext().TryGetCurrentSetting("pac_seed", pac_seed) && !pac_seed.IsNull()) {
-		seed = uint64_t(pac_seed.GetValue<int64_t>());
-	}
-	return make_uniq<PacAggregateLocalState>(seed);
+                                                FunctionData *bind_data) {
+    // Single source-of-truth: prefer seed supplied via bind_data (PacBindData). Do NOT read the session
+    // setting here. If bind_data is not provided, fall back to non-deterministic random_device.
+    uint64_t seed = std::random_device{}();
+    if (bind_data) {
+        seed = bind_data->Cast<PacBindData>().seed;
+    }
+    return make_uniq<PacAggregateLocalState>(seed);
 }
 
 // Templated implementation that reads list entries of arbitrary numeric type T for values
@@ -305,6 +307,17 @@ static void PacAggregateScalar(DataChunk &args, ExpressionState &state, Vector &
 	}
 }
 
+static unique_ptr<FunctionData> PacAggregateBind(ClientContext &ctx, ScalarFunction &, vector<unique_ptr<Expression>> &args) {
+	uint64_t seed = std::random_device{}();
+	Value pac_seed_val;
+	if (ctx.TryGetCurrentSetting("pac_seed", pac_seed_val) && !pac_seed_val.IsNull()) {
+		seed = uint64_t(pac_seed_val.GetValue<int64_t>());
+	}
+	// mi is per-row for pac_aggregate; store default mi in bind data but it's unused here
+	double mi = 128.0;
+	return make_uniq<PacBindData>(mi, seed);
+}
+
 void RegisterPacAggregateFunctions(ExtensionLoader &loader) {
 	// Helper that registers one overload given the element logical types and a function pointer
 	auto make_and_register = [&](const LogicalType &vals_elem, const LogicalType &cnts_elem,
@@ -312,7 +325,7 @@ void RegisterPacAggregateFunctions(ExtensionLoader &loader) {
 		auto fun = ScalarFunction(
 		    "pac_aggregate",
 		    {LogicalType::LIST(vals_elem), LogicalType::LIST(cnts_elem), LogicalType::DOUBLE, LogicalType::INTEGER},
-		    LogicalType::DOUBLE, fn, nullptr, nullptr, nullptr, PacAggregateInit);
+		    LogicalType::DOUBLE, fn, PacAggregateBind, nullptr, nullptr, PacAggregateInit);
 		fun.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
 		loader.RegisterFunction(fun);
 	};

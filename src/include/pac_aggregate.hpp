@@ -39,13 +39,14 @@ double PacNoisySampleFrom64Counters(const double counters[64], double mi, std::m
 // Bind data used by PAC aggregates to carry the `mi` parameter.
 struct PacBindData : public FunctionData {
 	double mi;
-	explicit PacBindData(double mi_val) : mi(mi_val) {
+	uint64_t seed; // deterministic RNG seed for PAC aggregates
+	explicit PacBindData(double mi_val, uint64_t seed_val = std::random_device{}()) : mi(mi_val), seed(seed_val) {
 	}
 	unique_ptr<FunctionData> Copy() const override {
-		return make_uniq<PacBindData>(mi);
+		return make_uniq<PacBindData>(mi, seed);
 	}
 	bool Equals(const FunctionData &other) const override {
-		return mi == other.Cast<PacBindData>().mi;
+		return mi == other.Cast<PacBindData>().mi && seed == other.Cast<PacBindData>().seed;
 	}
 };
 

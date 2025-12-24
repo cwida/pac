@@ -14,7 +14,13 @@ PacCountBind(ClientContext &ctx, AggregateFunction &, vector<unique_ptr<Expressi
 			throw InvalidInputException("pac_count: mi must be > 0");
 		}
 	}
-	return make_uniq<PacBindData>(mi);
+	// Read pac_seed setting (optional) to produce deterministic RNG seed for tests
+	uint64_t seed = std::random_device{}();
+	Value pac_seed_val;
+	if (ctx.TryGetCurrentSetting("pac_seed", pac_seed_val) && !pac_seed_val.IsNull()) {
+		seed = uint64_t(pac_seed_val.GetValue<int64_t>());
+	}
+	return make_uniq<PacBindData>(mi, seed);
 }
 static idx_t PacCountStateSize(const AggregateFunction &) {
 	return sizeof(PacCountState);
@@ -75,7 +81,9 @@ AUTOVECTORIZE void PacCountCombine(Vector &src, Vector &dst, AggregateInputData 
 void PacCountFinalize(Vector &states, AggregateInputData &input, Vector &result, idx_t count, idx_t offset) {
 	auto state = FlatVector::GetData<PacCountState *>(states);
 	auto data = FlatVector::GetData<int64_t>(result);
-	thread_local std::mt19937_64 gen(std::random_device {}());
+	// Use deterministic seed from bind_data if present
+	uint64_t seed = input.bind_data ? input.bind_data->Cast<PacBindData>().seed : std::random_device{}();
+	std::mt19937_64 gen(seed);
 	double mi = input.bind_data->Cast<PacBindData>().mi;
 
 	for (idx_t i = 0; i < count; i++) {
