@@ -124,7 +124,9 @@ static void PacSumFinalize(Vector &states, AggregateInputData &input, Vector &re
 	auto state = FlatVector::GetData<State *>(states);
 	auto data = FlatVector::GetData<ACC_TYPE>(result);
 	auto &result_mask = FlatVector::Validity(result);
-	thread_local std::mt19937_64 gen(std::random_device {}());
+	// Use deterministic seed from bind_data if present
+	uint64_t seed = input.bind_data ? input.bind_data->Cast<PacBindData>().seed : std::random_device{}();
+	std::mt19937_64 gen(seed);
 	double mi = input.bind_data ? input.bind_data->Cast<PacBindData>().mi : 128.0; // 128 is default
 
 	for (idx_t i = 0; i < count; i++) {
@@ -253,7 +255,13 @@ PacSumBind(ClientContext &ctx, AggregateFunction &, vector<unique_ptr<Expression
 			throw InvalidInputException("pac_sum: mi must be > 0");
 		}
 	}
-	return make_uniq<PacBindData>(mi);
+	// Read pac_seed setting (optional) to produce deterministic RNG seed for tests
+	uint64_t seed = std::random_device{}();
+	Value pac_seed_val;
+	if (ctx.TryGetCurrentSetting("pac_seed", pac_seed_val) && !pac_seed_val.IsNull()) {
+		seed = uint64_t(pac_seed_val.GetValue<int64_t>());
+	}
+	return make_uniq<PacBindData>(mi, seed);
 }
 
 static idx_t PacSumIntStateSize(const AggregateFunction &) {
