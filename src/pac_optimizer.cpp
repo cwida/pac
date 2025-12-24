@@ -33,8 +33,8 @@ void PACRewriteRule::PACRewriteRuleFunction(OptimizerExtensionInput &input, uniq
 		}
 	}
 
-	// Run the PAC compatibility checks only if the plan is a projection (i.e., a SELECT query)
-	if (!plan || plan->type != LogicalOperatorType::LOGICAL_PROJECTION) {
+	// Run the PAC compatibility checks only if the plan is a projection or order by (i.e., a SELECT query)
+	if (!plan || (plan->type != LogicalOperatorType::LOGICAL_PROJECTION && plan->type != LogicalOperatorType::LOGICAL_ORDER_BY && plan->type != LogicalOperatorType::LOGICAL_TOP_N)) {
 		return;
 	}
 	// Load configured PAC tables once
