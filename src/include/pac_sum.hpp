@@ -27,17 +27,15 @@ void RegisterPacSumFunctions(ExtensionLoader &loader);
 // mimicking what DuckDB's SUM() normally does, we have the following cases:
 // 1) integers: PAC_SUM(key_hash, [U](BIG||SMALL|TINY)INT) -> HUGEINT
 //              We keep sub-totals8/16/32/64 and uint128_t totals and sum each value in smallest subtotal that fits.
-//				We ensure "things fit" by flushing totalsX into the next wider total every 2^bX additions, and only
-//				by allowing values to be added into totalsX if they have the highest bX bits unset, so overflow cannot
-//				happen (b8=3, b16=5, b32=6, b64=8).
+//              We ensure "things fit" by flushing totalsX into the next wider total every 2^bX additions, and only
+//              by allowing values to be added into totalsX if they have the highest bX bits unset, so overflow cannot
+//              happen (b8=3, b16=5, b32=6, b64=8).
 //              In combine/finalize, we flush out all subtotalsX[] into totals[]
 //              In Finalize() the noised result is computed from totals[]
 // 2) floating: PAC_SUM(key_hash, (FLOAT|DOUBLE)) -> DOUBLE
-//              similar, but with only two levels (float,double), and 16 additions of |val| < 1M into  float-subtotals.
-//              This is a compromise between speed and precision based on a rough numerical analysis. Please do note
-//              that (e.g. due to parallelism) the outcome of even standard SUM on floating-point numbers is unstable.
+//              Accumulates directly into double[64] totals using AddToTotalsSimple.
 // 3) huge-int: PAC_SUM(key_hash, [U]HUGEINT) -> DOUBLE
-//				DuckDB produces DOUBLE outcomes for 128-bits integer sums, so we do as well.
+//              DuckDB produces DOUBLE outcomes for 128-bits integer sums, so we do as well.
 //              This basically uses the DOUBLE methods where the updates perform a cast from hugeint
 
 //#define PAC_SUM_NONCASCADING 1 // seems 10x slower on Apple
@@ -187,43 +185,14 @@ struct PacSumIntState {
 	bool seen_null;
 };
 
-// Double pac_sum (cascaded float32/float64 accumulation)
-//
-// Cascade constants: values with |value| < MaxIncrementFloat32 use float, otherwise double
-// We can safely sum MinIncrementsFloat32 float values before flushing to double
-static constexpr double MaxIncrementFloat32 = 1000000.0;
-static constexpr double MinIncrementsFloat32 = 16;
-
-static inline bool FloatSubtotalFitsDouble(double value, double num = 1) {
-	return (value > -MaxIncrementFloat32 * num) && (value < MaxIncrementFloat32 * num);
-}
-
+// Double pac_sum state - simple accumulation into double totals
 struct PacSumDoubleState {
-#ifndef PAC_SUM_NONCASCADING
-	float probabilistic_subtotals[64];
-#endif
-	double probabilistic_totals[64]; // want this array last for sequential CPU cache access: smaller subtotals first
-#ifndef PAC_SUM_NONCASCADING
-	double exact_subtotal;
-
-	AUTOVECTORIZE inline void Flush32(double value, bool force = false) {
-		double raw_subtotal = exact_subtotal + value;
-		bool would_overflow = FloatSubtotalFitsDouble(raw_subtotal, MinIncrementsFloat32);
-		if (would_overflow || force) {
-			for (int i = 0; i < 64; i++) {
-				probabilistic_totals[i] += static_cast<double>(probabilistic_subtotals[i]);
-			}
-			memset(probabilistic_subtotals, 0, sizeof(probabilistic_subtotals));
-			exact_subtotal = value;
-		} else {
-			exact_subtotal = raw_subtotal;
-		}
-	}
-	void Flush() {
-		Flush32(0, true);
-	}
-#endif
+	double probabilistic_totals[64];
 	bool seen_null;
+
+	// Empty Flush() for compatibility with templated Combine/Finalize
+	void Flush() {
+	}
 };
 
 } // namespace duckdb

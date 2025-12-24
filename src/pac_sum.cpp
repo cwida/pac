@@ -32,13 +32,6 @@ PacSumUpdateOne(PacSumIntState<SIGNED> &state, uint64_t key_hash, typename PacSu
 template <bool SIGNED>
 AUTOVECTORIZE inline void // main worker function for probabilistically adding one DOUBLE to the 64 sum totals
 PacSumUpdateOne(PacSumDoubleState &state, uint64_t key_hash, double value) {
-#ifndef PAC_SUM_NONCASCADING
-	if (FloatSubtotalFitsDouble(value)) {
-		AddToTotalsSimple(state.probabilistic_subtotals, static_cast<float>(value), key_hash);
-		state.Flush32(value);
-		return;
-	}
-#endif
 	AddToTotalsSimple(state.probabilistic_totals, value, key_hash);
 }
 
