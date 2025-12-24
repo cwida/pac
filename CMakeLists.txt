@@ -13,6 +13,7 @@ set(LOADABLE_EXTENSION_NAME ${TARGET_NAME}_loadable_extension)
 
 project(${TARGET_NAME})
 include_directories(src/include third_party/lpts)
+include_directories(benchmark/include)
 
 # Extension sources
 set(EXTENSION_SOURCES src/pac_extension.cpp src/pac_optimizer.cpp src/pac_compiler.cpp src/pac_privacy_unit.cpp
@@ -33,3 +34,7 @@ target_link_libraries(test_update_parent_runner ${EXTENSION_NAME})
 
 add_executable(test_pac_privacy_columns src/test_pac_privacy_columns.cpp)
 target_link_libraries(test_pac_privacy_columns ${EXTENSION_NAME})
+
+# TPCH + PAC benchmark runner
+add_executable(pac_tpch_benchmark benchmark/pac_tpch_benchmark.cpp)
+target_link_libraries(pac_tpch_benchmark ${EXTENSION_NAME})
