@@ -4,6 +4,7 @@
 
 #include "include/pac_bitslice_compiler.hpp"
 #include "include/pac_helpers.hpp"
+#include "include/pac_compatibility_check.hpp"
 #include <iostream>
 #include "include/pac_compiler_helpers.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
@@ -113,15 +114,65 @@ void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExten
 	// Becomes: SELECT group_key, pac_sum(HASH(rowid), val) AS sum_val FROM t_single GROUP BY group_key;
 	// todo- what is MI? what is k?
 
+	bool pu_present_in_tree = false;
+	bool use_rowid = false;
+
+	if (!check.scanned_pac_tables.empty()) {
+		pu_present_in_tree = true;
+	}
+
 	// Case a) query scans PU table (we assume only 1 PAC table for now)
 	std::vector<string> pks;
-	bool use_rowid = false;
-	if (!check.scanned_pac_tables.empty()) {
+	// Build two vectors: present (GETs already in the plan) and missing (GETs to create)
+	std::vector<std::string> gets_present;
+	std::vector<std::string> gets_missing;
+	std::unordered_map<std::string, idx_t> scan_counts;
+
+	if (pu_present_in_tree) {
 		if (!check.privacy_unit_pks.empty()) {
+			// Has PKs
 			pks = check.privacy_unit_pks.at(check.scanned_pac_tables[0]);
 		} else {
 			use_rowid = true;
 		}
+	} else if (!check.fk_paths.empty()) {
+		// The query does not scan the PU table: we need to follow the FK path
+		auto it = check.fk_paths.begin();
+		std::string start_table = it->first; // scanned table name
+		auto fk_path = it->second;           // vector from start -> ... -> privacy_unit
+		if (path.empty()) {
+			throw InternalException("PAC compiler: FK path is empty");
+		}
+		// canonical target privacy unit (last element)
+		std::string target_pu = fk_path.back();
+
+		// Collect scan counts from the current plan using helper defined in pac_helpers
+		CountScans(*plan, scan_counts);
+
+		for (auto &tbl : fk_path) {
+			auto itc = scan_counts.find(tbl);
+			if (itc != scan_counts.end() && itc->second > 0) {
+				gets_present.push_back(tbl);
+			} else {
+				gets_missing.push_back(tbl);
+			}
+		}
+
+#ifdef PAC_DEBUG
+		Printer::Print("PAC bitslice: FK path detection");
+		Printer::Print("start_table: " + start_table);
+		Printer::Print("target_pu: " + target_pu);
+		Printer::Print("gets_present:");
+		for (auto &g : gets_present)
+			Printer::Print("  " + g);
+		Printer::Print("gets_missing:");
+		for (auto &g : gets_missing)
+			Printer::Print("  " + g);
+#endif
+
+		// For now we stop here after detection as requested: next step is to create GETs for `gets_missing` and
+		// to find/prepare existing GET nodes for `gets_present`. That will be implemented next on request.
+		return; // stop compilation for now — detection-only phase
 	}
 
 	// Now we need to find the PAC scan node
