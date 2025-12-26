@@ -100,7 +100,7 @@ void PACRewriteRule::PACRewriteRuleFunction(OptimizerExtensionInput &input, uniq
 	for (auto &pu : privacy_units) {
 		auto pk_it = check.privacy_unit_pks.find(pu);
 		if (pk_it != check.privacy_unit_pks.end()) {
-#ifdef PAC_DEBUG
+#ifdef DEBUG
 			Printer::Print("Discovered primary key columns for privacy unit '" + pu + "':");
 			for (const auto &col : pk_it->second) {
 				Printer::Print(col);
@@ -117,7 +117,7 @@ void PACRewriteRule::PACRewriteRuleFunction(OptimizerExtensionInput &input, uniq
 	bool apply_noise = IsPacNoiseEnabled(input.context, true);
 	if (apply_noise) {
 		for (auto &pu : privacy_units) {
-#ifdef PAC_DEBUG
+#ifdef DEBUG
 			Printer::Print("Query requires PAC Compilation for privacy unit: " + pu);
 #endif
 

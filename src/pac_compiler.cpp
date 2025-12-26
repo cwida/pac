@@ -365,13 +365,13 @@ void CompilePACQuery(OptimizerExtensionInput &input, unique_ptr<LogicalOperator>
 
 	plan->ResolveOperatorTypes();
 	plan->Verify(input.context);
-#ifdef PAC_DEBUG
+#ifdef DEBUG
 	plan->Print();
 	Printer::Print("LPTS output plan after PAC compilation:\n");
 #endif
 	auto lp_to_sql = LogicalPlanToSql(input.context, plan);
 	auto ir = lp_to_sql.LogicalPlanToIR();
-#ifdef PAC_DEBUG
+#ifdef DEBUG
 	Printer::Print(ir->ToQuery(true));
 #endif
 	CreateQueryJoiningSampleCTE(ir->ToQuery(true), filename);

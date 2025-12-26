@@ -174,18 +174,6 @@ PACCompatibilityResult PACRewriteQueryCheck(LogicalOperator &plan, ClientContext
 	std::unordered_map<std::string, idx_t> scan_counts;
 	CountScans(plan, scan_counts);
 
-	// require that at least one PAC table is scanned
-	bool any_pac = false;
-	for (auto &t : pac_tables) {
-		if (scan_counts[t] > 0) {
-			any_pac = true;
-			break;
-		}
-	}
-	if (!any_pac) {
-		return result;
-	}
-
 	// Record which configured PAC tables were scanned in this plan. The optimizer
 	// rule will still want to compile queries that directly read from a privacy
 	// unit even when no FK paths or PKs were discovered.
@@ -225,7 +213,7 @@ PACCompatibilityResult PACRewriteQueryCheck(LogicalOperator &plan, ClientContext
 		}
 	}
 
-	if (all_matched) {
+	if (all_matched && result.scanned_pac_tables.size() > 0) {
 		// All PAC tables already have corresponding sample CTE scans the same number of times.
 		// Nothing for the PAC rewriter to do.
 		return result;

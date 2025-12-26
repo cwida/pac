@@ -90,7 +90,7 @@ void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExten
                              unique_ptr<LogicalOperator> &plan, const std::string &privacy_unit,
                              const std::string &query, const std::string &query_hash) {
 
-#ifdef PAC_DEBUG
+#ifdef DEBUG
 	Printer::Print("CompilePacBitsliceQuery called for PU=" + privacy_unit + " hash=" + query_hash);
 #endif
 
@@ -147,7 +147,7 @@ void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExten
 		std::string target_pu = fk_path.back();
 
 		// Collect scan counts from the current plan using helper defined in pac_helpers
-		CountScans(*plan, scan_counts);
+		CountScans(*plan, scan_counts); // fixme this is not the function we want here
 
 		for (auto &tbl : fk_path) {
 			auto itc = scan_counts.find(tbl);
@@ -158,7 +158,7 @@ void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExten
 			}
 		}
 
-#ifdef PAC_DEBUG
+#ifdef DEBUG
 		Printer::Print("PAC bitslice: FK path detection");
 		Printer::Print("start_table: " + start_table);
 		Printer::Print("target_pu: " + target_pu);
@@ -304,8 +304,8 @@ void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExten
 
 	plan->ResolveOperatorTypes();
 	plan->Verify(input.context);
-#ifdef PAC_DEBUG
-	Pplan->Print();
+#ifdef DEBUG
+	plan->Print();
 #endif
 }
 
