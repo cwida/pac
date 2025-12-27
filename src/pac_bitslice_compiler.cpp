@@ -406,28 +406,28 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 	// Return type is double
 	unique_ptr<Expression> hash_input_expr;
 
-		// Build XOR(pk1, pk2, ...) as a scalar expression then hash(...)
-		vector<unique_ptr<Expression>> pk_cols;
-		for (auto &pk : pu_pks) {
-			// find the binding for this pk in the LogicalGet projection (search GetColumnIds and names)
-			idx_t proj_idx = DConstants::INVALID_INDEX;
-			for (idx_t cid = 0; cid < pu_get->GetColumnIds().size(); cid++) {
-				auto col_index = pu_get->GetColumnIds()[cid];
-				idx_t primary = col_index.GetPrimaryIndex();
-				if (!col_index.IsVirtualColumn() && primary < pu_get->names.size() && pu_get->names[primary] == pk) {
-					proj_idx = cid;
-					break;
-				}
+	// Build XOR(pk1, pk2, ...) as a scalar expression then hash(...)
+	vector<unique_ptr<Expression>> pk_cols;
+	for (auto &pk : pu_pks) {
+		// find the binding for this pk in the LogicalGet projection (search GetColumnIds and names)
+		idx_t proj_idx = DConstants::INVALID_INDEX;
+		for (idx_t cid = 0; cid < pu_get->GetColumnIds().size(); cid++) {
+			auto col_index = pu_get->GetColumnIds()[cid];
+			idx_t primary = col_index.GetPrimaryIndex();
+			if (!col_index.IsVirtualColumn() && primary < pu_get->names.size() && pu_get->names[primary] == pk) {
+				proj_idx = cid;
+				break;
 			}
-			if (proj_idx == DConstants::INVALID_INDEX) {
-				throw InternalException("PAC compiler: failed to find PK column " + pk);
-			}
-			// create BoundColumnRefExpression referencing table_index and proj_idx
-			auto col_binding = ColumnBinding(pu_get->table_index, proj_idx);
-			// determine the column's logical type from the LogicalGet's column index
-			auto col_index_obj = pu_get->GetColumnIds()[proj_idx];
-			auto &col_type = pu_get->GetColumnType(col_index_obj);
-			pk_cols.push_back(make_uniq<BoundColumnRefExpression>(col_type, col_binding));
+		}
+		if (proj_idx == DConstants::INVALID_INDEX) {
+			throw InternalException("PAC compiler: failed to find PK column " + pk);
+		}
+		// create BoundColumnRefExpression referencing table_index and proj_idx
+		auto col_binding = ColumnBinding(pu_get->table_index, proj_idx);
+		// determine the column's logical type from the LogicalGet's column index
+		auto col_index_obj = pu_get->GetColumnIds()[proj_idx];
+		auto &col_type = pu_get->GetColumnType(col_index_obj);
+		pk_cols.push_back(make_uniq<BoundColumnRefExpression>(col_type, col_binding));
 
 		// If there is only one PK, no XOR needed
 		unique_ptr<Expression> xor_expr;
@@ -499,9 +499,6 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 
 	agg->expressions[0] = std::move(new_aggr);
 	agg->ResolveOperatorTypes();
-
-
-
 }
 
 void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
