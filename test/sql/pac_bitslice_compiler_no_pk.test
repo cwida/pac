@@ -101,6 +101,17 @@ LIMIT 2
 0	0	1
 0	1	0
 
+# Testing with average
+query III
+SELECT grp, grp2, AVG(val)::DECIMAL(6, 2)
+FROM bitslice_a
+GROUP BY grp, grp2
+ORDER BY grp, grp2
+LIMIT 2
+----
+0	0	2.50
+0	1	0.00
+
 #
 # # 5) Same GROUP BY columns in different order and with alias/no-alias
 query III

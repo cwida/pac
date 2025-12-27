@@ -476,6 +476,8 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 		pac_function_name = "pac_sum";
 	} else if (function_name == "count" || function_name == "count_star") {
 		pac_function_name = "pac_count";
+	} else if (function_name == "avg") {
+		pac_function_name = "pac_avg";
 	} else {
 		throw NotImplementedException("PAC compiler: unsupported aggregate function " + function_name);
 	}
@@ -600,6 +602,8 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 		pac_function_name = "pac_sum";
 	} else if (function_name == "count" || function_name == "count_star") {
 		pac_function_name = "pac_count";
+	} else if (function_name == "avg") {
+		pac_function_name = "pac_avg";
 	} else {
 		throw NotImplementedException("PAC compiler: unsupported aggregate function " + function_name);
 	}
