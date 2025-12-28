@@ -1,0 +1,251 @@
+# name: test/sql/pac_min_max.test
+# description: Test pac_min and pac_max aggregate functions
+# group: [sql]
+
+require pac
+
+# Set deterministic seed for reproducible results
+statement ok
+SET pac_seed = 42;
+
+# =============================================================================
+# pac_max tests
+# =============================================================================
+
+# Test pac_max with TINYINT (INT8)
+query I
+SELECT pac_max(hash('key' || i::varchar), i::tinyint) FROM range(1, 50) t(i);
+----
+93
+
+# Test pac_max with SMALLINT (INT16)
+query I
+SELECT pac_max(hash('key' || i::varchar), i::smallint) FROM range(1, 100) t(i);
+----
+193
+
+# Test pac_max with INTEGER (INT32)
+query I
+SELECT pac_max(hash('key' || i::varchar), i::integer) FROM range(1, 100) t(i);
+----
+193
+
+# Test pac_max with BIGINT (INT64)
+query I
+SELECT pac_max(hash('key' || i::varchar), i::bigint) FROM range(1, 100) t(i);
+----
+193
+
+# Test pac_max with UTINYINT (UINT8)
+query I
+SELECT pac_max(hash('key' || i::varchar), i::utinyint) FROM range(1, 50) t(i);
+----
+93
+
+# Test pac_max with USMALLINT (UINT16)
+query I
+SELECT pac_max(hash('key' || i::varchar), i::usmallint) FROM range(1, 100) t(i);
+----
+193
+
+# Test pac_max with UINTEGER (UINT32)
+query I
+SELECT pac_max(hash('key' || i::varchar), i::uinteger) FROM range(1, 100) t(i);
+----
+193
+
+# Test pac_max with UBIGINT (UINT64)
+query I
+SELECT pac_max(hash('key' || i::varchar), i::ubigint) FROM range(1, 100) t(i);
+----
+193
+
+# Test pac_max with FLOAT
+query R
+SELECT round(pac_max(hash('key' || i::varchar), i::float), 1) FROM range(1, 100) t(i);
+----
+193.0
+
+# Test pac_max with DOUBLE
+query R
+SELECT round(pac_max(hash('key' || i::varchar), i::double), 1) FROM range(1, 100) t(i);
+----
+193.0
+
+# Test pac_max with negative values (signed types)
+query I
+SELECT pac_max(hash('key' || i::varchar), i::integer) FROM range(-50, 50) t(i);
+----
+93
+
+# Test pac_max with mi parameter
+query I
+SELECT pac_max(hash('key' || i::varchar), i::integer, 64.0) FROM range(1, 100) t(i);
+----
+193
+
+# =============================================================================
+# pac_min tests
+# =============================================================================
+
+# Test pac_min with TINYINT (INT8)
+query I
+SELECT pac_min(hash('key' || i::varchar), i::tinyint) FROM range(1, 50) t(i);
+----
+3
+
+# Test pac_min with SMALLINT (INT16)
+query I
+SELECT pac_min(hash('key' || i::varchar), i::smallint) FROM range(1, 100) t(i);
+----
+3
+
+# Test pac_min with INTEGER (INT32)
+query I
+SELECT pac_min(hash('key' || i::varchar), i::integer) FROM range(1, 100) t(i);
+----
+3
+
+# Test pac_min with BIGINT (INT64)
+query I
+SELECT pac_min(hash('key' || i::varchar), i::bigint) FROM range(1, 100) t(i);
+----
+3
+
+# Test pac_min with UTINYINT (UINT8)
+query I
+SELECT pac_min(hash('key' || i::varchar), i::utinyint) FROM range(1, 50) t(i);
+----
+3
+
+# Test pac_min with USMALLINT (UINT16)
+query I
+SELECT pac_min(hash('key' || i::varchar), i::usmallint) FROM range(1, 100) t(i);
+----
+3
+
+# Test pac_min with UINTEGER (UINT32)
+query I
+SELECT pac_min(hash('key' || i::varchar), i::uinteger) FROM range(1, 100) t(i);
+----
+3
+
+# Test pac_min with UBIGINT (UINT64)
+query I
+SELECT pac_min(hash('key' || i::varchar), i::ubigint) FROM range(1, 100) t(i);
+----
+3
+
+# Test pac_min with FLOAT
+query R
+SELECT round(pac_min(hash('key' || i::varchar), i::float), 1) FROM range(1, 100) t(i);
+----
+3.0
+
+# Test pac_min with DOUBLE
+query R
+SELECT round(pac_min(hash('key' || i::varchar), i::double), 1) FROM range(1, 100) t(i);
+----
+3.0
+
+# Test pac_min with negative values (signed types)
+query I
+SELECT pac_min(hash('key' || i::varchar), i::integer) FROM range(-50, 50) t(i);
+----
+-97
+
+# Test pac_min with mi parameter
+query I
+SELECT pac_min(hash('key' || i::varchar), i::integer, 64.0) FROM range(1, 100) t(i);
+----
+3
+
+# =============================================================================
+# GROUP BY tests
+# =============================================================================
+
+# Test pac_max with GROUP BY
+query II rowsort
+SELECT i % 3 as grp, pac_max(hash('key' || i::varchar), i::integer)
+FROM range(1, 100) t(i)
+GROUP BY grp;
+----
+0	186
+1	188
+2	193
+
+# Test pac_min with GROUP BY
+query II rowsort
+SELECT i % 3 as grp, pac_min(hash('key' || i::varchar), i::integer)
+FROM range(1, 100) t(i)
+GROUP BY grp;
+----
+0	6
+1	5
+2	19
+
+# =============================================================================
+# Edge cases
+# =============================================================================
+
+# Test with single value
+query I
+SELECT pac_max(hash('single'), 42::integer);
+----
+-255
+
+query I
+SELECT pac_min(hash('single'), 42::integer);
+----
+254
+
+# Test with large values (BIGINT)
+query I
+SELECT pac_max(hash('key' || i::varchar), (i * 1000000000)::bigint) FROM range(1, 100) t(i);
+----
+193001238294
+
+query I
+SELECT pac_min(hash('key' || i::varchar), (i * 1000000000)::bigint) FROM range(1, 100) t(i);
+----
+254
+
+# Test cascading - values that fit in INT8
+query I
+SELECT pac_max(hash('key' || i::varchar), i::integer) FROM range(1, 10) t(i);
+----
+17
+
+# Test cascading - values that exceed INT8 but fit in INT16
+query I
+SELECT pac_max(hash('key' || i::varchar), (i * 100)::integer) FROM range(1, 10) t(i);
+----
+1700
+
+# Test cascading - values that exceed INT16 but fit in INT32
+query I
+SELECT pac_max(hash('key' || i::varchar), (i * 100000)::integer) FROM range(1, 10) t(i);
+----
+1700076
+
+# Test float cascading - values within [-1000000, 1000000] (stays at float level)
+query R
+SELECT round(pac_max(hash('key' || i::varchar), (i * 100.0)::double), 1) FROM range(1, 100) t(i);
+----
+19300.1
+
+query R
+SELECT round(pac_min(hash('key' || i::varchar), (i * 100.0)::double), 1) FROM range(1, 100) t(i);
+----
+300.1
+
+# Test double cascading - values outside [-1000000, 1000000] (upgrades to double)
+query R
+SELECT round(pac_max(hash('key' || i::varchar), (i * 2000000.0)::double), 0) FROM range(1, 100) t(i);
+----
+386002477.0
+
+query R
+SELECT round(pac_min(hash('key' || i::varchar), (i * 2000000.0)::double), 0) FROM range(1, 100) t(i);
+----
+6001947.0

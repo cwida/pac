@@ -19,6 +19,7 @@
 #include "include/pac_aggregate.hpp"
 #include "include/pac_count.hpp"
 #include "include/pac_sum_avg.hpp"
+#include "include/pac_min_max.hpp"
 
 namespace duckdb {
 
@@ -86,6 +87,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RegisterPacSumFunctions(loader);
 	RegisterPacAvgFunctions(loader);
 	RegisterPacCountFunctions(loader);
+	// Register pac_min/pac_max aggregate functions
+	RegisterPacMinFunctions(loader);
+	RegisterPacMaxFunctions(loader);
 }
 
 void PacExtension::Load(ExtensionLoader &loader) {
