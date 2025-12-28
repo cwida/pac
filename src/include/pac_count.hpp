@@ -72,9 +72,10 @@ struct PacCountState {
 	uint64_t *probabilistic_total64; // 64 x uint64_t (512 bytes) - full uint64_t counters
 
 	// Exact subtotal for each level - flush when these would overflow the level's capacity
-	uint32_t exact_total8;  // max 255 before flush to level 16
-	uint32_t exact_total16; // max 65535 before flush to level 32
+	uint64_t exact_total8;  // max 255 before flush to level 16
+	uint64_t exact_total16; // max 65535 before flush to level 32
 	uint64_t exact_total32; // max ~4B before flush to level 64
+	uint64_t exact_total64; // final level (no overflow possible within uint64_t range)
 
 	// Lazily allocate a level's buffer if not yet allocated
 	// Returns 0 if newly allocated (and zeroed), otherwise returns exact_total unchanged

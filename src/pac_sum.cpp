@@ -139,12 +139,12 @@ static void PacSumScatterUpdate(Vector inputs[], Vector &states, idx_t count, Ar
 template <typename BUF_T, typename EXACT_T>
 static inline void CombineLevel(BUF_T *&src_buf, BUF_T *&dst_buf, EXACT_T &src_exact, EXACT_T &dst_exact, idx_t count) {
 	if (src_buf) {
-		if (dst_buf) {
+		if (dst_buf) { // Both have data - add element by element
 			for (idx_t j = 0; j < count; j++) {
 				dst_buf[j] += src_buf[j];
 			}
 			dst_exact += src_exact;
-		} else {
+		} else { // Move ownership from src to dst
 			dst_buf = src_buf;
 			dst_exact = src_exact;
 			src_buf = nullptr;
@@ -170,10 +170,8 @@ AUTOVECTORIZE static void PacSumCombineInt(Vector &src, Vector &dst, idx_t count
 #else
 			auto *s = src_state[i];
 			auto *d = dst_state[i];
-
-			// Ensure dst has allocator pointer
 			if (!d->allocator) {
-				d->allocator = &allocator;
+				d->allocator = &allocator; // Ensure dst has allocator pointer
 			}
 			// Combine at each level (handles null checks and pointer moves internally)
 			hugeint_t dummy = 0; // level 128 has no exact_total

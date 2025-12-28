@@ -49,20 +49,15 @@ PacCountUpdateHash(uint64_t key_hash, PacCountState &state) {
 #else
 AUTOVECTORIZE static inline void // worker function that probabilistically counts one hash into 64 subtotal
 PacCountUpdateHash(uint64_t key_hash, PacCountState &state, ArenaAllocator &allocator) {
-	// Ensure allocator is set and level8 is allocated
 	if (!state.allocator) {
-		state.allocator = &allocator;
+		state.allocator = &allocator; // Ensure allocator is set and level8 is allocated
 #ifdef PAC_COUNT_NONLAZY
 		state.InitializeAllLevels(allocator);
 #endif
 	}
-	if (!state.probabilistic_total8) {
-		state.EnsureLevelAllocated(state.probabilistic_total8, 8);
-	}
-
-	// Add to SWAR-packed uint8 counters
+	state.EnsureLevelAllocated(state.probabilistic_total8, 8);
 	for (int j = 0; j < 8; j++) {
-		state.probabilistic_total8[j] += (key_hash >> j) & PAC_COUNT_MASK;
+		state.probabilistic_total8[j] += (key_hash >> j) & PAC_COUNT_MASK; // Add to SWAR-packed uint8 counters
 	}
 	state.Flush8(1, false); // increment exact_total8 by 1, flush if needed
 }
@@ -151,7 +146,6 @@ PacCountUpdateOne(const UnifiedVectorFormat &idata, idx_t i, const uint64_t *inp
 void PacCountUpdate(Vector inputs[], AggregateInputData &aggr, idx_t input_total, data_ptr_t state_ptr, idx_t count) {
 	D_ASSERT(input_total == 1 || input_total == 2); // optional mi param (unused here) can make it 2
 	auto &state = *reinterpret_cast<PacCountState *>(state_ptr);
-
 	UnifiedVectorFormat idata;
 	inputs[0].ToUnifiedFormat(count, idata);
 	auto input_data = UnifiedVectorFormat::GetData<uint64_t>(idata);
@@ -225,40 +219,21 @@ AUTOVECTORIZE void PacCountCombine(Vector &src, Vector &dst, AggregateInputData 
 #else
 // Helper to combine one level of counters (moves source pointer ownership to dest if dest is null)
 template <typename T>
-static inline void CombineLevel(uint64_t *&src_buf, uint64_t *&dst_buf, uint32_t &src_exact, uint32_t &dst_exact,
-                                int count) {
-	if (!src_buf) {
-		return; // nothing to combine
-	}
-	if (!dst_buf) {
-		// Move ownership from src to dst
-		dst_buf = src_buf;
-		dst_exact = src_exact;
-		src_buf = nullptr;
-		src_exact = 0;
-		return;
-	}
-	// Both have data - add element by element
-	T *src = reinterpret_cast<T *>(src_buf);
-	T *dst = reinterpret_cast<T *>(dst_buf);
-	for (int i = 0; i < 64; i++) {
-		dst[i] += src[i];
-	}
-	dst_exact += src_exact;
-}
-
-// Overload for uint64_t level (no exact_total needed)
-static inline void CombineLevel64(uint64_t *&src_buf, uint64_t *&dst_buf) {
-	if (!src_buf) {
-		return;
-	}
-	if (!dst_buf) {
-		dst_buf = src_buf;
-		src_buf = nullptr;
-		return;
-	}
-	for (int i = 0; i < 64; i++) {
-		dst_buf[i] += src_buf[i];
+static inline void CombineLevel(uint64_t *&src_buf, uint64_t *&dst_buf, uint64_t &src_exact, uint64_t &dst_exact) {
+	if (src_buf) {
+		if (dst_buf) { // Both have data - add element by element
+			T *src = reinterpret_cast<T *>(src_buf);
+			T *dst = reinterpret_cast<T *>(dst_buf);
+			for (int i = 0; i < 64; i++) {
+				dst[i] += src[i];
+			}
+			dst_exact += src_exact;
+		} else { // Move ownership from src to dst
+			dst_buf = src_buf;
+			dst_exact = src_exact;
+			src_buf = nullptr;
+			src_exact = 0;
+		}
 	}
 }
 
@@ -278,14 +253,10 @@ AUTOVECTORIZE void PacCountCombine(Vector &src, Vector &dst, AggregateInputData 
 		}
 
 		// Combine at each level
-		CombineLevel<uint8_t>(s->probabilistic_total8, d->probabilistic_total8, s->exact_total8, d->exact_total8, 8);
-		CombineLevel<uint16_t>(s->probabilistic_total16, d->probabilistic_total16, s->exact_total16, d->exact_total16,
-		                       16);
-		uint32_t src32 = static_cast<uint32_t>(s->exact_total32);
-		uint32_t dst32 = static_cast<uint32_t>(d->exact_total32);
-		CombineLevel<uint32_t>(s->probabilistic_total32, d->probabilistic_total32, src32, dst32, 32);
-		d->exact_total32 = dst32;
-		CombineLevel64(s->probabilistic_total64, d->probabilistic_total64);
+		CombineLevel<uint8_t>(s->probabilistic_total8, d->probabilistic_total8, s->exact_total8, d->exact_total8);
+		CombineLevel<uint16_t>(s->probabilistic_total16, d->probabilistic_total16, s->exact_total16, d->exact_total16);
+		CombineLevel<uint32_t>(s->probabilistic_total32, d->probabilistic_total32, s->exact_total32, d->exact_total32);
+		CombineLevel<uint64_t>(s->probabilistic_total64, d->probabilistic_total64, s->exact_total64, d->exact_total64);
 	}
 }
 #endif
