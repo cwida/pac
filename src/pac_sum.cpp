@@ -11,10 +11,12 @@ namespace duckdb {
 #define LOWERBOUND_BITWIDTH(bits) -(static_cast<int64_t>(SIGNED) << ((bits - SIGNED) - ACCUMULATE_BITMARGIN))
 
 template <bool SIGNED>
-AUTOVECTORIZE inline void // main worker function for probabilistically adding one INTEGER to the 64 (sub)totals
+AUTOVECTORIZE inline void // main worker function for probabilistically adding one INTEGER to the 64 (sub)total
 PacSumUpdateOne(PacSumIntState<SIGNED> &state, uint64_t key_hash, typename PacSumIntState<SIGNED>::T64 value,
                 ArenaAllocator &allocator) {
-#ifndef PAC_SUM_NONCASCADING
+#ifdef PAC_SUM_NONCASCADING
+	AddToTotalsSimple(state.probabilistic_total128, value, key_hash);
+#else
 	// Store allocator pointer for use in Flush/EnsureLevelAllocated methods
 	if (!state.allocator) {
 		state.allocator = &allocator;
@@ -23,52 +25,50 @@ PacSumUpdateOne(PacSumIntState<SIGNED> &state, uint64_t key_hash, typename PacSu
 #endif
 	}
 	if ((SIGNED && value < 0) ? (value >= LOWERBOUND_BITWIDTH(8)) : (value < UPPERBOUND_BITWIDTH(8))) {
-		state.exact_total8 = state.EnsureLevelAllocated(state.probabilistic_totals8, 8, state.exact_total8);
+		state.exact_total8 = state.EnsureLevelAllocated(state.probabilistic_total8, 8, state.exact_total8);
 		state.Flush8(value, false);
-		AddToTotalsSWAR<int8_t, uint8_t, 0x0101010101010101ULL>(state.probabilistic_totals8, value, key_hash);
+		AddToTotalsSWAR<int8_t, uint8_t, 0x0101010101010101ULL>(state.probabilistic_total8, value, key_hash);
 	} else if ((SIGNED && value < 0) ? (value >= LOWERBOUND_BITWIDTH(16)) : (value < UPPERBOUND_BITWIDTH(16))) {
-		state.exact_total16 = state.EnsureLevelAllocated(state.probabilistic_totals16, 16, state.exact_total16);
+		state.exact_total16 = state.EnsureLevelAllocated(state.probabilistic_total16, 16, state.exact_total16);
 		state.Flush16(value, false);
-		AddToTotalsSWAR<int16_t, uint16_t, 0x0001000100010001ULL>(state.probabilistic_totals16, value, key_hash);
+		AddToTotalsSWAR<int16_t, uint16_t, 0x0001000100010001ULL>(state.probabilistic_total16, value, key_hash);
 	} else if ((SIGNED && value < 0) ? (value >= LOWERBOUND_BITWIDTH(32)) : (value < UPPERBOUND_BITWIDTH(32))) {
-		state.exact_total32 = state.EnsureLevelAllocated(state.probabilistic_totals32, 32, state.exact_total32);
+		state.exact_total32 = state.EnsureLevelAllocated(state.probabilistic_total32, 32, state.exact_total32);
 		state.Flush32(value, false);
-		AddToTotalsSWAR<int32_t, uint32_t, 0x0000000100000001ULL>(state.probabilistic_totals32, value, key_hash);
+		AddToTotalsSWAR<int32_t, uint32_t, 0x0000000100000001ULL>(state.probabilistic_total32, value, key_hash);
 	} else {
-		state.exact_total64 = state.EnsureLevelAllocated(state.probabilistic_totals64, 64, state.exact_total64);
+		state.exact_total64 = state.EnsureLevelAllocated(state.probabilistic_total64, 64, state.exact_total64);
 		state.Flush64(value, false);
-		AddToTotalsSimple(state.probabilistic_totals64, value, key_hash);
+		AddToTotalsSimple(state.probabilistic_total64, value, key_hash);
 	}
-#else
-	AddToTotalsSimple(state.probabilistic_totals128, value, key_hash);
 #endif
 }
 
 template <bool SIGNED>
-AUTOVECTORIZE inline void // main worker function for probabilistically adding one DOUBLE to the 64 sum totals
+AUTOVECTORIZE inline void // main worker function for probabilistically adding one DOUBLE to the 64 sum total
 PacSumUpdateOne(PacSumDoubleState &state, uint64_t key_hash, double value, ArenaAllocator &) {
 	// Note: ArenaAllocator not used for double state (no lazy allocation)
 #ifdef PAC_SUM_FLOAT_CASCADING
 	if (PacSumDoubleState::FloatSubtotalFitsDouble(value)) {
-		AddToTotalsFloat(state.probabilistic_totals_float, static_cast<float>(value), key_hash);
+		AddToTotalsFloat(state.probabilistic_total_float, static_cast<float>(value), key_hash);
 		state.Flush32(value);
 		return;
 	}
 #endif
-	AddToTotalsSimple(state.probabilistic_totals, value, key_hash);
+	AddToTotalsSimple(state.probabilistic_total, value, key_hash);
 }
 
-// Overload for HUGEINT input - adds directly to hugeint_t totals (no cascading since values don't fit in subtotals)
+// Overload for HUGEINT input - adds directly to hugeint_t total (no cascading since values don't fit in subtotal)
 template <bool SIGNED>
 AUTOVECTORIZE inline void PacSumUpdateOne(PacSumIntState<SIGNED> &state, uint64_t key_hash, hugeint_t value,
                                           ArenaAllocator &allocator) {
 #ifndef PAC_SUM_NONCASCADING
 	state.allocator = &allocator;
-	state.EnsureLevelAllocated(state.probabilistic_totals128, idx_t(64));
+	state.EnsureLevelAllocated(state.probabilistic_total128, idx_t(64));
 #endif
 	for (int j = 0; j < 64; j++) {
 		if ((key_hash >> j) & 1ULL) {
-			state.probabilistic_totals128[j] += value;
+			state.probabilistic_total128[j] += value;
 		}
 	}
 }
@@ -132,7 +132,7 @@ static void PacSumScatterUpdate(Vector inputs[], Vector &states, idx_t count, Ar
 		}
 	}
 }
-// Helper to combine src totals into dst at a specific level
+// Helper to combine src total into dst at a specific level
 // If src is null, does nothing. If dst is null, moves pointer from src to dst.
 // BUF_T: buffer element type (uint64_t for levels 8-64, hugeint_t for level 128)
 // EXACT_T: exact_total type (pass dummy for level 128 which has no exact_total)
@@ -163,7 +163,11 @@ AUTOVECTORIZE static void PacSumCombineInt(Vector &src, Vector &dst, idx_t count
 			dst_state[i]->seen_null = true;
 		}
 		if (!dst_state[i]->seen_null) {
-#ifndef PAC_SUM_NONCASCADING
+#ifdef PAC_SUM_NONCASCADING
+			for (int j = 0; j < 64; j++) {
+				dst_state[i]->probabilistic_total128[j] += src_state[i]->probabilistic_total128[j];
+			}
+#else
 			auto *s = src_state[i];
 			auto *d = dst_state[i];
 
@@ -171,18 +175,13 @@ AUTOVECTORIZE static void PacSumCombineInt(Vector &src, Vector &dst, idx_t count
 			if (!d->allocator) {
 				d->allocator = &allocator;
 			}
-
 			// Combine at each level (handles null checks and pointer moves internally)
 			hugeint_t dummy = 0; // level 128 has no exact_total
-			CombineLevel(s->probabilistic_totals8, d->probabilistic_totals8, s->exact_total8, d->exact_total8, 8);
-			CombineLevel(s->probabilistic_totals16, d->probabilistic_totals16, s->exact_total16, d->exact_total16, 16);
-			CombineLevel(s->probabilistic_totals32, d->probabilistic_totals32, s->exact_total32, d->exact_total32, 32);
-			CombineLevel(s->probabilistic_totals64, d->probabilistic_totals64, s->exact_total64, d->exact_total64, 64);
-			CombineLevel(s->probabilistic_totals128, d->probabilistic_totals128, dummy, dummy, 64);
-#else
-			for (int j = 0; j < 64; j++) {
-				dst_state[i]->probabilistic_totals128[j] += src_state[i]->probabilistic_totals128[j];
-			}
+			CombineLevel(s->probabilistic_total8, d->probabilistic_total8, s->exact_total8, d->exact_total8, 8);
+			CombineLevel(s->probabilistic_total16, d->probabilistic_total16, s->exact_total16, d->exact_total16, 16);
+			CombineLevel(s->probabilistic_total32, d->probabilistic_total32, s->exact_total32, d->exact_total32, 32);
+			CombineLevel(s->probabilistic_total64, d->probabilistic_total64, s->exact_total64, d->exact_total64, 64);
+			CombineLevel(s->probabilistic_total128, d->probabilistic_total128, dummy, dummy, 64);
 #endif
 			dst_state[i]->exact_count += src_state[i]->exact_count;
 		}
@@ -203,7 +202,7 @@ AUTOVECTORIZE static void PacSumCombineDouble(Vector &src, Vector &dst, idx_t co
 #endif
 			dst_state[i]->exact_count += src_state[i]->exact_count;
 			for (int j = 0; j < 64; j++) {
-				dst_state[i]->probabilistic_totals[j] += src_state[i]->probabilistic_totals[j];
+				dst_state[i]->probabilistic_total[j] += src_state[i]->probabilistic_total[j];
 			}
 		}
 	}
