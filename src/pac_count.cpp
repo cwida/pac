@@ -56,6 +56,8 @@ PacCountUpdateHash(uint64_t key_hash, PacCountState &state, ArenaAllocator &allo
 #endif
 	}
 	state.EnsureLevelAllocated(state.probabilistic_total8, 8);
+	// the SIMD-friendly performance-critical loop: adding to bytecounters using SWAR
+	// prototyped here: https://godbolt.org/z/8r6x8s17P
 	for (int j = 0; j < 8; j++) {
 		state.probabilistic_total8[j] += (key_hash >> j) & PAC_COUNT_MASK; // Add to SWAR-packed uint8 counters
 	}

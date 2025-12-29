@@ -86,6 +86,8 @@ AUTOVECTORIZE static inline void AddToTotalsSimple(ACCUM_T *__restrict__ total, 
 // - BITS=8:  8 values packed per uint64_t, total[8],  8 iterations
 // - BITS=16: 4 values packed per uint64_t, total[16], 16 iterations
 // - BITS=32: 2 values packed per uint64_t, total[32], 32 iterations
+//
+// prototyped here: https://godbolt.org/z/jr7aKocTW
 
 // SWAR accumulation: pack multiple counters into uint64_t registers (for 8/16/32-bit elements)
 // SIGNED_T/UNSIGNED_T: types for the packed elements (e.g., int8_t/uint8_t)
@@ -106,6 +108,7 @@ AUTOVECTORIZE static inline void AddToTotalsSWAR(uint64_t *__restrict__ total, V
 #ifdef PAC_SUM_FLOAT_CASCADING
 // SWAR approach for x86: extract bytes, expand bits to float masks via union, multiply-accumulate
 // x86 has variable-shift SIMD (vpsrlvq) so this vectorizes well
+// prototyped here: https://godbolt.org/z/jodKW3er7
 AUTOVECTORIZE static inline void AddToTotalsFloat(float *total, float value, uint64_t key_hash) {
 	union {
 		uint64_t u64;

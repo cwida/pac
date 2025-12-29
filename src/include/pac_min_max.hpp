@@ -45,7 +45,7 @@ static constexpr uint16_t BOUND_RECOMPUTE_INTERVAL = 2048;
 // ============================================================================
 // SIMD-friendly update functions for Min/Max extremes arrays
 // Uses union-based bitwise ops that work for all types (int and float)
-// prototyped here: https://godbolt.org/z/dYWqd3qEW
+// prototyped here: https://godbolt.org/z/Tbq3jWWY6
 // ============================================================================
 
 // SWAR traits for different element sizes
@@ -126,6 +126,22 @@ struct UpdateExtremesKernel {
 			result_u.val = result[i];
 			out.bits = (extreme_u.bits & mask_u) | (result_u.bits & ~mask_u);
 			result[i] = out.val;
+		}
+	}
+};
+
+// Specialization for uint8_t MAX: uses optimized value & mask pattern
+template <>
+struct UpdateExtremesKernel<uint8_t, true, 1> {
+	AUTOVECTORIZE static inline void update(uint8_t *__restrict__ result, uint64_t key_hash, uint8_t value) {
+		uint64_t buf[8];
+		for (int i = 0; i < 8; i++) {
+			buf[i] = (key_hash >> i) & 0x0101010101010101ULL;
+		}
+		int8_t *__restrict__ bits = reinterpret_cast<int8_t *>(buf);
+		for (int i = 0; i < 64; i++) {
+			uint8_t mask = static_cast<uint8_t>(-bits[i]);
+			result[i] = std::max(static_cast<uint8_t>(value & mask), result[i]);
 		}
 	}
 };
