@@ -25,20 +25,23 @@ void RegisterPacCountFunctions(ExtensionLoader &);
 // and perform 64 byte-additions, because in the widest SIMD implementation, AVX512, this means that this
 // could be done in a *SINGLE* instruction (AVX512 has 64 lanes of uint8, as 64x8=512)
 //
-// But, to help auto-vectorizing, we use uint8_t probabilistic_total[8], rather than uint8_t probabilistic_total[64]
+// But, to help auto-vectorizing, we use uint64_t probabilistic_total[8], rather than uint8_t probabilistic_total[64]
 // because key_hash is also uint64_t. We apply the below mask to key_hash to extract the lowest bit of each byte:
 
 #define PAC_COUNT_MASK                                                                                                 \
 	(1ULL | (1ULL << 8) | (1ULL << 16) | (1ULL << 24) | (1ULL << 32) | (1ULL << 40) | (1ULL << 48) | (1ULL << 56))
 
 // For each of the 8 iterations i, we then do (hash_key>>i) & PAC_COUNT_MASK which selects 8 bits, and then add these
-// with a single uint64_t ADD to a uint64 subtotal[]. You can only do that 255 times before the bytes in this uint64_t
-// start touching each other (causing overflow).
-// So after 255 iterations, the probabilistic_total8[64] are added to uint16_t probabilistic_total[64] and reset to 0.
-// This repeats possibly in wider total types 16/32/64. We first cascade to 16/32 because often these thinner counters
-// are enough to hold the data and that saves memory (we allocate the counter arrays on need only).
+// with a single uint64_t ADD to a uint64 subtotal[].
 //
-// The idea is that we get very fast performance 254 times and slower performance once every 255 only.
+// This technique is known as SWAR: SIMD Within A Register
+//
+// You can only add 255 times before the bytes in this uint64_t start touching each other (causing overflow).
+// So after 255 iterations, the probabilistic_total8[64] are added to uint16_t probabilistic_total[64] and reset to 0.
+// This repeats possibly in wider total types 16/32/64. We do the extra cascades to 16/32 because often these thinner
+// counters are enough to hold the data and that saves memory (we allocate the counter arrays on need only).
+//
+// The idea is that we get very fast performance 255 times and slower performance once every 256 only.
 // This SIMD-friendly implementation can make PAC counting almost as fast as normal counting.
 //
 // MEMORY OPTIMIZATION: We use lazy allocation with cascading levels (8->16->32->64 bits) to reduce

@@ -141,6 +141,10 @@ AUTOVECTORIZE static inline BOUND_T ComputeGlobalBound(const T *extremes) {
 // access to unallocated fields - compiler optimizes these away since MAXWIDTH is constant.
 template <bool SIGNED, bool IS_MAX, int MAXWIDTH = 64>
 struct PacMinMaxIntState {
+	// Level range constants for unified interface
+	static constexpr int MINLEVEL = 8;
+	static constexpr int MAXLEVEL = MAXWIDTH;
+
 	// Type aliases based on signedness
 	using T8 = typename std::conditional<SIGNED, int8_t, uint8_t>::type;
 	using T16 = typename std::conditional<SIGNED, int16_t, uint16_t>::type;
@@ -154,6 +158,8 @@ struct PacMinMaxIntState {
 	        MAXWIDTH == 64, T64,
 	        typename std::conditional<MAXWIDTH == 32, T32,
 	                                  typename std::conditional<MAXWIDTH == 16, T16, T8>::type>::type>::type>::type;
+	// ValueType alias for unified interface
+	using ValueType = TMAX;
 
 	// Get init value (worst possible for the aggregation direction)
 	// Uses NumericLimits which is specialized for each type
@@ -203,6 +209,16 @@ struct PacMinMaxIntState {
 		global_bound = TypeInit<TMAX>();
 		update_count = 0;
 		initialized = true;
+	}
+
+	// Recompute global bound - periodically called after updates
+	void RecomputeBound() {
+#ifndef PAC_MINMAX_NOBOUNDOPT
+		if (++update_count == BOUND_RECOMPUTE_INTERVAL) {
+			update_count = 0;
+			global_bound = ComputeGlobalBound<TMAX, TMAX, IS_MAX>(extremes);
+		}
+#endif
 	}
 #else
 	// ========== Cascading mode fields ==========
@@ -367,7 +383,141 @@ struct PacMinMaxIntState {
 			dst[i] = init_val;
 		}
 	}
+
+	// Upgrade level if value doesn't fit in current level
+	void MaybeUpgrade(TMAX value) {
+		if (MAXWIDTH >= 16 && !FitsIn8(value) && current_level == 8) {
+			UpgradeTo16();
+		}
+		if (MAXWIDTH >= 32 && !FitsIn16(value) && current_level == 16) {
+			UpgradeTo32();
+		}
+		if (MAXWIDTH >= 64 && !FitsIn32(value) && current_level == 32) {
+			UpgradeTo64();
+		}
+		if (MAXWIDTH >= 128 && !FitsIn64(value) && current_level == 64) {
+			UpgradeTo128();
+		}
+	}
+
+	// Update extremes at current level with value
+	AUTOVECTORIZE void UpdateAtCurrentLevel(uint64_t key_hash, TMAX value) {
+		if (current_level == 8) {
+			UpdateExtremesSIMD<T8, int8_t, IS_MAX, 0x0101010101010101ULL, 8>(extremes8, key_hash,
+			                                                                 static_cast<T8>(value));
+		}
+		if (MAXWIDTH >= 16 && current_level == 16) {
+			UpdateExtremesSIMD<T16, int16_t, IS_MAX, 0x0001000100010001ULL, 16>(extremes16, key_hash,
+			                                                                    static_cast<T16>(value));
+		}
+		if (MAXWIDTH >= 32 && current_level == 32) {
+			UpdateExtremesSIMD<T32, int32_t, IS_MAX, 0x0000000100000001ULL, 32>(extremes32, key_hash,
+			                                                                    static_cast<T32>(value));
+		}
+		if (MAXWIDTH >= 64 && current_level == 64) {
+			UpdateExtremes<T64, IS_MAX>(extremes64, key_hash, static_cast<T64>(value));
+		}
+		if (MAXWIDTH >= 128 && current_level == 128) {
+			UpdateExtremes<T128, IS_MAX>(extremes128, key_hash, static_cast<T128>(value));
+		}
+	}
+
+	// Recompute global bound from current level's extremes - periodically called after updates
+	void RecomputeBound() {
+#ifndef PAC_MINMAX_NOBOUNDOPT
+		if (++update_count == BOUND_RECOMPUTE_INTERVAL) {
+			update_count = 0;
+			if (current_level == 8) {
+				global_bound = ComputeGlobalBound<T8, TMAX, IS_MAX>(extremes8);
+			}
+			if (MAXWIDTH >= 16 && current_level == 16) {
+				global_bound = ComputeGlobalBound<T16, TMAX, IS_MAX>(extremes16);
+			}
+			if (MAXWIDTH >= 32 && current_level == 32) {
+				global_bound = ComputeGlobalBound<T32, TMAX, IS_MAX>(extremes32);
+			}
+			if (MAXWIDTH >= 64 && current_level == 64) {
+				global_bound = ComputeGlobalBound<T64, TMAX, IS_MAX>(extremes64);
+			}
+			if (MAXWIDTH >= 128 && current_level == 128) {
+				global_bound = ComputeGlobalBound<T128, TMAX, IS_MAX>(extremes128);
+			}
+		}
 #endif
+	}
+
+	// Combine with another state (merge src into this)
+	void CombineWith(const PacMinMaxIntState &src, ArenaAllocator &alloc) {
+		if (!src.initialized) {
+			return;
+		}
+		if (!initialized) {
+			allocator = &alloc;
+			extremes8 = AllocateLevel<T8>(TypeInit<T8>());
+			current_level = 8;
+			update_count = 0;
+			global_bound = TypeInit<TMAX>();
+			initialized = true;
+		}
+		// Upgrade this state to match src level
+		if (MAXWIDTH >= 16 && current_level == 8 && current_level < src.current_level) {
+			UpgradeTo16();
+		}
+		if (MAXWIDTH >= 32 && current_level == 16 && current_level < src.current_level) {
+			UpgradeTo32();
+		}
+		if (MAXWIDTH >= 64 && current_level == 32 && current_level < src.current_level) {
+			UpgradeTo64();
+		}
+		if (MAXWIDTH >= 128 && current_level == 64 && current_level < src.current_level) {
+			UpgradeTo128();
+		}
+		// Combine at current level
+		if (current_level == 8) {
+			for (int j = 0; j < 64; j++) {
+				extremes8[j] = PAC_BETTER(extremes8[j], src.template GetValueAs<T8>(j));
+			}
+		}
+		if (MAXWIDTH >= 16 && current_level == 16) {
+			for (int j = 0; j < 64; j++) {
+				extremes16[j] = PAC_BETTER(extremes16[j], src.template GetValueAs<T16>(j));
+			}
+		}
+		if (MAXWIDTH >= 32 && current_level == 32) {
+			for (int j = 0; j < 64; j++) {
+				extremes32[j] = PAC_BETTER(extremes32[j], src.template GetValueAs<T32>(j));
+			}
+		}
+		if (MAXWIDTH >= 64 && current_level == 64) {
+			for (int j = 0; j < 64; j++) {
+				extremes64[j] = PAC_BETTER(extremes64[j], src.template GetValueAs<T64>(j));
+			}
+		}
+		if (MAXWIDTH >= 128 && current_level == 128) {
+			for (int j = 0; j < 64; j++) {
+				extremes128[j] = PAC_BETTER(extremes128[j], src.template GetValueAs<T128>(j));
+			}
+		}
+		RecomputeBound();
+	}
+#endif
+
+	// State size for DuckDB allocation - uses offsetof to exclude unused pointer fields
+	static idx_t StateSize() {
+#ifdef PAC_MINMAX_NONCASCADING
+		return sizeof(PacMinMaxIntState);
+#else
+		if (MAXWIDTH >= 128)
+			return sizeof(PacMinMaxIntState);
+		if (MAXWIDTH >= 64)
+			return offsetof(PacMinMaxIntState, extremes128);
+		if (MAXWIDTH >= 32)
+			return offsetof(PacMinMaxIntState, extremes64);
+		if (MAXWIDTH >= 16)
+			return offsetof(PacMinMaxIntState, extremes32);
+		return offsetof(PacMinMaxIntState, extremes16);
+#endif
+	}
 };
 
 // ============================================================================
@@ -381,6 +531,15 @@ struct PacMinMaxIntState {
 // use offsetof() for smaller state_size allocation.
 template <bool IS_MAX, typename VALUE_TYPE = double, int MAXWIDTH = 64>
 struct PacMinMaxFloatState {
+	// Level range constants for unified interface
+	static constexpr int MINLEVEL = 32;
+	static constexpr int MAXLEVEL = MAXWIDTH;
+
+	// Type aliases for unified interface (matching int state naming convention)
+	using T32 = float;
+	using T64 = double;
+	using ValueType = VALUE_TYPE;
+
 	static constexpr float FLOAT_RANGE_MIN = -1000000.0f;
 	static constexpr float FLOAT_RANGE_MAX = 1000000.0f;
 
@@ -393,6 +552,10 @@ struct PacMinMaxFloatState {
 	// Check if value fits in float range
 	static inline bool FitsInFloat(VALUE_TYPE val) {
 		return val >= FLOAT_RANGE_MIN && val <= FLOAT_RANGE_MAX;
+	}
+	// Alias for unified interface - maps to FitsIn32 equivalent
+	static inline bool FitsIn32(VALUE_TYPE val) {
+		return FitsInFloat(val);
 	}
 
 	// ========== Common fields (defined once for both modes) ==========
@@ -419,6 +582,16 @@ struct PacMinMaxFloatState {
 		global_bound = init;
 		update_count = 0;
 		initialized = true;
+	}
+
+	// Recompute global bound - periodically called after updates
+	void RecomputeBound() {
+#ifndef PAC_MINMAX_NOBOUNDOPT
+		if (++update_count == BOUND_RECOMPUTE_INTERVAL) {
+			update_count = 0;
+			global_bound = ComputeGlobalBound<VALUE_TYPE, VALUE_TYPE, IS_MAX>(extremes);
+		}
+#endif
 	}
 #else
 	// ========== Cascading mode fields ==========
@@ -490,6 +663,19 @@ struct PacMinMaxFloatState {
 			current_level = 64;
 		}
 	}
+	// Alias for unified interface consistency with int state naming
+	void UpgradeTo64() {
+		UpgradeToDoublePrecision();
+	}
+
+	// Get value at index j, cast to type T, from current level (for unified interface)
+	template <typename T>
+	T GetValueAs(int j) const {
+		if (MAXWIDTH >= 64 && current_level >= 64) {
+			return static_cast<T>(extremes64[j]);
+		}
+		return static_cast<T>(extremes32[j]);
+	}
 
 	void GetTotalsAsDouble(double *dst) const {
 		if (MAXWIDTH >= 64 && current_level == 64) {
@@ -510,7 +696,82 @@ struct PacMinMaxFloatState {
 			dst[i] = init;
 		}
 	}
+
+	// Upgrade level if value doesn't fit in current level
+	void MaybeUpgrade(VALUE_TYPE value) {
+		if (MAXWIDTH >= 64 && !FitsInFloat(value) && current_level == 32) {
+			UpgradeToDoublePrecision();
+		}
+	}
+
+	// Update extremes at current level with value
+	AUTOVECTORIZE void UpdateAtCurrentLevel(uint64_t key_hash, VALUE_TYPE value) {
+		if (current_level == 32) {
+			UpdateExtremes<float, IS_MAX>(extremes32, key_hash, static_cast<float>(value));
+		}
+		if (MAXWIDTH >= 64 && current_level == 64) {
+			UpdateExtremes<double, IS_MAX>(extremes64, key_hash, static_cast<double>(value));
+		}
+	}
+
+	// Recompute global bound from current level's extremes - periodically called after updates
+	void RecomputeBound() {
+#ifndef PAC_MINMAX_NOBOUNDOPT
+		if (++update_count == BOUND_RECOMPUTE_INTERVAL) {
+			update_count = 0;
+			if (current_level == 32) {
+				global_bound = static_cast<VALUE_TYPE>(ComputeGlobalBound<float, float, IS_MAX>(extremes32));
+			}
+			if (MAXWIDTH >= 64 && current_level == 64) {
+				global_bound = ComputeGlobalBound<double, double, IS_MAX>(extremes64);
+			}
+		}
 #endif
+	}
+
+	// Combine with another state (merge src into this)
+	void CombineWith(const PacMinMaxFloatState &src, ArenaAllocator &alloc) {
+		if (!src.initialized) {
+			return;
+		}
+		if (!initialized) {
+			allocator = &alloc;
+			extremes32 = AllocateFloatLevel();
+			current_level = 32;
+			update_count = 0;
+			global_bound = TypeInit<VALUE_TYPE>();
+			initialized = true;
+		}
+		// Upgrade to double if src is at double level
+		if (MAXWIDTH >= 64 && current_level == 32 && src.current_level == 64) {
+			UpgradeToDoublePrecision();
+		}
+		// Combine at current level
+		if (current_level == 32) {
+			for (int j = 0; j < 64; j++) {
+				extremes32[j] = PAC_IS_BETTER(src.extremes32[j], extremes32[j]) ? src.extremes32[j] : extremes32[j];
+			}
+		}
+		if (MAXWIDTH >= 64 && current_level == 64) {
+			for (int j = 0; j < 64; j++) {
+				double sv = (src.current_level >= 64) ? src.extremes64[j] : static_cast<double>(src.extremes32[j]);
+				extremes64[j] = PAC_BETTER(extremes64[j], sv);
+			}
+		}
+		RecomputeBound();
+	}
+#endif
+
+	// State size for DuckDB allocation - uses offsetof to exclude unused pointer fields
+	static idx_t StateSize() {
+#ifdef PAC_MINMAX_NONCASCADING
+		return sizeof(PacMinMaxFloatState);
+#else
+		if (MAXWIDTH >= 64)
+			return sizeof(PacMinMaxFloatState);
+		return offsetof(PacMinMaxFloatState, extremes64);
+#endif
+	}
 };
 
 // Type alias for backwards compatibility
