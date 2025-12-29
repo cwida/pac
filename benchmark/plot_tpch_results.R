@@ -57,7 +57,7 @@ if (length(sf_match) > 1) {
 raw <- suppressWarnings(readr::read_csv(input_csv, show_col_types = FALSE))
 
 # Validate expected columns
-expected_cols <- c("query", "run", "time_ms", "pac_time_ms")
+expected_cols <- c("query", "mode", "run", "time_ms")
 missing_cols <- setdiff(expected_cols, colnames(raw))
 if (length(missing_cols) > 0) {
   stop("Missing expected columns in CSV: ", paste(missing_cols, collapse = ", "))
@@ -66,21 +66,17 @@ if (length(missing_cols) > 0) {
 # Normalize query column to character
 raw <- raw %>% mutate(query = as.character(query))
 
-# Convert pac_time_ms == -1 (error) to NA so they don't skew means
-raw <- raw %>% mutate(pac_time_ms = ifelse(pac_time_ms < 0, NA_real_, pac_time_ms))
+# Ensure mode is a character and normalize values
+raw <- raw %>% mutate(mode = as.character(mode))
 
-# Pivot to long format: baseline vs PAC
-long <- raw %>% select(query, run, time_ms, pac_time_ms) %>%
-  pivot_longer(cols = c(time_ms, pac_time_ms), names_to = "scenario", values_to = "time") %>%
-  mutate(scenario = ifelse(scenario == "time_ms", "baseline", "PAC")) %>%
-  filter(!is.na(time))
+# Filter out any rows with missing time or missing mode
+raw <- raw %>% filter(!is.na(time_ms) & !is.na(mode))
+if (nrow(raw) == 0) stop("No valid time data to plot.")
 
-if (nrow(long) == 0) stop("No valid time data to plot.")
-
-# Compute per-query summary (mean + sd)
-summary_df <- long %>%
-  group_by(query, scenario) %>%
-  summarize(mean_time = mean(time, na.rm = TRUE), sd_time = sd(time, na.rm = TRUE), runs = n(), .groups = "drop")
+# Compute per-query per-mode summary (mean + sd)
+summary_df <- raw %>%
+  group_by(query, mode) %>%
+  summarize(mean_time = mean(time_ms, na.rm = TRUE), sd_time = sd(time_ms, na.rm = TRUE), runs = n(), .groups = "drop")
 
 # Determine number of runs per query (expect same across queries)
 runs_per_query <- raw %>% group_by(query) %>% summarize(n_runs = n_distinct(run), .groups = "drop")
@@ -100,16 +96,16 @@ if (length(query_order) == 0) query_order <- unique(summary_df$query)
 
 summary_df$query <- factor(summary_df$query, levels = query_order)
 
-# Colors for baseline and PAC
-method_colors <- c("baseline" = "#1f77b4", "PAC" = "#ff7f0e")
+# Choose palette for common modes; if unknown modes are present they'll get default ggplot colors
+method_colors <- c("baseline" = "#1f77b4", "SIMD PAC" = "#ff7f0e", "naive PAC" = "#2ca02c")
 
-# Build plot (grouped bar chart, bigger type)
-p <- ggplot(summary_df, aes(x = query, y = mean_time, fill = scenario)) +
-  # grouped bars: baseline vs PAC side-by-side per query
+# Build plot (grouped bar chart, grouped by mode)
+p <- ggplot(summary_df, aes(x = query, y = mean_time, fill = mode)) +
+  # grouped bars: different modes side-by-side per query
   geom_col(position = position_dodge(width = 0.8), width = 0.7) +
-  scale_fill_manual(values = method_colors, name = "Method") +
+  scale_fill_manual(values = method_colors, name = "Mode") +
   scale_y_continuous(labels = scales::comma) +
-  labs(x = "Query", y = "Time (ms)", fill = "Method") +
+  labs(x = "Query", y = "Time (ms)", fill = "Mode") +
   theme_bw(base_size = 22, base_family = "Linux Libertine") +
   theme(
     panel.grid.major = element_line(linewidth = 0.6),
@@ -120,22 +116,13 @@ p <- ggplot(summary_df, aes(x = query, y = mean_time, fill = scenario)) +
     axis.text.x = element_text(angle = 45, hjust = 1, size = 18),
     axis.text.y = element_text(size = 18),
     axis.title = element_text(size = 20),
-    plot.title = element_text(size = 20, face = "bold", hjust = 0.5),
-    plot.subtitle = element_text(size = 12, hjust = 0.5)
+    plot.title = element_text(size = 20, face = "bold", hjust = 0.5)
   )
 
 # Title with sf and runs
 title_sf <- ifelse(is.na(sf_str), "sf=unknown", paste0("sf=", sf_str))
 plot_title <- paste0("TPC-H Benchmark, ", title_sf, ", runs=", n_runs_text)
-note_lines <- c(
-  "Queries without dependence on customer (unchanged): Q2, Q11, Q16",
-  "Directly returning Customer data (unchanged, should not return): Q10, Q18",
-  "Directly scanning Customer: Q03, Q05, Q07 (?), Q08, Q13 (?), Q22",
-  "PAC join with Customer: Q01, Q06, Q09, Q15, Q17, Q19, Q20, Q21 (?)",
-  "Using Orders as PU: Q04, Q12, Q14"
-)
-subtitle_text <- paste(note_lines, collapse = "\n")
-p <- p + labs(title = plot_title, subtitle = subtitle_text)
+p <- p + labs(title = plot_title)
 
 # Output file
 sf_for_name <- ifelse(is.na(sf_str), "unknown", gsub("\\.", "_", sf_str))
