@@ -22,7 +22,8 @@ static constexpr uint16_t BOUND_RECOMPUTE_INTERVAL = 2048;
 #define PAC_WORSE(a, b)     (PAC_IS_BETTER(a, b) ? (b) : (a))
 
 // ============================================================================
-// SIMD-friendly update functions for extremes arrays (SWAR layout)
+// SIMD-friendly update functions for Min/Max extremes arrays (SWAR layout)
+// prototyped here: https://godbolt.org/z/dYWqd3qEW
 // ============================================================================
 // T: element type (int8_t, uint8_t, int16_t, uint16_t, int32_t, uint32_t)
 // BitsT: signed type matching sizeof(T) for mask generation
@@ -42,7 +43,7 @@ AUTOVECTORIZE static inline void UpdateExtremesSIMD(T *__restrict__ result, uint
 	// Both buf.bits and result are in SWAR layout - direct indexing
 	for (int i = 0; i < 64; i++) {
 		T mask = static_cast<T>(-buf.bits[i]);
-		T extreme = IS_MAX ? std::max(value, result[i]) : std::min(value, result[i]);
+		T extreme = PAC_BETTER(value, result[i]);
 		result[i] = (extreme & mask) | (result[i] & ~mask);
 	}
 }
@@ -68,7 +69,7 @@ UpdateExtremesSIMD<uint8_t, int8_t, true, 0x0101010101010101ULL, 8>(uint8_t *__r
 template <typename T, bool IS_MAX>
 AUTOVECTORIZE static inline void UpdateExtremes(T *__restrict__ result, uint64_t key_hash, T value) {
 	for (int i = 0; i < 64; i++) {
-		if (((key_hash >> i) & 1ULL) && (IS_MAX ? value > result[i] : value < result[i])) {
+		if (((key_hash >> i) & 1ULL) && PAC_IS_BETTER(value, result[i])) {
 			result[i] = value;
 		}
 	}
@@ -82,13 +83,11 @@ AUTOVECTORIZE static inline void UpdateExtremes(T *__restrict__ result, uint64_t
 // ELEM_PER_U64: elements per uint64_t (8 for 8-bit, 4 for 16-bit, 2 for 32-bit)
 template <int ELEM_PER_U64>
 static inline int LinearToSWAR(int linear_idx) {
-	constexpr int NUM_U64 = 64 / ELEM_PER_U64;
-	// The union packs bits such that linear index L maps to SWAR index:
-	// EPU * (L % NUM_U64) + (L / NUM_U64)
-	return ELEM_PER_U64 * (linear_idx % NUM_U64) + (linear_idx / NUM_U64);
+	constexpr int NUM_U64 = 64 / ELEM_PER_U64; // The union packs bits such that linear index L maps to SWAR index:
+	return ELEM_PER_U64 * (linear_idx % NUM_U64) + (linear_idx / NUM_U64); // EPU * (L % NUM_U64) + (L / NUM_U64)
 }
 
-// Extract from SWAR layout to linear double array
+// Extract from SWAR layout to linear double array (where we do noising)
 template <typename T, int ELEM_PER_U64>
 static inline void ExtractSWAR(const T *swar_data, double *dst) {
 	for (int i = 0; i < 64; i++) {
@@ -99,17 +98,14 @@ static inline void ExtractSWAR(const T *swar_data, double *dst) {
 
 // ============================================================================
 // Helper to recompute global bound from extremes array
+// NOTE: ToDouble<T> is already defined in pac_aggregate.hpp
 // ============================================================================
 template <typename T, typename BOUND_T, bool IS_MAX>
 AUTOVECTORIZE static inline BOUND_T ComputeGlobalBound(const T *extremes) {
 	BOUND_T bound = static_cast<BOUND_T>(extremes[0]);
 	for (int i = 1; i < 64; i++) {
 		BOUND_T ext = static_cast<BOUND_T>(extremes[i]);
-		if constexpr (IS_MAX) {
-			bound = (ext < bound) ? ext : bound; // Worse = min for MAX
-		} else {
-			bound = (ext > bound) ? ext : bound; // Worse = max for MIN
-		}
+		bound = PAC_WORSE(ext, bound);
 	}
 	return bound;
 }
@@ -133,94 +129,18 @@ AUTOVECTORIZE static inline BOUND_T ComputeGlobalBound(const T *extremes) {
 //#define PAC_MINMAX_NOBOUNDOPT 1
 
 // ============================================================================
-// Inheritance chain for conditional extremes pointers (cascading mode only)
-// Uses Empty Base Optimization to have zero overhead for unused levels
+// Integer state for min/max
 // ============================================================================
-#ifndef PAC_MINMAX_NONCASCADING
-
-// Base level - always has T8
-template <bool SIGNED, int MAXWIDTH>
-struct IntExtremesLevel8 {
-	using T8 = typename std::conditional<SIGNED, int8_t, uint8_t>::type;
-	T8 *extremes8;
-};
-
-// Level 16 - empty by default (EBO makes this zero-size)
-template <bool SIGNED, int MAXWIDTH, bool HAS_16 = (MAXWIDTH >= 16)>
-struct IntExtremesLevel16 : IntExtremesLevel8<SIGNED, MAXWIDTH> {};
-
-// Level 16 - specialization that adds the field when MAXWIDTH >= 16
-template <bool SIGNED, int MAXWIDTH>
-struct IntExtremesLevel16<SIGNED, MAXWIDTH, true> : IntExtremesLevel8<SIGNED, MAXWIDTH> {
-	using T16 = typename std::conditional<SIGNED, int16_t, uint16_t>::type;
-	T16 *extremes16;
-};
-
-// Level 32 - empty by default
-template <bool SIGNED, int MAXWIDTH, bool HAS_32 = (MAXWIDTH >= 32)>
-struct IntExtremesLevel32 : IntExtremesLevel16<SIGNED, MAXWIDTH> {};
-
-// Level 32 - specialization that adds the field when MAXWIDTH >= 32
-template <bool SIGNED, int MAXWIDTH>
-struct IntExtremesLevel32<SIGNED, MAXWIDTH, true> : IntExtremesLevel16<SIGNED, MAXWIDTH> {
-	using T32 = typename std::conditional<SIGNED, int32_t, uint32_t>::type;
-	T32 *extremes32;
-};
-
-// Level 64 - empty by default
-template <bool SIGNED, int MAXWIDTH, bool HAS_64 = (MAXWIDTH >= 64)>
-struct IntExtremesLevel64 : IntExtremesLevel32<SIGNED, MAXWIDTH> {};
-
-// Level 64 - specialization that adds the field when MAXWIDTH >= 64
-template <bool SIGNED, int MAXWIDTH>
-struct IntExtremesLevel64<SIGNED, MAXWIDTH, true> : IntExtremesLevel32<SIGNED, MAXWIDTH> {
-	using T64 = typename std::conditional<SIGNED, int64_t, uint64_t>::type;
-	T64 *extremes64;
-};
-
-// Level 128 - empty by default
-template <bool SIGNED, int MAXWIDTH, bool HAS_128 = (MAXWIDTH >= 128)>
-struct IntExtremesLevel128 : IntExtremesLevel64<SIGNED, MAXWIDTH> {};
-
-// Level 128 - specialization that adds the field when MAXWIDTH >= 128
-template <bool SIGNED, int MAXWIDTH>
-struct IntExtremesLevel128<SIGNED, MAXWIDTH, true> : IntExtremesLevel64<SIGNED, MAXWIDTH> {
-	using T128 = typename std::conditional<SIGNED, hugeint_t, uhugeint_t>::type;
-	T128 *extremes128;
-};
-
-// ============================================================================
-// Float inheritance chain for conditional extremes pointers
-// ============================================================================
-
-// Base level - always has float (level 32)
-template <int MAXWIDTH>
-struct FloatExtremesLevel32 {
-	float *extremesF;
-};
-
-// Level 64 - empty by default (EBO makes this zero-size)
-template <int MAXWIDTH, bool HAS_64 = (MAXWIDTH >= 64)>
-struct FloatExtremesLevel64 : FloatExtremesLevel32<MAXWIDTH> {};
-
-// Level 64 - specialization that adds the field when MAXWIDTH >= 64
-template <int MAXWIDTH>
-struct FloatExtremesLevel64<MAXWIDTH, true> : FloatExtremesLevel32<MAXWIDTH> {
-	double *extremesD;
-};
-
-#endif // PAC_MINMAX_NONCASCADING
-
-// Templated integer state for min/max
 // SIGNED: signed vs unsigned types
 // IS_MAX: true for pac_max, false for pac_min
-// MAXWIDTH: maximum bit width needed (8, 16, 32, 64, or 128) - controls which levels are present
+// MAXWIDTH: maximum bit width needed (8, 16, 32, 64, or 128)
+//
+// All pointer fields are always defined but ordered by width at the end of the struct.
+// We use offsetof() to report smaller state_size to DuckDB, so it allocates only
+// the memory needed for the MAXWIDTH. Regular if guards (not if constexpr) prevent
+// access to unallocated fields - compiler optimizes these away since MAXWIDTH is constant.
 template <bool SIGNED, bool IS_MAX, int MAXWIDTH = 64>
-struct PacMinMaxIntState
-#ifndef PAC_MINMAX_NONCASCADING
-    : IntExtremesLevel128<SIGNED, MAXWIDTH> // Inherit extremes pointers (only those needed for MAXWIDTH)
-#endif
-{
+struct PacMinMaxIntState {
 	// Type aliases based on signedness
 	using T8 = typename std::conditional<SIGNED, int8_t, uint8_t>::type;
 	using T16 = typename std::conditional<SIGNED, int16_t, uint16_t>::type;
@@ -235,20 +155,11 @@ struct PacMinMaxIntState
 	        typename std::conditional<MAXWIDTH == 32, T32,
 	                                  typename std::conditional<MAXWIDTH == 16, T16, T8>::type>::type>::type>::type;
 
-	// Get init value (worst possible for the aggregation direction) based on type size
+	// Get init value (worst possible for the aggregation direction)
+	// Uses NumericLimits which is specialized for each type
 	template <typename T>
 	static inline T TypeInit() {
-		if constexpr (sizeof(T) == 1) {
-			return IS_MAX ? (SIGNED ? INT8_MIN : 0) : (SIGNED ? INT8_MAX : UINT8_MAX);
-		} else if constexpr (sizeof(T) == 2) {
-			return IS_MAX ? (SIGNED ? INT16_MIN : 0) : (SIGNED ? INT16_MAX : UINT16_MAX);
-		} else if constexpr (sizeof(T) == 4) {
-			return IS_MAX ? (SIGNED ? INT32_MIN : 0) : (SIGNED ? INT32_MAX : UINT32_MAX);
-		} else if constexpr (sizeof(T) == 8) {
-			return IS_MAX ? (SIGNED ? INT64_MIN : 0) : (SIGNED ? INT64_MAX : UINT64_MAX);
-		} else {
-			return IS_MAX ? NumericLimits<T>::Minimum() : NumericLimits<T>::Maximum();
-		}
+		return IS_MAX ? NumericLimits<T>::Minimum() : NumericLimits<T>::Maximum();
 	}
 
 	// Check if value fits in a given type
@@ -270,10 +181,10 @@ struct PacMinMaxIntState
 	}
 
 	// ========== Common fields (defined once for both modes) ==========
-	TMAX global_bound; // For MAX: min of all maxes; for MIN: max of all mins
-	uint16_t update_count;
-	bool seen_null;
 	bool initialized;
+	bool seen_null;
+	uint16_t update_count;
+	TMAX global_bound; // For MAX: min of all maxes; for MIN: max of all mins
 
 #ifdef PAC_MINMAX_NONCASCADING
 	// ========== Non-cascading mode: single fixed-width array ==========
@@ -281,15 +192,7 @@ struct PacMinMaxIntState
 
 	void GetTotalsAsDouble(double *dst) const {
 		for (int i = 0; i < 64; i++) {
-			if constexpr (sizeof(TMAX) == 16) {
-				if constexpr (SIGNED) {
-					dst[i] = Hugeint::Cast<double>(extremes[i]);
-				} else {
-					dst[i] = Uhugeint::Cast<double>(extremes[i]);
-				}
-			} else {
-				dst[i] = static_cast<double>(extremes[i]);
-			}
+			dst[i] = ToDouble(extremes[i]);
 		}
 	}
 
@@ -303,10 +206,17 @@ struct PacMinMaxIntState
 	}
 #else
 	// ========== Cascading mode fields ==========
-	// extremes8/16/32/64/128 pointers are inherited from IntExtremesLevel128 chain
-	// (only those needed for MAXWIDTH are actually present due to EBO)
+	// All pointers defined, but ordered so unused ones are at the end.
+	// DuckDB allocates only up to the needed pointer based on state_size.
 	uint8_t current_level; // 8, 16, 32, 64, or 128
 	ArenaAllocator *allocator;
+
+	// Pointer fields ordered by width - unused ones at the end won't be allocated
+	T8 *extremes8;
+	T16 *extremes16;
+	T32 *extremes32;
+	T64 *extremes64;
+	T128 *extremes128;
 
 	// Allocate a level's buffer
 	template <typename T>
@@ -318,6 +228,21 @@ struct PacMinMaxIntState
 		return buf;
 	}
 
+	// Helper to get SWAR index, handling different sizes
+	// Returns linear index for types > 4 bytes (no SWAR benefit)
+	template <typename T>
+	static inline int GetIndex(int i) {
+		// Types > 4 bytes use linear indexing
+		if (sizeof(T) > 4)
+			return i;
+		// Types <= 4 bytes use SWAR layout
+		if (sizeof(T) == 4)
+			return LinearToSWAR<2>(i);
+		if (sizeof(T) == 2)
+			return LinearToSWAR<4>(i);
+		return LinearToSWAR<8>(i); // sizeof(T) == 1
+	}
+
 	// Upgrade from one level to the next, automatically handling SWAR vs linear layout
 	// Types <= 4 bytes use SWAR layout, types > 4 bytes use linear layout
 	// If src value equals src_init (never updated), use dst_init instead
@@ -326,17 +251,8 @@ struct PacMinMaxIntState
 		DST_T *dst = reinterpret_cast<DST_T *>(allocator->Allocate(64 * sizeof(DST_T)));
 		if (src) {
 			for (int i = 0; i < 64; i++) {
-				int src_idx, dst_idx;
-				if constexpr (sizeof(SRC_T) <= 4) {
-					src_idx = LinearToSWAR<8 / sizeof(SRC_T)>(i);
-				} else {
-					src_idx = i;
-				}
-				if constexpr (sizeof(DST_T) <= 4) {
-					dst_idx = LinearToSWAR<8 / sizeof(DST_T)>(i);
-				} else {
-					dst_idx = i;
-				}
+				int src_idx = GetIndex<SRC_T>(i);
+				int dst_idx = GetIndex<DST_T>(i);
 				dst[dst_idx] = (src[src_idx] == src_init) ? dst_init : static_cast<DST_T>(src[src_idx]);
 			}
 		} else {
@@ -351,22 +267,22 @@ struct PacMinMaxIntState
 		allocator = &alloc;
 #ifdef PAC_MINMAX_NONLAZY
 		// Pre-allocate all levels that exist for this MAXWIDTH
-		this->extremes8 = AllocateLevel<T8>(TypeInit<T8>());
-		if constexpr (MAXWIDTH >= 16) {
-			this->extremes16 = AllocateLevel<T16>(TypeInit<T16>());
+		extremes8 = AllocateLevel<T8>(TypeInit<T8>());
+		if (MAXWIDTH >= 16) {
+			extremes16 = AllocateLevel<T16>(TypeInit<T16>());
 		}
-		if constexpr (MAXWIDTH >= 32) {
-			this->extremes32 = AllocateLevel<T32>(TypeInit<T32>());
+		if (MAXWIDTH >= 32) {
+			extremes32 = AllocateLevel<T32>(TypeInit<T32>());
 		}
-		if constexpr (MAXWIDTH >= 64) {
-			this->extremes64 = AllocateLevel<T64>(TypeInit<T64>());
+		if (MAXWIDTH >= 64) {
+			extremes64 = AllocateLevel<T64>(TypeInit<T64>());
 		}
-		if constexpr (MAXWIDTH >= 128) {
-			this->extremes128 = AllocateLevel<T128>(TypeInit<T128>());
+		if (MAXWIDTH >= 128) {
+			extremes128 = AllocateLevel<T128>(TypeInit<T128>());
 		}
 		current_level = MAXWIDTH;
 #else
-		this->extremes8 = AllocateLevel<T8>(TypeInit<T8>());
+		extremes8 = AllocateLevel<T8>(TypeInit<T8>());
 		current_level = 8;
 #endif
 		update_count = 0;
@@ -375,29 +291,29 @@ struct PacMinMaxIntState
 	}
 
 	void UpgradeTo16() {
-		if constexpr (MAXWIDTH >= 16) {
-			this->extremes16 = UpgradeLevel<T8, T16>(this->extremes8, TypeInit<T8>(), TypeInit<T16>());
+		if (MAXWIDTH >= 16) {
+			extremes16 = UpgradeLevel<T8, T16>(extremes8, TypeInit<T8>(), TypeInit<T16>());
 			current_level = 16;
 		}
 	}
 
 	void UpgradeTo32() {
-		if constexpr (MAXWIDTH >= 32) {
-			this->extremes32 = UpgradeLevel<T16, T32>(this->extremes16, TypeInit<T16>(), TypeInit<T32>());
+		if (MAXWIDTH >= 32) {
+			extremes32 = UpgradeLevel<T16, T32>(extremes16, TypeInit<T16>(), TypeInit<T32>());
 			current_level = 32;
 		}
 	}
 
 	void UpgradeTo64() {
-		if constexpr (MAXWIDTH >= 64) {
-			this->extremes64 = UpgradeLevel<T32, T64>(this->extremes32, TypeInit<T32>(), TypeInit<T64>());
+		if (MAXWIDTH >= 64) {
+			extremes64 = UpgradeLevel<T32, T64>(extremes32, TypeInit<T32>(), TypeInit<T64>());
 			current_level = 64;
 		}
 	}
 
 	void UpgradeTo128() {
-		if constexpr (MAXWIDTH >= 128) {
-			this->extremes128 = UpgradeLevel<T64, T128>(this->extremes64, TypeInit<T64>(), TypeInit<T128>());
+		if (MAXWIDTH >= 128) {
+			extremes128 = UpgradeLevel<T64, T128>(extremes64, TypeInit<T64>(), TypeInit<T128>());
 			current_level = 128;
 		}
 	}
@@ -405,90 +321,66 @@ struct PacMinMaxIntState
 	// Get value at index j, cast to type T, from whatever level is current
 	template <typename T>
 	T GetValueAs(int j) const {
-		if constexpr (MAXWIDTH >= 128) {
-			if (current_level >= 128)
-				return static_cast<T>(this->extremes128[j]);
+		if (MAXWIDTH >= 128 && current_level >= 128) {
+			return static_cast<T>(extremes128[j]);
 		}
-		if constexpr (MAXWIDTH >= 64) {
-			if (current_level >= 64)
-				return static_cast<T>(this->extremes64[j]);
+		if (MAXWIDTH >= 64 && current_level >= 64) {
+			return static_cast<T>(extremes64[j]);
 		}
-		if constexpr (MAXWIDTH >= 32) {
-			if (current_level >= 32)
-				return static_cast<T>(this->extremes32[j]);
+		if (MAXWIDTH >= 32 && current_level >= 32) {
+			return static_cast<T>(extremes32[j]);
 		}
-		if constexpr (MAXWIDTH >= 16) {
-			if (current_level >= 16)
-				return static_cast<T>(this->extremes16[j]);
+		if (MAXWIDTH >= 16 && current_level >= 16) {
+			return static_cast<T>(extremes16[j]);
 		}
-		return static_cast<T>(this->extremes8[j]);
+		return static_cast<T>(extremes8[j]);
 	}
 
 	void GetTotalsAsDouble(double *dst) const {
-		// Use if-else chain with if constexpr to avoid referencing non-existent fields
-		if constexpr (MAXWIDTH >= 128) {
-			if (current_level == 128) {
-				for (int i = 0; i < 64; i++) {
-					if constexpr (SIGNED) {
-						dst[i] = Hugeint::Cast<double>(this->extremes128[i]);
-					} else {
-						dst[i] = Uhugeint::Cast<double>(this->extremes128[i]);
-					}
-				}
-				return;
+		if (MAXWIDTH >= 128 && current_level == 128) {
+			for (int i = 0; i < 64; i++) {
+				dst[i] = ToDouble(extremes128[i]);
 			}
+			return;
 		}
-		if constexpr (MAXWIDTH >= 64) {
-			if (current_level == 64) {
-				for (int i = 0; i < 64; i++) {
-					dst[i] = static_cast<double>(this->extremes64[i]);
-				}
-				return;
+		if (MAXWIDTH >= 64 && current_level == 64) {
+			for (int i = 0; i < 64; i++) {
+				dst[i] = ToDouble(extremes64[i]);
 			}
+			return;
 		}
-		if constexpr (MAXWIDTH >= 32) {
-			if (current_level == 32) {
-				ExtractSWAR<T32, 2>(this->extremes32, dst);
-				return;
-			}
+		if (MAXWIDTH >= 32 && current_level == 32) {
+			ExtractSWAR<T32, 2>(extremes32, dst);
+			return;
 		}
-		if constexpr (MAXWIDTH >= 16) {
-			if (current_level == 16) {
-				ExtractSWAR<T16, 4>(this->extremes16, dst);
-				return;
-			}
+		if (MAXWIDTH >= 16 && current_level == 16) {
+			ExtractSWAR<T16, 4>(extremes16, dst);
+			return;
 		}
 		if (current_level == 8) {
-			ExtractSWAR<T8, 8>(this->extremes8, dst);
+			ExtractSWAR<T8, 8>(extremes8, dst);
 			return;
 		}
 		// Not initialized - return init values
+		double init_val = ToDouble(TypeInit<TMAX>());
 		for (int i = 0; i < 64; i++) {
-			if constexpr (MAXWIDTH >= 128) {
-				if constexpr (SIGNED) {
-					dst[i] = Hugeint::Cast<double>(TypeInit<T128>());
-				} else {
-					dst[i] = Uhugeint::Cast<double>(TypeInit<T128>());
-				}
-			} else {
-				dst[i] = static_cast<double>(TypeInit<TMAX>());
-			}
+			dst[i] = init_val;
 		}
 	}
-
 #endif
 };
 
+// ============================================================================
 // Float state for min/max (floating point values)
+// ============================================================================
 // VALUE_TYPE: float or double (determines the return type)
 // MAXWIDTH: 32 for float-only, 64 for float+double cascading
 // Cascading: start with float if values fit in [-1000000, 1000000], upgrade to double otherwise
+//
+// Same approach as integer state: all pointers defined, ordered by width at end,
+// use offsetof() for smaller state_size allocation.
 template <bool IS_MAX, typename VALUE_TYPE = double, int MAXWIDTH = 64>
-struct PacMinMaxFloatState
-#ifndef PAC_MINMAX_NONCASCADING
-    : FloatExtremesLevel64<MAXWIDTH> // Inherit extremes pointers (only those needed for MAXWIDTH)
-#endif
-{
+struct PacMinMaxFloatState {
 	static constexpr float FLOAT_RANGE_MIN = -1000000.0f;
 	static constexpr float FLOAT_RANGE_MAX = 1000000.0f;
 
@@ -504,10 +396,10 @@ struct PacMinMaxFloatState
 	}
 
 	// ========== Common fields (defined once for both modes) ==========
-	VALUE_TYPE global_bound;
-	uint16_t update_count;
-	bool seen_null;
 	bool initialized;
+	bool seen_null;
+	uint16_t update_count;
+	VALUE_TYPE global_bound;
 
 #ifdef PAC_MINMAX_NONCASCADING
 	// ========== Non-cascading mode: single fixed-width array ==========
@@ -530,10 +422,13 @@ struct PacMinMaxFloatState
 	}
 #else
 	// ========== Cascading mode fields ==========
-	// extremesF/extremesD pointers are inherited from FloatExtremesLevel64 chain
-	// (only those needed for MAXWIDTH are actually present due to EBO)
+	// All pointers defined, ordered so unused ones are at the end
 	uint8_t current_level; // 32 for float, 64 for double
 	ArenaAllocator *allocator;
+
+	// Pointer fields ordered by width - unused ones at the end won't be allocated
+	float *extremes32;
+	double *extremes64;
 
 	// Allocate float level
 	inline float *AllocateFloatLevel() {
@@ -558,9 +453,9 @@ struct PacMinMaxFloatState
 	// Upgrade from float to double
 	inline double *UpgradeToDouble() {
 		double *dst = reinterpret_cast<double *>(allocator->Allocate(64 * sizeof(double)));
-		if (this->extremesF) {
+		if (extremes32) {
 			for (int i = 0; i < 64; i++) {
-				dst[i] = static_cast<double>(this->extremesF[i]);
+				dst[i] = static_cast<double>(extremes32[i]);
 			}
 		} else {
 			double init = TypeInit<double>();
@@ -575,13 +470,13 @@ struct PacMinMaxFloatState
 		allocator = &alloc;
 #ifdef PAC_MINMAX_NONLAZY
 		// Pre-allocate all levels that exist for this MAXWIDTH
-		this->extremesF = AllocateFloatLevel();
-		if constexpr (MAXWIDTH >= 64) {
-			this->extremesD = AllocateDoubleLevel();
+		extremes32 = AllocateFloatLevel();
+		if (MAXWIDTH >= 64) {
+			extremes64 = AllocateDoubleLevel();
 		}
 		current_level = MAXWIDTH;
 #else
-		this->extremesF = AllocateFloatLevel();
+		extremes32 = AllocateFloatLevel();
 		current_level = 32;
 #endif
 		update_count = 0;
@@ -590,25 +485,22 @@ struct PacMinMaxFloatState
 	}
 
 	void UpgradeToDoublePrecision() {
-		if constexpr (MAXWIDTH >= 64) {
-			this->extremesD = UpgradeToDouble();
+		if (MAXWIDTH >= 64) {
+			extremes64 = UpgradeToDouble();
 			current_level = 64;
 		}
 	}
 
 	void GetTotalsAsDouble(double *dst) const {
-		// Use if-else chain with if constexpr to avoid referencing non-existent fields
-		if constexpr (MAXWIDTH >= 64) {
-			if (current_level == 64) {
-				for (int i = 0; i < 64; i++) {
-					dst[i] = this->extremesD[i];
-				}
-				return;
+		if (MAXWIDTH >= 64 && current_level == 64) {
+			for (int i = 0; i < 64; i++) {
+				dst[i] = extremes64[i];
 			}
+			return;
 		}
 		if (current_level == 32) {
 			for (int i = 0; i < 64; i++) {
-				dst[i] = static_cast<double>(this->extremesF[i]);
+				dst[i] = static_cast<double>(extremes32[i]);
 			}
 			return;
 		}

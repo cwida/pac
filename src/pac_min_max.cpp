@@ -49,26 +49,18 @@ AUTOVECTORIZE static inline void PacMinMaxUpdateOne(PacMinMaxIntState<SIGNED, IS
 	if (!state.initialized) {
 		state.AllocateFirstLevel(allocator);
 	}
-	// Upgrade level if new value doesn't fit (use if constexpr to avoid referencing non-existent fields)
-	if constexpr (MAXWIDTH >= 16) {
-		if (!State::FitsIn8(value) && state.current_level == 8) {
-			state.UpgradeTo16();
-		}
+	// Upgrade level if new value doesn't fit
+	if (MAXWIDTH >= 16 && !State::FitsIn8(value) && state.current_level == 8) {
+		state.UpgradeTo16();
 	}
-	if constexpr (MAXWIDTH >= 32) {
-		if (!State::FitsIn16(value) && state.current_level == 16) {
-			state.UpgradeTo32();
-		}
+	if (MAXWIDTH >= 32 && !State::FitsIn16(value) && state.current_level == 16) {
+		state.UpgradeTo32();
 	}
-	if constexpr (MAXWIDTH >= 64) {
-		if (!State::FitsIn32(value) && state.current_level == 32) {
-			state.UpgradeTo64();
-		}
+	if (MAXWIDTH >= 64 && !State::FitsIn32(value) && state.current_level == 32) {
+		state.UpgradeTo64();
 	}
-	if constexpr (MAXWIDTH >= 128) {
-		if (!State::FitsIn64(value) && state.current_level == 64) {
-			state.UpgradeTo128();
-		}
+	if (MAXWIDTH >= 128 && !State::FitsIn64(value) && state.current_level == 64) {
+		state.UpgradeTo128();
 	}
 #ifndef PAC_MINMAX_NOBOUNDOPT
 	// Compare value against global_bound (stored as TMAX, upcast value for comparison)
@@ -76,37 +68,29 @@ AUTOVECTORIZE static inline void PacMinMaxUpdateOne(PacMinMaxIntState<SIGNED, IS
 		return; // early out
 	}
 #endif
-	// Update at current level (use if constexpr to avoid referencing non-existent fields)
+	// Update at current level
 	if (state.current_level == 8) {
 		UpdateExtremesSIMD<T8, int8_t, IS_MAX, 0x0101010101010101ULL, 8>(state.extremes8, key_hash,
 		                                                                 static_cast<T8>(value));
 		BOUND_RECOMPUTE(TMAX, T8, state.extremes8);
 	}
-	if constexpr (MAXWIDTH >= 16) {
-		if (state.current_level == 16) {
-			UpdateExtremesSIMD<T16, int16_t, IS_MAX, 0x0001000100010001ULL, 16>(state.extremes16, key_hash,
-			                                                                    static_cast<T16>(value));
-			BOUND_RECOMPUTE(TMAX, T16, state.extremes16);
-		}
+	if (MAXWIDTH >= 16 && state.current_level == 16) {
+		UpdateExtremesSIMD<T16, int16_t, IS_MAX, 0x0001000100010001ULL, 16>(state.extremes16, key_hash,
+		                                                                    static_cast<T16>(value));
+		BOUND_RECOMPUTE(TMAX, T16, state.extremes16);
 	}
-	if constexpr (MAXWIDTH >= 32) {
-		if (state.current_level == 32) {
-			UpdateExtremesSIMD<T32, int32_t, IS_MAX, 0x0000000100000001ULL, 32>(state.extremes32, key_hash,
-			                                                                    static_cast<T32>(value));
-			BOUND_RECOMPUTE(TMAX, T32, state.extremes32);
-		}
+	if (MAXWIDTH >= 32 && state.current_level == 32) {
+		UpdateExtremesSIMD<T32, int32_t, IS_MAX, 0x0000000100000001ULL, 32>(state.extremes32, key_hash,
+		                                                                    static_cast<T32>(value));
+		BOUND_RECOMPUTE(TMAX, T32, state.extremes32);
 	}
-	if constexpr (MAXWIDTH >= 64) {
-		if (state.current_level == 64) {
-			UpdateExtremes<T64, IS_MAX>(state.extremes64, key_hash, static_cast<T64>(value));
-			BOUND_RECOMPUTE(TMAX, T64, state.extremes64);
-		}
+	if (MAXWIDTH >= 64 && state.current_level == 64) {
+		UpdateExtremes<T64, IS_MAX>(state.extremes64, key_hash, static_cast<T64>(value));
+		BOUND_RECOMPUTE(TMAX, T64, state.extremes64);
 	}
-	if constexpr (MAXWIDTH >= 128) {
-		if (state.current_level == 128) {
-			UpdateExtremes<T128, IS_MAX>(state.extremes128, key_hash, static_cast<T128>(value));
-			BOUND_RECOMPUTE(TMAX, T128, state.extremes128);
-		}
+	if (MAXWIDTH >= 128 && state.current_level == 128) {
+		UpdateExtremes<T128, IS_MAX>(state.extremes128, key_hash, static_cast<T128>(value));
+		BOUND_RECOMPUTE(TMAX, T128, state.extremes128);
 	}
 #endif
 }
@@ -134,11 +118,9 @@ AUTOVECTORIZE static inline void PacMinMaxUpdateOneFloat(PacMinMaxFloatState<IS_
 	if (!state.initialized) {
 		state.AllocateFirstLevel(allocator);
 	}
-	// Upgrade to double precision if value doesn't fit in float (only if MAXWIDTH >= 64)
-	if constexpr (MAXWIDTH >= 64) {
-		if (!State::FitsInFloat(value) && state.current_level == 32) {
-			state.UpgradeToDoublePrecision();
-		}
+	// Upgrade to double precision if value doesn't fit in float
+	if (MAXWIDTH >= 64 && !State::FitsInFloat(value) && state.current_level == 32) {
+		state.UpgradeToDoublePrecision();
 	}
 #ifndef PAC_MINMAX_NOBOUNDOPT
 	// Compare against global_bound (stored as VALUE_TYPE, upcast value for comparison)
@@ -147,14 +129,12 @@ AUTOVECTORIZE static inline void PacMinMaxUpdateOneFloat(PacMinMaxFloatState<IS_
 	}
 #endif
 	if (state.current_level == 32) {
-		UpdateExtremes<float, IS_MAX>(state.extremesF, key_hash, static_cast<float>(value));
-		BOUND_RECOMPUTE(VALUE_TYPE, float, state.extremesF);
+		UpdateExtremes<float, IS_MAX>(state.extremes32, key_hash, static_cast<float>(value));
+		BOUND_RECOMPUTE(VALUE_TYPE, float, state.extremes32);
 	}
-	if constexpr (MAXWIDTH >= 64) {
-		if (state.current_level == 64) {
-			UpdateExtremes<double, IS_MAX>(state.extremesD, key_hash, static_cast<double>(value));
-			BOUND_RECOMPUTE(VALUE_TYPE, double, state.extremesD);
-		}
+	if (MAXWIDTH >= 64 && state.current_level == 64) {
+		UpdateExtremes<double, IS_MAX>(state.extremes64, key_hash, static_cast<double>(value));
+		BOUND_RECOMPUTE(VALUE_TYPE, double, state.extremes64);
 	}
 #endif
 }
@@ -321,12 +301,10 @@ AUTOVECTORIZE static void PacMinMaxCombineInt(Vector &src, Vector &dst, Aggregat
 			continue;
 		if (!d->initialized)
 			d->Initialize();
-		TMAX new_bound = d->extremes[0];
 		for (int j = 0; j < 64; j++) {
 			d->extremes[j] = PAC_BETTER(d->extremes[j], s->extremes[j]);
-			new_bound = PAC_WORSE(new_bound, d->extremes[j]);
 		}
-		d->global_bound = new_bound;
+		d->global_bound = ComputeGlobalBound<TMAX, TMAX, IS_MAX>(d->extremes);
 #else
 		if (!s->initialized) {
 			continue;
@@ -334,68 +312,50 @@ AUTOVECTORIZE static void PacMinMaxCombineInt(Vector &src, Vector &dst, Aggregat
 		if (!d->initialized) {
 			d->AllocateFirstLevel(aggr.allocator);
 		}
-		// Upgrade dst to match src level (use if constexpr for fields that may not exist)
-		if constexpr (MAXWIDTH >= 16) {
-			if (d->current_level == 8 && d->current_level < s->current_level) {
-				d->UpgradeTo16();
-			}
+		// Upgrade dst to match src level
+		if (MAXWIDTH >= 16 && d->current_level == 8 && d->current_level < s->current_level) {
+			d->UpgradeTo16();
 		}
-		if constexpr (MAXWIDTH >= 32) {
-			if (d->current_level == 16 && d->current_level < s->current_level) {
-				d->UpgradeTo32();
-			}
+		if (MAXWIDTH >= 32 && d->current_level == 16 && d->current_level < s->current_level) {
+			d->UpgradeTo32();
 		}
-		if constexpr (MAXWIDTH >= 64) {
-			if (d->current_level == 32 && d->current_level < s->current_level) {
-				d->UpgradeTo64();
-			}
+		if (MAXWIDTH >= 64 && d->current_level == 32 && d->current_level < s->current_level) {
+			d->UpgradeTo64();
 		}
-		if constexpr (MAXWIDTH >= 128) {
-			if (d->current_level == 64 && d->current_level < s->current_level) {
-				d->UpgradeTo128();
-			}
+		if (MAXWIDTH >= 128 && d->current_level == 64 && d->current_level < s->current_level) {
+			d->UpgradeTo128();
 		}
-		TMAX new_bound = State::template TypeInit<TMAX>();
 		// Combine at dst's current level, using GetValueAs to read source at appropriate level
 		if (d->current_level == 8) {
 			for (int j = 0; j < 64; j++) {
 				d->extremes8[j] = PAC_BETTER(d->extremes8[j], s->template GetValueAs<typename State::T8>(j));
-				new_bound = PAC_WORSE(new_bound, static_cast<TMAX>(d->extremes8[j]));
 			}
+			d->global_bound = ComputeGlobalBound<typename State::T8, TMAX, IS_MAX>(d->extremes8);
 		}
-		if constexpr (MAXWIDTH >= 16) {
-			if (d->current_level == 16) {
-				for (int j = 0; j < 64; j++) {
-					d->extremes16[j] = PAC_BETTER(d->extremes16[j], s->template GetValueAs<typename State::T16>(j));
-					new_bound = PAC_WORSE(new_bound, static_cast<TMAX>(d->extremes16[j]));
-				}
+		if (MAXWIDTH >= 16 && d->current_level == 16) {
+			for (int j = 0; j < 64; j++) {
+				d->extremes16[j] = PAC_BETTER(d->extremes16[j], s->template GetValueAs<typename State::T16>(j));
 			}
+			d->global_bound = ComputeGlobalBound<typename State::T16, TMAX, IS_MAX>(d->extremes16);
 		}
-		if constexpr (MAXWIDTH >= 32) {
-			if (d->current_level == 32) {
-				for (int j = 0; j < 64; j++) {
-					d->extremes32[j] = PAC_BETTER(d->extremes32[j], s->template GetValueAs<typename State::T32>(j));
-					new_bound = PAC_WORSE(new_bound, static_cast<TMAX>(d->extremes32[j]));
-				}
+		if (MAXWIDTH >= 32 && d->current_level == 32) {
+			for (int j = 0; j < 64; j++) {
+				d->extremes32[j] = PAC_BETTER(d->extremes32[j], s->template GetValueAs<typename State::T32>(j));
 			}
+			d->global_bound = ComputeGlobalBound<typename State::T32, TMAX, IS_MAX>(d->extremes32);
 		}
-		if constexpr (MAXWIDTH >= 64) {
-			if (d->current_level == 64) {
-				for (int j = 0; j < 64; j++) {
-					d->extremes64[j] = PAC_BETTER(d->extremes64[j], s->template GetValueAs<typename State::T64>(j));
-					new_bound = PAC_WORSE(new_bound, static_cast<TMAX>(d->extremes64[j]));
-				}
+		if (MAXWIDTH >= 64 && d->current_level == 64) {
+			for (int j = 0; j < 64; j++) {
+				d->extremes64[j] = PAC_BETTER(d->extremes64[j], s->template GetValueAs<typename State::T64>(j));
 			}
+			d->global_bound = ComputeGlobalBound<typename State::T64, TMAX, IS_MAX>(d->extremes64);
 		}
-		if constexpr (MAXWIDTH >= 128) {
-			if (d->current_level == 128) {
-				for (int j = 0; j < 64; j++) {
-					d->extremes128[j] = PAC_BETTER(d->extremes128[j], s->template GetValueAs<typename State::T128>(j));
-					new_bound = PAC_WORSE(new_bound, static_cast<TMAX>(d->extremes128[j]));
-				}
+		if (MAXWIDTH >= 128 && d->current_level == 128) {
+			for (int j = 0; j < 64; j++) {
+				d->extremes128[j] = PAC_BETTER(d->extremes128[j], s->template GetValueAs<typename State::T128>(j));
 			}
+			d->global_bound = ComputeGlobalBound<typename State::T128, TMAX, IS_MAX>(d->extremes128);
 		}
-		d->global_bound = new_bound;
 #endif
 	}
 }
@@ -420,12 +380,10 @@ AUTOVECTORIZE static void PacMinMaxCombineDouble(Vector &src, Vector &dst, Aggre
 			continue;
 		if (!d->initialized)
 			d->Initialize();
-		double new_bound = d->extremes[0];
 		for (int j = 0; j < 64; j++) {
 			d->extremes[j] = PAC_BETTER(d->extremes[j], s->extremes[j]);
-			new_bound = PAC_WORSE(new_bound, static_cast<double>(d->extremes[j]));
 		}
-		d->global_bound = new_bound;
+		d->global_bound = ComputeGlobalBound<double, double, IS_MAX>(d->extremes);
 #else
 		if (!s->initialized) {
 			continue;
@@ -433,32 +391,25 @@ AUTOVECTORIZE static void PacMinMaxCombineDouble(Vector &src, Vector &dst, Aggre
 		if (!d->initialized) {
 			d->AllocateFirstLevel(aggr.allocator);
 		}
-		// Upgrade dst to double if src is at double level (only if MAXWIDTH >= 64)
-		if constexpr (MAXWIDTH >= 64) {
-			if (d->current_level == 32 && s->current_level == 64) {
-				d->UpgradeToDoublePrecision();
-			}
+		// Upgrade dst to double if src is at double level
+		if (MAXWIDTH >= 64 && d->current_level == 32 && s->current_level == 64) {
+			d->UpgradeToDoublePrecision();
 		}
 		// Combine at float level
 		if (d->current_level == 32) {
-			float new_bound = d->extremesF[0];
 			for (int j = 0; j < 64; j++) {
-				d->extremesF[j] = PAC_IS_BETTER(s->extremesF[j], d->extremesF[j]) ? s->extremesF[j] : d->extremesF[j];
-				new_bound = PAC_WORSE(new_bound, d->extremesF[j]);
+				d->extremes32[j] =
+				    PAC_IS_BETTER(s->extremes32[j], d->extremes32[j]) ? s->extremes32[j] : d->extremes32[j];
 			}
-			d->global_bound = static_cast<double>(new_bound);
+			d->global_bound = static_cast<double>(ComputeGlobalBound<float, float, IS_MAX>(d->extremes32));
 		}
-		// Combine at double level (only if MAXWIDTH >= 64)
-		if constexpr (MAXWIDTH >= 64) {
-			if (d->current_level == 64) {
-				double new_bound = d->extremesD[0];
-				for (int j = 0; j < 64; j++) {
-					double sv = (s->current_level >= 64) ? s->extremesD[j] : static_cast<double>(s->extremesF[j]);
-					d->extremesD[j] = PAC_BETTER(d->extremesD[j], sv);
-					new_bound = PAC_WORSE(new_bound, d->extremesD[j]);
-				}
-				d->global_bound = new_bound;
+		// Combine at double level
+		if (MAXWIDTH >= 64 && d->current_level == 64) {
+			for (int j = 0; j < 64; j++) {
+				double sv = (s->current_level >= 64) ? s->extremes64[j] : static_cast<double>(s->extremes32[j]);
+				d->extremes64[j] = PAC_BETTER(d->extremes64[j], sv);
 			}
+			d->global_bound = ComputeGlobalBound<double, double, IS_MAX>(d->extremes64);
 		}
 #endif
 	}
@@ -495,22 +446,57 @@ static void PacMinMaxFinalize(Vector &states, AggregateInputData &input, Vector 
 
 template <bool SIGNED, bool IS_MAX, int MAXWIDTH = 64>
 static idx_t PacMinMaxIntStateSize(const AggregateFunction &) {
-	return sizeof(PacMinMaxIntState<SIGNED, IS_MAX, MAXWIDTH>);
+	using State = PacMinMaxIntState<SIGNED, IS_MAX, MAXWIDTH>;
+#ifdef PAC_MINMAX_NONCASCADING
+	return sizeof(State);
+#else
+	// Use offsetof to avoid allocating unused pointers
+	// Pointers are ordered: extremes8, extremes16, extremes32, extremes64, extremes128
+	if (MAXWIDTH >= 128) {
+		return sizeof(State);
+	} else if (MAXWIDTH >= 64) {
+		return offsetof(State, extremes128);
+	} else if (MAXWIDTH >= 32) {
+		return offsetof(State, extremes64);
+	} else if (MAXWIDTH >= 16) {
+		return offsetof(State, extremes32);
+	} else {
+		return offsetof(State, extremes16);
+	}
+#endif
 }
 
 template <bool SIGNED, bool IS_MAX, int MAXWIDTH = 64>
-static void PacMinMaxIntInitialize(const AggregateFunction &, data_ptr_t p) {
-	memset(p, 0, sizeof(PacMinMaxIntState<SIGNED, IS_MAX, MAXWIDTH>));
+static void PacMinMaxIntInitialize(const AggregateFunction &func, data_ptr_t p) {
+	memset(p, 0, PacMinMaxIntStateSize<SIGNED, IS_MAX, MAXWIDTH>(func));
+}
+
+template <bool IS_MAX, int MAXWIDTH = 64>
+static idx_t PacMinMaxFloatStateSize(const AggregateFunction &) {
+	using State = PacMinMaxFloatState<IS_MAX, double, MAXWIDTH>;
+#ifdef PAC_MINMAX_NONCASCADING
+	return sizeof(State);
+#else
+	// Use offsetof to avoid allocating unused pointers
+	// Pointers are ordered: extremes32, extremes64
+	if (MAXWIDTH >= 64) {
+		return sizeof(State);
+	} else {
+		// MAXWIDTH=32 (float-only): don't need extremes64
+		return offsetof(State, extremes64);
+	}
+#endif
+}
+
+// Backwards-compatible alias
+template <bool IS_MAX>
+static idx_t PacMinMaxDoubleStateSize(const AggregateFunction &func) {
+	return PacMinMaxFloatStateSize<IS_MAX, 64>(func);
 }
 
 template <bool IS_MAX>
-static idx_t PacMinMaxDoubleStateSize(const AggregateFunction &) {
-	return sizeof(PacMinMaxDoubleState<IS_MAX>);
-}
-
-template <bool IS_MAX>
-static void PacMinMaxDoubleInitialize(const AggregateFunction &, data_ptr_t p) {
-	memset(p, 0, sizeof(PacMinMaxDoubleState<IS_MAX>));
+static void PacMinMaxDoubleInitialize(const AggregateFunction &func, data_ptr_t p) {
+	memset(p, 0, PacMinMaxDoubleStateSize<IS_MAX>(func));
 }
 
 // ============================================================================
