@@ -208,7 +208,7 @@ SELECT pac_max(hash('key' || i::varchar), (i * 1000000000)::bigint) FROM range(1
 query I
 SELECT pac_min(hash('key' || i::varchar), (i * 1000000000)::bigint) FROM range(1, 100) t(i);
 ----
-254
+3000973468
 
 # Test cascading - values that fit in INT8
 query I
@@ -249,3 +249,187 @@ query R
 SELECT round(pac_min(hash('key' || i::varchar), (i * 2000000.0)::double), 0) FROM range(1, 100) t(i);
 ----
 6001947.0
+
+# =============================================================================
+# HUGEINT tests
+# =============================================================================
+
+# Test pac_max with HUGEINT
+query I
+SELECT pac_max(hash('key' || i::varchar), i::hugeint) FROM range(1, 100) t(i);
+----
+193
+
+# Test pac_min with HUGEINT
+query I
+SELECT pac_min(hash('key' || i::varchar), i::hugeint) FROM range(1, 100) t(i);
+----
+3
+
+# Test pac_max with large HUGEINT values (multiplied by large factor)
+query I
+SELECT pac_max(hash('key' || i::varchar), (i::hugeint * 10000000000000::hugeint)) FROM range(1, 100) t(i);
+----
+1930012382948293
+
+# Test pac_min with large HUGEINT values
+query I
+SELECT pac_min(hash('key' || i::varchar), (i::hugeint * 10000000000000::hugeint)) FROM range(1, 100) t(i);
+----
+30009734681895
+
+# Test pac_max with negative HUGEINT values
+query I
+SELECT pac_max(hash('key' || i::varchar), i::hugeint) FROM range(-50, 50) t(i);
+----
+93
+
+# Test pac_min with negative HUGEINT values
+query I
+SELECT pac_min(hash('key' || i::varchar), i::hugeint) FROM range(-50, 50) t(i);
+----
+-97
+
+# =============================================================================
+# UHUGEINT tests
+# =============================================================================
+
+# Test pac_max with UHUGEINT
+query I
+SELECT pac_max(hash('key' || i::varchar), i::uhugeint) FROM range(1, 100) t(i);
+----
+193
+
+# Test pac_min with UHUGEINT
+query I
+SELECT pac_min(hash('key' || i::varchar), i::uhugeint) FROM range(1, 100) t(i);
+----
+3
+
+# Test pac_max with large UHUGEINT values
+query I
+SELECT pac_max(hash('key' || i::varchar), (i::uhugeint * 10000000000000::uhugeint)) FROM range(1, 100) t(i);
+----
+1930012382948293
+
+# Test pac_min with large UHUGEINT values
+query I
+SELECT pac_min(hash('key' || i::varchar), (i::uhugeint * 10000000000000::uhugeint)) FROM range(1, 100) t(i);
+----
+30009734681895
+
+# =============================================================================
+# DATE tests
+# =============================================================================
+
+# Test pac_max with DATE
+query I
+SELECT pac_max(hash('key' || i::varchar), ('2020-01-01'::date + i::integer)::date) FROM range(1, 100) t(i);
+----
+2070-07-12
+
+# Test pac_min with DATE
+query I
+SELECT pac_min(hash('key' || i::varchar), ('2020-01-01'::date + i::integer)::date) FROM range(1, 100) t(i);
+----
+2070-01-03
+
+# =============================================================================
+# TIME tests
+# =============================================================================
+
+# Test pac_max with TIME
+query I
+SELECT pac_max(hash('key' || i::varchar), ('00:00:00'::time + (i * interval '1 minute'))::time) FROM range(1, 100) t(i);
+----
+03:13:00.074297
+
+# Test pac_min with TIME
+query I
+SELECT pac_min(hash('key' || i::varchar), ('00:00:00'::time + (i * interval '1 minute'))::time) FROM range(1, 100) t(i);
+----
+00:03:00.058408
+
+# =============================================================================
+# TIMESTAMP tests
+# =============================================================================
+
+# Test pac_max with TIMESTAMP
+query I
+SELECT pac_max(hash('key' || i::varchar), ('2020-01-01 00:00:00'::timestamp + (i * interval '1 day'))::timestamp) FROM range(1, 100) t(i);
+----
+2070-07-12 00:01:46.988673
+
+# Test pac_min with TIMESTAMP
+query I
+SELECT pac_min(hash('key' || i::varchar), ('2020-01-01 00:00:00'::timestamp + (i * interval '1 day'))::timestamp) FROM range(1, 100) t(i);
+----
+2070-01-03 00:01:24.107651
+
+# =============================================================================
+# TIMESTAMP WITH TIME ZONE tests
+# =============================================================================
+
+# Test pac_max with TIMESTAMPTZ
+query I
+SELECT pac_max(hash('key' || i::varchar), (('2020-01-01 00:00:00'::timestamp + (i * interval '1 day'))::timestamptz)) FROM range(1, 100) t(i);
+----
+2070-07-12 00:01:46.988673+00
+
+# Test pac_min with TIMESTAMPTZ
+query I
+SELECT pac_min(hash('key' || i::varchar), (('2020-01-01 00:00:00'::timestamp + (i * interval '1 day'))::timestamptz)) FROM range(1, 100) t(i);
+----
+2070-01-03 00:01:24.107651+00
+
+# =============================================================================
+# DECIMAL tests
+# =============================================================================
+
+# Test pac_max with DECIMAL(4,2) - maps to INT16
+query I
+SELECT pac_max(hash('key' || i::varchar), (i * 0.5)::decimal(4,2)) FROM range(1, 100) t(i);
+----
+96.50
+
+# Test pac_min with DECIMAL(4,2)
+query I
+SELECT pac_min(hash('key' || i::varchar), (i * 0.5)::decimal(4,2)) FROM range(1, 100) t(i);
+----
+1.50
+
+# Test pac_max with DECIMAL(9,2) - maps to INT32
+query I
+SELECT pac_max(hash('key' || i::varchar), (i * 1.5)::decimal(9,2)) FROM range(1, 100) t(i);
+----
+289.50
+
+# Test pac_min with DECIMAL(9,2)
+query I
+SELECT pac_min(hash('key' || i::varchar), (i * 1.5)::decimal(9,2)) FROM range(1, 100) t(i);
+----
+4.50
+
+# Test pac_max with DECIMAL(18,2) - maps to INT64
+query I
+SELECT pac_max(hash('key' || i::varchar), (i * 1.5)::decimal(18,2)) FROM range(1, 100) t(i);
+----
+289.50
+
+# Test pac_min with DECIMAL(18,2)
+query I
+SELECT pac_min(hash('key' || i::varchar), (i * 1.5)::decimal(18,2)) FROM range(1, 100) t(i);
+----
+4.50
+
+# Test pac_max with DECIMAL(38,2) - maps to HUGEINT
+query I
+SELECT pac_max(hash('key' || i::varchar), (i * 1.5)::decimal(38,2)) FROM range(1, 100) t(i);
+----
+289.50
+
+# Test pac_min with DECIMAL(38,2)
+query I
+SELECT pac_min(hash('key' || i::varchar), (i * 1.5)::decimal(38,2)) FROM range(1, 100) t(i);
+----
+4.50
