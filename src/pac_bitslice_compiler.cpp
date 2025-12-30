@@ -506,6 +506,10 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 		pac_function_name = "pac_count";
 	} else if (function_name == "avg") {
 		pac_function_name = "pac_avg";
+	} else if (function_name == "min") {
+		pac_function_name = "pac_min";
+	} else if (function_name == "max") {
+		pac_function_name = "pac_max";
 	} else {
 		throw NotImplementedException("PAC compiler: unsupported aggregate function " + function_name);
 	}
@@ -632,6 +636,10 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 		pac_function_name = "pac_count";
 	} else if (function_name == "avg") {
 		pac_function_name = "pac_avg";
+	} else if (function_name == "min") {
+		pac_function_name = "pac_min";
+	} else if (function_name == "max") {
+		pac_function_name = "pac_max";
 	} else {
 		throw NotImplementedException("PAC compiler: unsupported aggregate function " + function_name);
 	}

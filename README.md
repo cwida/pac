@@ -1,10 +1,8 @@
 # PAC — DuckDB Privacy-Aware Aggregation Extension
 
-PAC (Privacy-Aware-Computed) is a small DuckDB optimizer extension that enforces a set of privacy rules on aggregation queries over designated tables ("PAC tables"). If a query against a PAC table does not satisfy the rules the extension rejects it with a clear ParserException message describing the reason.
+PAC (Privacy-Aware-Computed) is a small DuckDB extension that enforces a set of privacy rules on aggregation queries over designated tables ("PAC tables"). If a query against a PAC table does not satisfy the rules the extension rejects it with a clear ParserException message describing the reason.
 
-This README focuses on practical developer workflows: building, running, configuring, and testing the extension.
-
-What PAC enforces
+What PAC enforces:
 - The query must scan at least one table listed in the PAC tables file.
 - Allowed aggregates: SUM, COUNT, AVG, MIN, MAX. Other aggregates (custom aggregates) are disallowed.
 - Nested aggregates (an aggregate inside another aggregate) are disallowed.
@@ -14,9 +12,8 @@ What PAC enforces
 - ORDER BY and LIMIT on the final query are supported by the compiler and preserved when producing the compiled CTE form; sorting/limiting that depends on non-supported constructs may still be rejected.
 
 When a query is rejected the optimizer throws a ParserException with one of the explanatory messages, for example:
-- "Query does not scan any PAC table!"
+- "Query returns data from a PAC table!"
 - "Query does not contain any allowed aggregation (sum, count, avg, min, max)!"
-- "Query contains disallowed aggregates (only sum, count, avg, min, max allowed; no nested aggregates)!"
 - "Query contains window functions, which are not allowed in PAC-compatible queries!"
 - "Query contains DISTINCT, which is not allowed in PAC-compatible queries!"
 - "Query contains disallowed joins (only INNER JOIN allowed in PAC-compatible queries)!"

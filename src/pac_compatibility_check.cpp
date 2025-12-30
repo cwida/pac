@@ -34,7 +34,7 @@ static bool ContainsCrossJoinWithGenerateSeries(const LogicalOperator &op) {
 }
 
 static bool IsAllowedAggregate(const std::string &func) {
-	static const std::unordered_set<std::string> allowed = {"sum", "sum_no_overflow", "count", "count_star", "avg"};
+	static const std::unordered_set<std::string> allowed = {"sum", "sum_no_overflow", "count", "count_star", "avg", "min", "max"};
 	std::string lower_func = func;
 	std::transform(lower_func.begin(), lower_func.end(), lower_func.begin(), ::tolower);
 	return allowed.count(lower_func) > 0;
@@ -336,7 +336,7 @@ PACCompatibilityResult PACRewriteQueryCheck(LogicalOperator &plan, ClientContext
 		throw InvalidInputException("PAC rewrite: window functions are not supported for PAC compilation");
 	}
 	if (!ContainsAggregation(plan)) {
-		throw InvalidInputException("Query does not contain any allowed aggregation (sum, count, avg)!");
+		throw InvalidInputException("Query does not contain any allowed aggregation (sum, count, avg, min, max)!");
 	}
 	if (ContainsDistinct(plan)) {
 		throw InvalidInputException("PAC rewrite: DISTINCT is not supported for PAC compilation");

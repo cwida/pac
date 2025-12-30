@@ -84,17 +84,17 @@ SELECT * FROM t2;
 1	100
 2	200
 
-# Not PAC-compatible: MIN (no aggregate)
+# Not PAC-compatible: no aggregate
 statement error
 SELECT a FROM t1;
 ----
-Query does not contain any allowed aggregation (sum, count, avg)!
+Query does not contain any allowed aggregation (sum, count, avg, min, max)!
 
-# Not PAC-compatible: MIN (forbidden aggregate)
-statement error
-SELECT MIN(b) FROM t1;
+# PAC-compatible: MIN
+query I
+SELECT MIN(a) FROM t1;
 ----
-Query does not contain any allowed aggregation (sum, count, avg)!
+1
 
 # Not PAC-compatible: OUTER JOIN
 statement error
