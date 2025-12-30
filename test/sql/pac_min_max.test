@@ -16,73 +16,73 @@ SET pac_seed = 42;
 query I
 SELECT pac_max(hash('key' || i::varchar), i::tinyint) FROM range(1, 50) t(i);
 ----
-93
+46
 
 # Test pac_max with SMALLINT (INT16)
 query I
 SELECT pac_max(hash('key' || i::varchar), i::smallint) FROM range(1, 100) t(i);
 ----
-193
+96
 
 # Test pac_max with INTEGER (INT32)
 query I
 SELECT pac_max(hash('key' || i::varchar), i::integer) FROM range(1, 100) t(i);
 ----
-193
+96
 
 # Test pac_max with BIGINT (INT64)
 query I
 SELECT pac_max(hash('key' || i::varchar), i::bigint) FROM range(1, 100) t(i);
 ----
-193
+96
 
 # Test pac_max with UTINYINT (UINT8)
 query I
 SELECT pac_max(hash('key' || i::varchar), i::utinyint) FROM range(1, 50) t(i);
 ----
-93
+46
 
 # Test pac_max with USMALLINT (UINT16)
 query I
 SELECT pac_max(hash('key' || i::varchar), i::usmallint) FROM range(1, 100) t(i);
 ----
-193
+96
 
 # Test pac_max with UINTEGER (UINT32)
 query I
 SELECT pac_max(hash('key' || i::varchar), i::uinteger) FROM range(1, 100) t(i);
 ----
-193
+96
 
 # Test pac_max with UBIGINT (UINT64)
 query I
 SELECT pac_max(hash('key' || i::varchar), i::ubigint) FROM range(1, 100) t(i);
 ----
-193
+96
 
 # Test pac_max with FLOAT
 query R
 SELECT round(pac_max(hash('key' || i::varchar), i::float), 1) FROM range(1, 100) t(i);
 ----
-193.0
+96.5
 
 # Test pac_max with DOUBLE
 query R
 SELECT round(pac_max(hash('key' || i::varchar), i::double), 1) FROM range(1, 100) t(i);
 ----
-193.0
+96.5
 
 # Test pac_max with negative values (signed types)
 query I
 SELECT pac_max(hash('key' || i::varchar), i::integer) FROM range(-50, 50) t(i);
 ----
-93
+46
 
 # Test pac_max with mi parameter
 query I
 SELECT pac_max(hash('key' || i::varchar), i::integer, 64.0) FROM range(1, 100) t(i);
 ----
-193
+96
 
 # =============================================================================
 # pac_min tests
@@ -92,73 +92,73 @@ SELECT pac_max(hash('key' || i::varchar), i::integer, 64.0) FROM range(1, 100) t
 query I
 SELECT pac_min(hash('key' || i::varchar), i::tinyint) FROM range(1, 50) t(i);
 ----
-3
+1
 
 # Test pac_min with SMALLINT (INT16)
 query I
 SELECT pac_min(hash('key' || i::varchar), i::smallint) FROM range(1, 100) t(i);
 ----
-3
+1
 
 # Test pac_min with INTEGER (INT32)
 query I
 SELECT pac_min(hash('key' || i::varchar), i::integer) FROM range(1, 100) t(i);
 ----
-3
+1
 
 # Test pac_min with BIGINT (INT64)
 query I
 SELECT pac_min(hash('key' || i::varchar), i::bigint) FROM range(1, 100) t(i);
 ----
-3
+1
 
 # Test pac_min with UTINYINT (UINT8)
 query I
 SELECT pac_min(hash('key' || i::varchar), i::utinyint) FROM range(1, 50) t(i);
 ----
-3
+1
 
 # Test pac_min with USMALLINT (UINT16)
 query I
 SELECT pac_min(hash('key' || i::varchar), i::usmallint) FROM range(1, 100) t(i);
 ----
-3
+1
 
 # Test pac_min with UINTEGER (UINT32)
 query I
 SELECT pac_min(hash('key' || i::varchar), i::uinteger) FROM range(1, 100) t(i);
 ----
-3
+1
 
 # Test pac_min with UBIGINT (UINT64)
 query I
 SELECT pac_min(hash('key' || i::varchar), i::ubigint) FROM range(1, 100) t(i);
 ----
-3
+1
 
 # Test pac_min with FLOAT
 query R
 SELECT round(pac_min(hash('key' || i::varchar), i::float), 1) FROM range(1, 100) t(i);
 ----
-3.0
+1.5
 
 # Test pac_min with DOUBLE
 query R
 SELECT round(pac_min(hash('key' || i::varchar), i::double), 1) FROM range(1, 100) t(i);
 ----
-3.0
+1.5
 
 # Test pac_min with negative values (signed types)
 query I
 SELECT pac_min(hash('key' || i::varchar), i::integer) FROM range(-50, 50) t(i);
 ----
--97
+-48
 
 # Test pac_min with mi parameter
 query I
 SELECT pac_min(hash('key' || i::varchar), i::integer, 64.0) FROM range(1, 100) t(i);
 ----
-3
+1
 
 # =============================================================================
 # GROUP BY tests
@@ -170,9 +170,9 @@ SELECT i % 3 as grp, pac_max(hash('key' || i::varchar), i::integer)
 FROM range(1, 100) t(i)
 GROUP BY grp;
 ----
-0	186
-1	188
-2	193
+0	93
+1	94
+2	96
 
 # Test pac_min with GROUP BY
 query II rowsort
@@ -180,9 +180,9 @@ SELECT i % 3 as grp, pac_min(hash('key' || i::varchar), i::integer)
 FROM range(1, 100) t(i)
 GROUP BY grp;
 ----
-0	6
-1	5
-2	19
+0	3
+1	2
+2	9
 
 # =============================================================================
 # Edge cases
@@ -192,63 +192,63 @@ GROUP BY grp;
 query I
 SELECT pac_max(hash('single'), 42::integer);
 ----
--255
+-127
 
 query I
 SELECT pac_min(hash('single'), 42::integer);
 ----
-254
+127
 
 # Test with large values (BIGINT)
 query I
 SELECT pac_max(hash('key' || i::varchar), (i * 1000000000)::bigint) FROM range(1, 100) t(i);
 ----
-193001238294
+96500619147
 
 query I
 SELECT pac_min(hash('key' || i::varchar), (i * 1000000000)::bigint) FROM range(1, 100) t(i);
 ----
-3000973468
+1500486734
 
 # Test cascading - values that fit in INT8
 query I
 SELECT pac_max(hash('key' || i::varchar), i::integer) FROM range(1, 10) t(i);
 ----
-17
+8
 
 # Test cascading - values that exceed INT8 but fit in INT16
 query I
 SELECT pac_max(hash('key' || i::varchar), (i * 100)::integer) FROM range(1, 10) t(i);
 ----
-1700
+850
 
 # Test cascading - values that exceed INT16 but fit in INT32
 query I
 SELECT pac_max(hash('key' || i::varchar), (i * 100000)::integer) FROM range(1, 10) t(i);
 ----
-1700076
+850038
 
 # Test float cascading - values within [-1000000, 1000000] (stays at float level)
 query R
 SELECT round(pac_max(hash('key' || i::varchar), (i * 100.0)::double), 1) FROM range(1, 100) t(i);
 ----
-19300.1
+9650.1
 
 query R
 SELECT round(pac_min(hash('key' || i::varchar), (i * 100.0)::double), 1) FROM range(1, 100) t(i);
 ----
-300.1
+150.0
 
 # Test double cascading - values outside [-1000000, 1000000] (upgrades to double)
 query R
 SELECT round(pac_max(hash('key' || i::varchar), (i * 2000000.0)::double), 0) FROM range(1, 100) t(i);
 ----
-386002477.0
+193001238.0
 
 query R
 SELECT round(pac_min(hash('key' || i::varchar), (i * 2000000.0)::double), 0) FROM range(1, 100) t(i);
 ----
-6001947.0
+3000973.0
 
 # =============================================================================
 # HUGEINT tests
@@ -258,37 +258,37 @@ SELECT round(pac_min(hash('key' || i::varchar), (i * 2000000.0)::double), 0) FRO
 query I
 SELECT pac_max(hash('key' || i::varchar), i::hugeint) FROM range(1, 100) t(i);
 ----
-193
+96
 
 # Test pac_min with HUGEINT
 query I
 SELECT pac_min(hash('key' || i::varchar), i::hugeint) FROM range(1, 100) t(i);
 ----
-3
+1
 
 # Test pac_max with large HUGEINT values (multiplied by large factor)
 query I
 SELECT pac_max(hash('key' || i::varchar), (i::hugeint * 10000000000000::hugeint)) FROM range(1, 100) t(i);
 ----
-1930012382948293
+965006191474146
 
 # Test pac_min with large HUGEINT values
 query I
 SELECT pac_min(hash('key' || i::varchar), (i::hugeint * 10000000000000::hugeint)) FROM range(1, 100) t(i);
 ----
-30009734681895
+15004867340947
 
 # Test pac_max with negative HUGEINT values
 query I
 SELECT pac_max(hash('key' || i::varchar), i::hugeint) FROM range(-50, 50) t(i);
 ----
-93
+46
 
 # Test pac_min with negative HUGEINT values
 query I
 SELECT pac_min(hash('key' || i::varchar), i::hugeint) FROM range(-50, 50) t(i);
 ----
--97
+-48
 
 # =============================================================================
 # UHUGEINT tests
@@ -298,25 +298,25 @@ SELECT pac_min(hash('key' || i::varchar), i::hugeint) FROM range(-50, 50) t(i);
 query I
 SELECT pac_max(hash('key' || i::varchar), i::uhugeint) FROM range(1, 100) t(i);
 ----
-193
+96
 
 # Test pac_min with UHUGEINT
 query I
 SELECT pac_min(hash('key' || i::varchar), i::uhugeint) FROM range(1, 100) t(i);
 ----
-3
+1
 
 # Test pac_max with large UHUGEINT values
 query I
 SELECT pac_max(hash('key' || i::varchar), (i::uhugeint * 10000000000000::uhugeint)) FROM range(1, 100) t(i);
 ----
-1930012382948293
+965006191474146
 
 # Test pac_min with large UHUGEINT values
 query I
 SELECT pac_min(hash('key' || i::varchar), (i::uhugeint * 10000000000000::uhugeint)) FROM range(1, 100) t(i);
 ----
-30009734681895
+15004867340947
 
 # =============================================================================
 # DATE tests
@@ -326,13 +326,13 @@ SELECT pac_min(hash('key' || i::varchar), (i::uhugeint * 10000000000000::uhugein
 query I
 SELECT pac_max(hash('key' || i::varchar), ('2020-01-01'::date + i::integer)::date) FROM range(1, 100) t(i);
 ----
-2070-07-12
+2020-04-06
 
 # Test pac_min with DATE
 query I
 SELECT pac_min(hash('key' || i::varchar), ('2020-01-01'::date + i::integer)::date) FROM range(1, 100) t(i);
 ----
-2070-01-03
+2020-01-02
 
 # =============================================================================
 # TIME tests
@@ -342,13 +342,13 @@ SELECT pac_min(hash('key' || i::varchar), ('2020-01-01'::date + i::integer)::dat
 query I
 SELECT pac_max(hash('key' || i::varchar), ('00:00:00'::time + (i * interval '1 minute'))::time) FROM range(1, 100) t(i);
 ----
-03:13:00.074297
+01:36:30.037148
 
 # Test pac_min with TIME
 query I
 SELECT pac_min(hash('key' || i::varchar), ('00:00:00'::time + (i * interval '1 minute'))::time) FROM range(1, 100) t(i);
 ----
-00:03:00.058408
+00:01:30.029204
 
 # =============================================================================
 # TIMESTAMP tests
@@ -358,13 +358,13 @@ SELECT pac_min(hash('key' || i::varchar), ('00:00:00'::time + (i * interval '1 m
 query I
 SELECT pac_max(hash('key' || i::varchar), ('2020-01-01 00:00:00'::timestamp + (i * interval '1 day'))::timestamp) FROM range(1, 100) t(i);
 ----
-2070-07-12 00:01:46.988673
+2020-04-06 12:00:53.494336
 
 # Test pac_min with TIMESTAMP
 query I
 SELECT pac_min(hash('key' || i::varchar), ('2020-01-01 00:00:00'::timestamp + (i * interval '1 day'))::timestamp) FROM range(1, 100) t(i);
 ----
-2070-01-03 00:01:24.107651
+2020-01-02 12:00:42.053825
 
 # =============================================================================
 # TIMESTAMP WITH TIME ZONE tests
@@ -374,13 +374,13 @@ SELECT pac_min(hash('key' || i::varchar), ('2020-01-01 00:00:00'::timestamp + (i
 query I
 SELECT pac_max(hash('key' || i::varchar), (('2020-01-01 00:00:00'::timestamp + (i * interval '1 day'))::timestamptz)) FROM range(1, 100) t(i);
 ----
-2070-07-12 00:01:46.988673+00
+2020-04-06 12:00:53.494336+00
 
 # Test pac_min with TIMESTAMPTZ
 query I
 SELECT pac_min(hash('key' || i::varchar), (('2020-01-01 00:00:00'::timestamp + (i * interval '1 day'))::timestamptz)) FROM range(1, 100) t(i);
 ----
-2070-01-03 00:01:24.107651+00
+2020-01-02 12:00:42.053825+00
 
 # =============================================================================
 # DECIMAL tests
@@ -390,46 +390,46 @@ SELECT pac_min(hash('key' || i::varchar), (('2020-01-01 00:00:00'::timestamp + (
 query I
 SELECT pac_max(hash('key' || i::varchar), (i * 0.5)::decimal(4,2)) FROM range(1, 100) t(i);
 ----
-96.50
+48.25
 
 # Test pac_min with DECIMAL(4,2)
 query I
 SELECT pac_min(hash('key' || i::varchar), (i * 0.5)::decimal(4,2)) FROM range(1, 100) t(i);
 ----
-1.50
+0.75
 
 # Test pac_max with DECIMAL(9,2) - maps to INT32
 query I
 SELECT pac_max(hash('key' || i::varchar), (i * 1.5)::decimal(9,2)) FROM range(1, 100) t(i);
 ----
-289.50
+144.75
 
 # Test pac_min with DECIMAL(9,2)
 query I
 SELECT pac_min(hash('key' || i::varchar), (i * 1.5)::decimal(9,2)) FROM range(1, 100) t(i);
 ----
-4.50
+2.25
 
 # Test pac_max with DECIMAL(18,2) - maps to INT64
 query I
 SELECT pac_max(hash('key' || i::varchar), (i * 1.5)::decimal(18,2)) FROM range(1, 100) t(i);
 ----
-289.50
+144.75
 
 # Test pac_min with DECIMAL(18,2)
 query I
 SELECT pac_min(hash('key' || i::varchar), (i * 1.5)::decimal(18,2)) FROM range(1, 100) t(i);
 ----
-4.50
+2.25
 
 # Test pac_max with DECIMAL(38,2) - maps to HUGEINT
 query I
 SELECT pac_max(hash('key' || i::varchar), (i * 1.5)::decimal(38,2)) FROM range(1, 100) t(i);
 ----
-289.50
+144.75
 
 # Test pac_min with DECIMAL(38,2)
 query I
 SELECT pac_min(hash('key' || i::varchar), (i * 1.5)::decimal(38,2)) FROM range(1, 100) t(i);
 ----
-4.50
+2.25

@@ -23,7 +23,12 @@ void RegisterPacMaxFunctions(ExtensionLoader &loader);
 // Optimization: keep a global bound (min of all maxes, or max of all mins)
 // to skip processing values that can't affect any extreme.
 //
-// Cascading: start with smallest integer type, upgrade when value doesn't fit.
+// Cascading: be prepared to keep states at different granularities:
+//            int: 8,16,32,64,128 (but never bigger than the input type)
+//            floating-point: float,double (but in case of float, just float)
+// then, start keeping Min/Max in the smallest type, upgrade when value doesn't fit.
+// we lazily allocate the various arrays of a certain width, so if we do not need
+// huge aggregates, then we never allocate them (memory saving).
 //
 // some #defines to demonstrate the effects of our optimizations:
 // Define PAC_MINMAX_NONCASCADING to use fixed-width arrays (input value type).
@@ -99,8 +104,7 @@ struct SWARTraits<16> { // hugeint - linear layout
 	static constexpr int ELEM_PER_U64 = 1;
 };
 
-// Unified SIMD update using union for bitwise ops (works for all types)
-// SWAR layout for sizeof(T) <= 4, linear for sizeof(T) == 8
+// Unified SIMD Min/Max update kernel that works for all integers <=64 and double,float even
 template <typename T, bool IS_MAX, int SIZE = sizeof(T)>
 struct UpdateExtremesKernel {
 	using Traits = SWARTraits<SIZE>;
@@ -109,18 +113,18 @@ struct UpdateExtremesKernel {
 
 	AUTOVECTORIZE static inline void update(T *__restrict__ result, uint64_t key_hash, T value) {
 		union {
-			uint64_t u64[Traits::SHIFTS];
-			BitsT bits[64];
+			uint64_t u64[Traits::SHIFTS]; // keyhash as uint64
+			BitsT bits[64];               // signed int type as wide as T (we want 0x00 - 1 to become 0xFF)
 		} buf;
 		for (int i = 0; i < Traits::SHIFTS; i++) {
-			buf.u64[i] = (key_hash >> i) & Traits::MASK;
+			buf.u64[i] = (key_hash >> i) & Traits::MASK; // process multiple T in one uint64 (SWAR)
 		}
 		for (int i = 0; i < 64; i++) {
-			UintT mask_u = static_cast<UintT>(-buf.bits[i]);
-			T extreme = PAC_BETTER(value, result[i]);
-			union {
-				T val;
-				UintT bits;
+			UintT mask_u = static_cast<UintT>(-buf.bits[i]); // 1->0x00, 0->0xFF
+			T extreme = PAC_BETTER(value, result[i]);        // SIMD min/max
+			union { // this union is there to be able to combine integer masking operations with floating-point min/max
+				T val;      // could be float or double
+				UintT bits; // unsigned int type as wide as T
 			} extreme_u, result_u, out;
 			extreme_u.val = extreme;
 			result_u.val = result[i];
@@ -130,7 +134,7 @@ struct UpdateExtremesKernel {
 	}
 };
 
-// Specialization for uint8_t MAX: uses optimized value & mask pattern
+// Specialization for uint8_t MAX: turns out to be faster to mask value first (only possible for unsigned)
 template <>
 struct UpdateExtremesKernel<uint8_t, true, 1> {
 	AUTOVECTORIZE static inline void update(uint8_t *__restrict__ result, uint64_t key_hash, uint8_t value) {
@@ -146,7 +150,7 @@ struct UpdateExtremesKernel<uint8_t, true, 1> {
 	}
 };
 
-// Specialization for 16-byte types (hugeint) - scalar comparison, no bitwise tricks
+// Specialization for [u]hugeint - scalar comparison, no bitwise tricks, use IF..THEN to avoid slow hugeint calculations
 template <typename T, bool IS_MAX>
 struct UpdateExtremesKernel<T, IS_MAX, 16> {
 	AUTOVECTORIZE static inline void update(T *__restrict__ result, uint64_t key_hash, T value) {

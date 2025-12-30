@@ -11,7 +11,7 @@ template <bool IS_MAX, int MAXLEVEL = 2>
 using PacMinMaxFloatState = PacMinMaxState<true, true, IS_MAX, MAXLEVEL>;
 
 // ============================================================================
-// Unified Update function - process one value into the 64 extremes
+// PacMinMaxUpdateOne - process one value into the aggregation state (64 extremes)
 // Works for both int and float states via the common interface
 // ============================================================================
 
@@ -20,10 +20,8 @@ AUTOVECTORIZE static inline void PacMinMaxUpdateOne(State &state, uint64_t key_h
                                                     ArenaAllocator &allocator) {
 #ifndef PAC_MINMAX_NONCASCADING
 	if (!state.initialized) {
-		state.AllocateFirstLevel(
-		    allocator); // cascading mode allocates levels in increasing width and upgrades upon need only
+		state.AllocateFirstLevel(allocator); // cascading mode allocates levels in increasing width, upgrades upon need
 	}
-	state.MaybeUpgrade(value); // Upgrade level if value doesn't fit in current level
 #endif
 #ifndef PAC_MINMAX_NOBOUNDOPT
 	if (!PAC_IS_BETTER(value, state.global_bound)) { // Compare value against global_bound
@@ -34,16 +32,14 @@ AUTOVECTORIZE static inline void PacMinMaxUpdateOne(State &state, uint64_t key_h
 	UpdateExtremes<typename State::ValueType, IS_MAX>(state.extremes, key_hash, value);
 	state.RecomputeBound();
 #else
+	state.MaybeUpgrade(
+	    value); // Upgrade level if value doesn't fit in current level (only for values that pass bound check)
 	state.UpdateAtCurrentLevel(key_hash, value); // here the SIMD magic happens
 	state.RecomputeBound();                      // once every 2048 calls recomputes the bound
 #endif
 }
 
-// ============================================================================
-// Unified Batch Update function (simple_update - single state pointer)
-// Works for both int and float states
-// ============================================================================
-
+// DuckDB method for processing one vector for  aggregation without GROUP BY (there is only a single state)
 template <class State, bool IS_MAX, class INPUT_TYPE>
 static void PacMinMaxUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, data_ptr_t state_p, idx_t count) {
 	auto &state = *reinterpret_cast<State *>(state_p);
@@ -76,11 +72,7 @@ static void PacMinMaxUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, da
 	}
 }
 
-// ============================================================================
-// Unified Scatter Update function (update - vector of state pointers)
-// Works for both int and float states
-// ============================================================================
-
+// DuckDB method for processing one vector for GROUP BY aggregation (so there are many states))
 template <class State, bool IS_MAX, class INPUT_TYPE>
 static void PacMinMaxScatterUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states, idx_t count) {
 	UnifiedVectorFormat hash_data, value_data, sdata;
@@ -108,11 +100,7 @@ static void PacMinMaxScatterUpdate(Vector inputs[], AggregateInputData &aggr, id
 	}
 }
 
-// ============================================================================
-// Unified Combine function
-// Works for both int and float states via the CombineWith method
-// ============================================================================
-
+// combine two Min/Max aggregate states (used in parallel query processing and partitioned aggregation)
 template <class State, bool IS_MAX>
 AUTOVECTORIZE static void PacMinMaxCombine(Vector &src, Vector &dst, AggregateInputData &aggr, idx_t count) {
 	auto src_state = FlatVector::GetData<State *>(src);
@@ -139,10 +127,7 @@ AUTOVECTORIZE static void PacMinMaxCombine(Vector &src, Vector &dst, AggregateIn
 	}
 }
 
-// ============================================================================
-// Finalize function
-// ============================================================================
-
+// Finalize computes the final result from the aggregate state
 template <class State, class RESULT_TYPE>
 static void PacMinMaxFinalize(Vector &states, AggregateInputData &input, Vector &result, idx_t count, idx_t offset) {
 	auto state = FlatVector::GetData<State *>(states);
@@ -159,15 +144,15 @@ static void PacMinMaxFinalize(Vector &states, AggregateInputData &input, Vector 
 		} else {
 			double buf[64];
 			state[i]->GetTotalsAsDouble(buf);
+			for (int j = 0; j < 64; j++) {
+				buf[j] /= 2.0;
+			}
 			data[offset + i] = FromDouble<RESULT_TYPE>(PacNoisySampleFrom64Counters(buf, mi, gen) + buf[41]);
 		}
 	}
 }
 
-// ============================================================================
-// Unified State size and initialize (StateSize() is now a member of each state class)
-// ============================================================================
-
+// Unified State size and initialize (StateSize() is  a member of each state class)
 template <class State>
 static idx_t PacMinMaxStateSize(const AggregateFunction &) {
 	return State::StateSize();
@@ -182,7 +167,7 @@ static void PacMinMaxInitialize(const AggregateFunction &, data_ptr_t p) {
 }
 
 // ============================================================================
-// Instantiated Update/ScatterUpdate wrappers (all use unified functions)
+//  Update/ScatterUpdate wrappers that instantiate the templates
 // ============================================================================
 
 // Integer updates (MAXLEVEL: 4=int64, 5=hugeint)
@@ -264,10 +249,7 @@ void PacMinMaxCombineHugeIntUnsigned(Vector &src, Vector &dst, AggregateInputDat
 	PacMinMaxCombine<PacMinMaxIntState<false, IS_MAX, 5>, IS_MAX>(src, dst, a, c);
 }
 
-// ============================================================================
-// Bind function
-// ============================================================================
-
+// Bind function: decides from the LogicalType which implementation function to instantiate
 template <bool IS_MAX>
 static unique_ptr<FunctionData> PacMinMaxBind(ClientContext &ctx, AggregateFunction &function,
                                               vector<unique_ptr<Expression>> &args) {
@@ -419,10 +401,7 @@ static unique_ptr<FunctionData> PacMinMaxBind(ClientContext &ctx, AggregateFunct
 	return make_uniq<PacBindData>(mi, seed);
 }
 
-// ============================================================================
 // Registration
-// ============================================================================
-
 void RegisterPacMinFunctions(ExtensionLoader &loader) {
 	AggregateFunctionSet fcn_set("pac_min");
 
