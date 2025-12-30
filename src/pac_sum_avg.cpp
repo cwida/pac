@@ -14,13 +14,13 @@ template <bool SIGNED>
 AUTOVECTORIZE inline void // main worker function for probabilistically adding one INTEGER to the 64 (sub)total
 PacSumUpdateOne(PacSumIntState<SIGNED> &state, uint64_t key_hash, typename PacSumIntState<SIGNED>::T64 value,
                 ArenaAllocator &allocator) {
-#ifdef PAC_SUM_NONCASCADING
+#ifdef PAC_SUMAVG_NONCASCADING
 	AddToTotalsSimple(state.probabilistic_total128, value, key_hash);
 #else
 	// Store allocator pointer for use in Flush/EnsureLevelAllocated methods
 	if (!state.allocator) {
 		state.allocator = &allocator;
-#ifdef PAC_SUM_NONLAZY
+#ifdef PAC_SUMAVG_NONLAZY
 		state.InitializeAllLevels(allocator);
 #endif
 	}
@@ -76,9 +76,11 @@ AUTOVECTORIZE inline void PacSumUpdateOne(PacSumIntState<SIGNED> &state, uint64_
 template <class State, bool SIGNED, class VALUE_TYPE, class INPUT_TYPE>
 static void PacSumUpdate(Vector inputs[], data_ptr_t state_p, idx_t count, ArenaAllocator &allocator) {
 	auto &state = *reinterpret_cast<State *>(state_p);
+#ifdef PAC_SUMAVG_UNSAFENULL
 	if (state.seen_null) {
 		return;
 	}
+#endif
 	UnifiedVectorFormat hash_data, value_data;
 	inputs[0].ToUnifiedFormat(count, hash_data);
 	inputs[1].ToUnifiedFormat(count, value_data);
@@ -98,8 +100,12 @@ static void PacSumUpdate(Vector inputs[], data_ptr_t state_p, idx_t count, Arena
 			auto h_idx = hash_data.sel->get_index(i);
 			auto v_idx = value_data.sel->get_index(i);
 			if (!hash_data.validity.RowIsValid(h_idx) || !value_data.validity.RowIsValid(v_idx)) {
+#ifdef PAC_SUMAVG_UNSAFENULL
 				state.seen_null = true;
 				return;
+#else
+				continue; // safe mode: ignore NULLs
+#endif
 			}
 			state.exact_count++;
 			PacSumUpdateOne<SIGNED>(state, hashes[h_idx], ConvertValue<VALUE_TYPE>::convert(values[v_idx]), allocator);
@@ -122,11 +128,17 @@ static void PacSumScatterUpdate(Vector inputs[], Vector &states, idx_t count, Ar
 		auto h_idx = hash_data.sel->get_index(i);
 		auto v_idx = value_data.sel->get_index(i);
 		auto state = state_ptrs[sdata.sel->get_index(i)];
+#ifdef PAC_SUMAVG_UNSAFENULL
 		if (state->seen_null) {
-			continue; // result will be NULL anyway (TODO: is such SQL semantics privacy-safe??)
+			continue; // result will be NULL anyway
 		} else if (!hash_data.validity.RowIsValid(h_idx) || !value_data.validity.RowIsValid(v_idx)) {
 			state->seen_null = true;
 		} else {
+#else
+		if (!hash_data.validity.RowIsValid(h_idx) || !value_data.validity.RowIsValid(v_idx)) {
+			continue; // safe mode: ignore NULLs
+		} else {
+#endif
 			state->exact_count++;
 			PacSumUpdateOne<SIGNED>(*state, hashes[h_idx], ConvertValue<VALUE_TYPE>::convert(values[v_idx]), allocator);
 		}
@@ -159,11 +171,16 @@ AUTOVECTORIZE static void PacSumCombineInt(Vector &src, Vector &dst, idx_t count
 	auto src_state = FlatVector::GetData<PacSumIntState<SIGNED> *>(src);
 	auto dst_state = FlatVector::GetData<PacSumIntState<SIGNED> *>(dst);
 	for (idx_t i = 0; i < count; i++) {
+#ifdef PAC_SUMAVG_UNSAFENULL
 		if (src_state[i]->seen_null) {
 			dst_state[i]->seen_null = true;
 		}
-		if (!dst_state[i]->seen_null) {
-#ifdef PAC_SUM_NONCASCADING
+		if (dst_state[i]->seen_null) {
+			continue;
+		}
+#endif
+		{
+#ifdef PAC_SUMAVG_NONCASCADING
 			for (int j = 0; j < 64; j++) {
 				dst_state[i]->probabilistic_total128[j] += src_state[i]->probabilistic_total128[j];
 			}
@@ -191,17 +208,20 @@ AUTOVECTORIZE static void PacSumCombineDouble(Vector &src, Vector &dst, idx_t co
 	auto src_state = FlatVector::GetData<PacSumDoubleState *>(src);
 	auto dst_state = FlatVector::GetData<PacSumDoubleState *>(dst);
 	for (idx_t i = 0; i < count; i++) {
+#ifdef PAC_SUMAVG_UNSAFENULL
 		if (src_state[i]->seen_null) {
 			dst_state[i]->seen_null = true;
 		}
-		if (!dst_state[i]->seen_null) {
-#ifdef PAC_SUM_FLOAT_CASCADING
-			src_state[i]->Flush();
+		if (dst_state[i]->seen_null) {
+			continue;
+		}
 #endif
-			dst_state[i]->exact_count += src_state[i]->exact_count;
-			for (int j = 0; j < 64; j++) {
-				dst_state[i]->probabilistic_total[j] += src_state[i]->probabilistic_total[j];
-			}
+#ifdef PAC_SUM_FLOAT_CASCADING
+		src_state[i]->Flush();
+#endif
+		dst_state[i]->exact_count += src_state[i]->exact_count;
+		for (int j = 0; j < 64; j++) {
+			dst_state[i]->probabilistic_total[j] += src_state[i]->probabilistic_total[j];
 		}
 	}
 }
@@ -219,21 +239,23 @@ static void PacSumFinalize(Vector &states, AggregateInputData &input, Vector &re
 	double scale_divisor = input.bind_data ? input.bind_data->Cast<PacBindData>().scale_divisor : 1.0;
 
 	for (idx_t i = 0; i < count; i++) {
+#ifdef PAC_SUMAVG_UNSAFENULL
 		if (state[i]->seen_null) {
 			result_mask.SetInvalid(offset + i);
-		} else {
-			double buf[64];
-			state[i]->Flush();
-			state[i]->GetTotalsAsDouble(buf);
-			if (DIVIDE_BY_COUNT) {
-				double divisor = static_cast<double>(state[i]->exact_count) * scale_divisor;
-				for (int j = 0; j < 64; j++) {
-					buf[j] /= divisor;
-				}
-			}
-			// the random counter we choose to read is #42 (but we start counting from 0, so [41])
-			data[offset + i] = FromDouble<ACC_TYPE>(PacNoisySampleFrom64Counters(buf, mi, gen) + buf[41]);
+			continue;
 		}
+#endif
+		double buf[64];
+		state[i]->Flush();
+		state[i]->GetTotalsAsDouble(buf);
+		if (DIVIDE_BY_COUNT) {
+			double divisor = static_cast<double>(state[i]->exact_count) * scale_divisor;
+			for (int j = 0; j < 64; j++) {
+				buf[j] /= divisor;
+			}
+		}
+		// the random counter we choose to read is #42 (but we start counting from 0, so [41])
+		data[offset + i] = FromDouble<ACC_TYPE>(PacNoisySampleFrom64Counters(buf, mi, gen) + buf[41]);
 	}
 }
 

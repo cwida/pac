@@ -43,8 +43,10 @@ AUTOVECTORIZE static inline void PacMinMaxUpdateOne(State &state, uint64_t key_h
 template <class State, bool IS_MAX, class INPUT_TYPE>
 static void PacMinMaxUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, data_ptr_t state_p, idx_t count) {
 	auto &state = *reinterpret_cast<State *>(state_p);
+#ifdef PAC_MINMAX_UNSAFENULL
 	if (state.seen_null)
 		return;
+#endif
 
 	UnifiedVectorFormat hash_data, value_data;
 	inputs[0].ToUnifiedFormat(count, hash_data);
@@ -63,8 +65,12 @@ static void PacMinMaxUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, da
 			auto h_idx = hash_data.sel->get_index(i);
 			auto v_idx = value_data.sel->get_index(i);
 			if (!hash_data.validity.RowIsValid(h_idx) || !value_data.validity.RowIsValid(v_idx)) {
+#ifdef PAC_MINMAX_UNSAFENULL
 				state.seen_null = true;
 				return;
+#else
+				continue; // safe mode: ignore NULLs
+#endif
 			}
 			PacMinMaxUpdateOne<State, IS_MAX>(state, hashes[h_idx],
 			                                  static_cast<typename State::ValueType>(values[v_idx]), aggr.allocator);
@@ -88,6 +94,7 @@ static void PacMinMaxScatterUpdate(Vector inputs[], AggregateInputData &aggr, id
 		auto h_idx = hash_data.sel->get_index(i);
 		auto v_idx = value_data.sel->get_index(i);
 		auto state = state_ptrs[sdata.sel->get_index(i)];
+#ifdef PAC_MINMAX_UNSAFENULL
 		if (state->seen_null) {
 			continue;
 		}
@@ -95,6 +102,11 @@ static void PacMinMaxScatterUpdate(Vector inputs[], AggregateInputData &aggr, id
 			state->seen_null = true;
 			continue;
 		}
+#else
+		if (!hash_data.validity.RowIsValid(h_idx) || !value_data.validity.RowIsValid(v_idx)) {
+			continue; // safe mode: ignore NULLs
+		}
+#endif
 		PacMinMaxUpdateOne<State, IS_MAX>(*state, hashes[h_idx], static_cast<typename State::ValueType>(values[v_idx]),
 		                                  aggr.allocator);
 	}
@@ -107,12 +119,14 @@ AUTOVECTORIZE static void PacMinMaxCombine(Vector &src, Vector &dst, AggregateIn
 	auto dst_state = FlatVector::GetData<State *>(dst);
 
 	for (idx_t i = 0; i < count; i++) {
+#ifdef PAC_MINMAX_UNSAFENULL
 		if (src_state[i]->seen_null) {
 			dst_state[i]->seen_null = true;
 		}
 		if (dst_state[i]->seen_null) {
 			continue;
 		}
+#endif
 #ifdef PAC_MINMAX_NONCASCADING
 		// States are already initialized by PacMinMaxInitialize
 		auto *s = src_state[i];
@@ -139,16 +153,18 @@ static void PacMinMaxFinalize(Vector &states, AggregateInputData &input, Vector 
 	double mi = input.bind_data ? input.bind_data->Cast<PacBindData>().mi : 128.0;
 
 	for (idx_t i = 0; i < count; i++) {
+#ifdef PAC_MINMAX_UNSAFENULL
 		if (state[i]->seen_null) {
 			result_mask.SetInvalid(offset + i);
-		} else {
-			double buf[64];
-			state[i]->GetTotalsAsDouble(buf);
-			for (int j = 0; j < 64; j++) {
-				buf[j] /= 2.0;
-			}
-			data[offset + i] = FromDouble<RESULT_TYPE>(PacNoisySampleFrom64Counters(buf, mi, gen) + buf[41]);
+			continue;
 		}
+#endif
+		double buf[64];
+		state[i]->GetTotalsAsDouble(buf);
+		for (int j = 0; j < 64; j++) {
+			buf[j] /= 2.0;
+		}
+		data[offset + i] = FromDouble<RESULT_TYPE>(PacNoisySampleFrom64Counters(buf, mi, gen) + buf[41]);
 	}
 }
 

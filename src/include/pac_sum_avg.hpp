@@ -54,8 +54,12 @@ void RegisterPacAvgFunctions(ExtensionLoader &loader);
 
 // for benchmarking/reproducibility purposes, we can disable cascading counters (just sum directly to the largest tyoe)
 // and in cascading mode we can still use eager memory allocation.
-//#define PAC_SUM_NONCASCADING 1 // seems 10x slower on Apple
-//#define PAC_SUM_NONLAZY 1  // Pre-allocate all levels at initialization
+//#define PAC_SUMAVG_NONCASCADING 1 // seems 10x slower on Apple
+//#define PAC_SUMAVG_NONLAZY 1  // Pre-allocate all levels at initialization
+
+// NULL handling: by default we ignore NULLs (safe behavior, like DuckDB's SUM/AVG).
+// Define PAC_SUMAVG_UNSAFENULL to return NULL if any input value is NULL.
+//#define PAC_SUMAVG_UNSAFENULL 1
 
 // Float cascading: accumulate in float subtotal, periodically flush to double total
 // Only beneficial on x86 which has variable-shift SIMD (vpsrlvq). ARM lacks this and
@@ -156,7 +160,7 @@ struct PacSumIntState {
 	typedef typename std::conditional<SIGNED, int32_t, uint32_t>::type T32;
 	typedef typename std::conditional<SIGNED, int64_t, uint64_t>::type T64;
 
-#ifndef PAC_SUM_NONCASCADING
+#ifndef PAC_SUMAVG_NONCASCADING
 	// Pointer to DuckDB's arena allocator (set during first update)
 	ArenaAllocator *allocator;
 
@@ -169,14 +173,16 @@ struct PacSumIntState {
 #else
 	hugeint_t probabilistic_total128[64]; // final total (non-cascading mode only)
 #endif
-#ifndef PAC_SUM_NONCASCADING
+#ifndef PAC_SUMAVG_NONCASCADING
 	// these hold the exact subtotal of each aggregation level, we flush once we see this overflow
 	T64 exact_total8, exact_total16, exact_total32, exact_total64;
 #endif
 	uint64_t exact_count; // total count of values added (for pac_avg)
+#ifdef PAC_SUMAVG_UNSAFENULL
 	bool seen_null;
+#endif
 
-#ifdef PAC_SUM_NONCASCADING
+#ifdef PAC_SUMAVG_NONCASCADING
 	// NONCASCADING: dummy methods for uniform interface
 	void Flush() {
 	} // no-op
@@ -353,7 +359,9 @@ struct PacSumDoubleState {
 	double exact_total;
 #endif
 	uint64_t exact_count; // total count of values added (for pac_avg)
+#ifdef PAC_SUMAVG_UNSAFENULL
 	bool seen_null;
+#endif
 
 	// Cascade constants for float cascading
 	static constexpr double MaxIncrementFloat32 = 1000000.0;

@@ -39,6 +39,10 @@ void RegisterPacMaxFunctions(ExtensionLoader &loader);
 //#define PAC_MINMAX_NONLAZY 1
 //#define PAC_MINMAX_NOBOUNDOPT 1
 
+// NULL handling: by default we ignore NULLs (safe behavior, like DuckDB's MIN/MAX).
+// Define PAC_MINMAX_UNSAFENULL to return NULL if any input value is NULL.
+//#define PAC_MINMAX_UNSAFENULL 1
+
 // Recompute global_bound every N updates (reduces overhead of bound computation)
 static constexpr uint16_t BOUND_RECOMPUTE_INTERVAL = 2048;
 
@@ -303,7 +307,9 @@ struct PacMinMaxState {
 
 	// ========== Common fields (defined once for both modes) ==========
 	bool initialized;
+#ifdef PAC_MINMAX_UNSAFENULL
 	bool seen_null;
+#endif
 	uint16_t update_count;
 	TMAX global_bound; // For MAX: min of all maxes; for MIN: max of all mins
 
