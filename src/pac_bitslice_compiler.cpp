@@ -117,6 +117,30 @@ static unique_ptr<Expression> BuildXorHashFromPKs(OptimizerExtensionInput &input
 	return input.optimizer.BindScalarFunction("hash", std::move(xor_expr));
 }
 
+// New helper: find the unique_ptr reference to a LogicalGet node by table name.
+// Returns a pointer to the owning unique_ptr so callers can replace/mutate it in-place.
+static unique_ptr<LogicalOperator>* FindNodeRefByTable(unique_ptr<LogicalOperator> *root,
+                                                       const std::string &table_name) {
+	if (!root || !root->get()) {
+		return nullptr;
+	}
+	LogicalOperator *node = root->get();
+	if (node->type == LogicalOperatorType::LOGICAL_GET) {
+		auto &g = node->Cast<LogicalGet>();
+		auto tblptr = g.GetTable();
+		if (tblptr && tblptr->name == table_name) {
+			return root;
+		}
+	}
+	for (auto &child_ref : node->children) {
+		auto res = FindNodeRefByTable(&child_ref, table_name);
+		if (res) {
+			return res;
+		}
+	}
+	return nullptr;
+}
+
 unique_ptr<LogicalOperator> CreateLogicalJoin(const PACCompatibilityResult &check, ClientContext &context,
                                               unique_ptr<LogicalOperator> left_operator, unique_ptr<LogicalGet> right) {
 	// Simpler join builder: use precomputed metadata only. Find FK(s) on one side that reference
@@ -347,8 +371,8 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 
 	// Create the necessary LogicalGets for missing tables
 	std::unordered_map<std::string, unique_ptr<LogicalGet>> get_map;
-	// Preserve creation order: store raw pointers (ownership kept in get_map) in this vector
-	std::vector<LogicalGet *> ordered_gets;
+	// Preserve creation order: store ordered table names (ownership kept in get_map)
+	vector<string> ordered_table_names;
 	auto idx = GetNextTableIndex(plan);
 	for (auto &table : gets_missing) {
 		auto it = check.table_metadata.find(table);
@@ -357,67 +381,33 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 		}
 		std::vector<std::string> pks = it->second.pks;
 		auto get = CreateLogicalGet(input.context, plan, table, idx);
-		// store in map (ownership) and record pointer to preserve order
+		// store in map (ownership) and record name to preserve order
 		get_map[table] = std::move(get);
-		ordered_gets.push_back(get_map[table].get());
+		ordered_table_names.push_back(table);
 		idx++;
 	}
 
 	// Find the unique_ptr reference to the existing LogicalGet for gets_present[0]
-	std::function<unique_ptr<LogicalOperator> *(unique_ptr<LogicalOperator> *, const std::string &)> find_node_ref;
-	find_node_ref = [&](unique_ptr<LogicalOperator> *node_ref,
-	                    const std::string &tbl) -> unique_ptr<LogicalOperator> * {
-		if (!node_ref || !node_ref->get()) {
-			return nullptr;
-		}
-		LogicalOperator *node_ptr = node_ref->get();
-		if (node_ptr->type == LogicalOperatorType::LOGICAL_GET) {
-			auto &g = node_ptr->Cast<LogicalGet>();
-			auto tblptr = g.GetTable();
-			if (tblptr && tblptr->name == tbl) {
-				return node_ref;
-			}
-		}
-		for (auto &c : node_ptr->children) {
-			// search child unique_ptr references recursively
-			for (auto &c_ref : node_ptr->children) {
-				if (c_ref.get() == c.get()) {
-					auto res = find_node_ref(&c_ref, tbl);
-					if (res) {
-						return res;
-					}
-					break;
-				}
-			}
-		}
-		return nullptr;
-	};
-
+	// Use the shared helper to locate the owning unique_ptr so we can replace it safely
 	unique_ptr<LogicalOperator> *target_ref =
-	    find_node_ref(&plan, gets_present.empty() ? std::string() : gets_present[0]);
+	    FindNodeRefByTable(&plan, gets_present.empty() ? std::string() : gets_present[0]);
 	if (!target_ref) {
 		throw InternalException("PAC compiler: could not find existing LogicalGet for table " +
 		                        (gets_present.empty() ? std::string("<none>") : gets_present[0]));
 	}
 
 	// We create the joins in this order:
-	// the PU joins with ordered_gets[0], then this join node joins with ordered_gets[1], ...
+	// the PU joins with ordered_table_names[0], then this join node joins with ordered_table_names[1], ...
 	unique_ptr<LogicalOperator> final_join;
 	unique_ptr<LogicalOperator> existing_node = (*target_ref)->Copy(input.context);
-
-	// To safely transfer ownership from get_map (which stores unique_ptr<LogicalGet>),
-	// extract the ordered table names first so we don't rely on pointers that will be released.
-	vector<string> ordered_table_names;
-	ordered_table_names.reserve(ordered_gets.size());
-	for (auto g : ordered_gets) {
-		ordered_table_names.push_back(g->GetTable()->name);
-	}
 
 	for (size_t i = 0; i < ordered_table_names.size(); ++i) {
 		auto &tbl_name = ordered_table_names[i];
 		// move the LogicalGet from get_map into a unique_ptr<LogicalGet>
-		unique_ptr<LogicalGet> right_op(nullptr);
-		right_op.reset(get_map[tbl_name].release());
+		unique_ptr<LogicalGet> right_op = std::move(get_map[tbl_name]);
+		if (!right_op) {
+			throw InternalException("PAC compiler: failed to transfer ownership of LogicalGet for " + tbl_name);
+		}
 
 		if (i == 0) {
 			auto join = CreateLogicalJoin(check, input.context, std::move(existing_node), std::move(right_op));
@@ -438,7 +428,7 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 	// Locate the privacy-unit LogicalGet we just inserted (so we can reference its projections)
 	unique_ptr<LogicalOperator> *pu_ref = nullptr;
 	if (!privacy_unit.empty()) {
-		pu_ref = find_node_ref(&plan, privacy_unit);
+		pu_ref = FindNodeRefByTable(&plan, privacy_unit);
 	}
 	if (!pu_ref || !pu_ref->get()) {
 		throw InternalException("PAC compiler: could not find LogicalGet for privacy unit " + privacy_unit);
