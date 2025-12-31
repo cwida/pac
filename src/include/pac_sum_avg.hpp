@@ -65,7 +65,7 @@ void RegisterPacAvgFunctions(ExtensionLoader &loader);
 // Only beneficial on x86 which has variable-shift SIMD (vpsrlvq). ARM lacks this and
 // showed no benefit from float cascading approaches (SWAR, lookup tables, etc.)
 #if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
-#define PAC_SUM_FLOAT_CASCADING 1
+#define PAC_SUMAVG_FLOAT_CASCADING 1
 #endif
 
 // Simple version for double/[u]int64_t/hugeint (uses multiplication for conditional add)
@@ -109,7 +109,7 @@ AUTOVECTORIZE static inline void AddToTotalsSWAR(uint64_t *__restrict__ total, V
 	}
 }
 
-#ifdef PAC_SUM_FLOAT_CASCADING
+#ifdef PAC_SUMAVG_FLOAT_CASCADING
 // SWAR approach for x86: extract bytes, expand bits to float masks via union, multiply-accumulate
 // x86 has variable-shift SIMD (vpsrlvq) so this vectorizes well
 // prototyped here: https://godbolt.org/z/jodKW3er7
@@ -135,7 +135,7 @@ AUTOVECTORIZE static inline void AddToTotalsFloat(float *total, float value, uin
 		}
 	}
 }
-#endif // PAC_SUM_FLOAT_CASCADING
+#endif // PAC_SUMAVG_FLOAT_CASCADING
 
 // =========================
 // Integer pac_sum (cascaded multi-level accumulation for SIMD efficiency)
@@ -252,9 +252,10 @@ struct PacSumIntState {
 			if (would_overflow) {
 				exact_total64 = EnsureLevelAllocated(probabilistic_total64, 64, exact_total64);
 			}
+			// Flush level 64 first (propagates exact_total32, ensures room for cascade)
+			Flush64(exact_total32, force);
 			CascadeToNextLevel<T32, T64, 32, 64>(probabilistic_total32, probabilistic_total64);
 			memset(probabilistic_total32, 0, 32 * sizeof(uint64_t));
-			Flush64(exact_total32, force);
 			exact_total32 = value;
 		} else {
 			exact_total32 = new_total;
@@ -270,9 +271,10 @@ struct PacSumIntState {
 			if (would_overflow) {
 				exact_total32 = EnsureLevelAllocated(probabilistic_total32, 32, exact_total32);
 			}
+			// Flush level 32 first (propagates exact_total16, ensures room for cascade)
+			Flush32(exact_total16, force);
 			CascadeToNextLevel<T16, T32, 16, 32>(probabilistic_total16, probabilistic_total32);
 			memset(probabilistic_total16, 0, 16 * sizeof(uint64_t));
-			Flush32(exact_total16, force);
 			exact_total16 = value;
 		} else {
 			exact_total16 = new_total;
@@ -288,9 +290,10 @@ struct PacSumIntState {
 			if (would_overflow) {
 				exact_total16 = EnsureLevelAllocated(probabilistic_total16, 16, exact_total16);
 			}
+			// Flush level 16 first (propagates exact_total8, ensures room for cascade)
+			Flush16(exact_total8, force);
 			CascadeToNextLevel<T8, T16, 8, 16>(probabilistic_total8, probabilistic_total16);
 			memset(probabilistic_total8, 0, 8 * sizeof(uint64_t));
-			Flush16(exact_total8, force);
 			exact_total8 = value;
 		} else {
 			exact_total8 = new_total;
@@ -298,8 +301,16 @@ struct PacSumIntState {
 	}
 
 	void Flush() {
+		// Start flushing from the lowest allocated level
+		// (data may have skipped lower levels if values were always large)
 		if (probabilistic_total8) {
 			Flush8(0LL, true);
+		} else if (probabilistic_total16) {
+			Flush16(0LL, true);
+		} else if (probabilistic_total32) {
+			Flush32(0LL, true);
+		} else if (probabilistic_total64) {
+			Flush64(0LL, true);
 		}
 	}
 
@@ -350,12 +361,12 @@ struct PacSumIntState {
 
 // Double pac_sum state
 struct PacSumDoubleState {
-#ifdef PAC_SUM_FLOAT_CASCADING
+#ifdef PAC_SUMAVG_FLOAT_CASCADING
 	// Float cascading: accumulate small values in float subtotal, flush to double total
 	float probabilistic_total_float[64];
 #endif
 	double probabilistic_total[64];
-#ifdef PAC_SUM_FLOAT_CASCADING
+#ifdef PAC_SUMAVG_FLOAT_CASCADING
 	double exact_total;
 #endif
 	uint64_t exact_count; // total count of values added (for pac_avg)
@@ -372,7 +383,7 @@ struct PacSumDoubleState {
 	}
 
 	AUTOVECTORIZE inline void Flush32(double value, bool force = false) {
-#ifdef PAC_SUM_FLOAT_CASCADING
+#ifdef PAC_SUMAVG_FLOAT_CASCADING
 		double raw_subtotal = exact_total + value;
 		bool would_overflow = FloatSubtotalFitsDouble(raw_subtotal, MinIncrementsFloat32);
 		if (would_overflow || force) {
@@ -388,7 +399,7 @@ struct PacSumDoubleState {
 	}
 
 	void Flush() {
-#ifdef PAC_SUM_FLOAT_CASCADING
+#ifdef PAC_SUMAVG_FLOAT_CASCADING
 		Flush32(0, true);
 #endif
 	}

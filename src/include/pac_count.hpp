@@ -134,9 +134,9 @@ struct PacCountState {
 			if (would_overflow) {
 				exact_total32 = EnsureLevelAllocated(probabilistic_total32, 32, exact_total32);
 			}
+			Flush32(exact_total16, force);
 			CascadeToNextLevel<uint16_t, uint32_t, 16, 32>(probabilistic_total16, probabilistic_total32);
 			memset(probabilistic_total16, 0, 16 * sizeof(uint64_t));
-			Flush32(exact_total16, force);
 			exact_total16 = value;
 		} else {
 			exact_total16 = static_cast<uint16_t>(new_total);
@@ -152,9 +152,9 @@ struct PacCountState {
 			if (would_overflow) {
 				exact_total16 = EnsureLevelAllocated(probabilistic_total16, 16, exact_total16);
 			}
+			Flush16(exact_total8, force);
 			CascadeToNextLevel<uint8_t, uint16_t, 8, 16>(probabilistic_total8, probabilistic_total16);
 			memset(probabilistic_total8, 0, 8 * sizeof(uint64_t));
-			Flush16(exact_total8, force);
 			exact_total8 = value;
 		} else {
 			exact_total8 = static_cast<uint8_t>(new_total);

@@ -15,25 +15,25 @@ FROM range(4000) t(i)
 
 # Ungrouped pac_sum with INTEGER
 query I
-SELECT pac_sum(hash(rowid)::UBIGINT, value::INTEGER) IS NOT NULL FROM test_data
+SELECT pac_sum(hash(rowid)::UBIGINT, value::INTEGER, 0.0) IS NOT NULL FROM test_data
 ----
 true
 
 # Verify returns HUGEINT for signed integers
 query I
-SELECT typeof(pac_sum(hash(rowid)::UBIGINT, value::INTEGER)) FROM test_data
+SELECT typeof(pac_sum(hash(rowid)::UBIGINT, value::INTEGER, 0.0)) FROM test_data
 ----
 HUGEINT
 
-# Test with explicit mi parameter (128.0)
+# Test with explicit mi parameter (0.0 for deterministic results)
 query I
-SELECT pac_sum(hash(rowid)::UBIGINT, value::INTEGER, 128.0) IS NOT NULL FROM test_data
+SELECT pac_sum(hash(rowid)::UBIGINT, value::INTEGER, 0.0) IS NOT NULL FROM test_data
 ----
 true
 
 # Grouped pac_sum
 query II
-SELECT grp, pac_sum(hash(rowid)::UBIGINT, value::INTEGER) IS NOT NULL AS has_result
+SELECT grp, pac_sum(hash(rowid)::UBIGINT, value::INTEGER, 0.0) IS NOT NULL AS has_result
 FROM test_data
 GROUP BY grp
 ORDER BY grp
@@ -44,27 +44,27 @@ ORDER BY grp
 
 # Test with different numeric types
 query I
-SELECT pac_sum(hash(rowid)::UBIGINT, value::BIGINT) IS NOT NULL FROM test_data
+SELECT pac_sum(hash(rowid)::UBIGINT, value::BIGINT, 0.0) IS NOT NULL FROM test_data
 ----
 true
 
 query I
-SELECT pac_sum(hash(rowid)::UBIGINT, value::DOUBLE) IS NOT NULL FROM test_data
+SELECT pac_sum(hash(rowid)::UBIGINT, value::DOUBLE, 0.0) IS NOT NULL FROM test_data
 ----
 true
 
 query I
-SELECT pac_sum(hash(rowid)::UBIGINT, value::FLOAT) IS NOT NULL FROM test_data
+SELECT pac_sum(hash(rowid)::UBIGINT, value::FLOAT, 0.0) IS NOT NULL FROM test_data
 ----
 true
 
 query I
-SELECT pac_sum(hash(rowid)::UBIGINT, value::SMALLINT) IS NOT NULL FROM test_data
+SELECT pac_sum(hash(rowid)::UBIGINT, value::SMALLINT, 0.0) IS NOT NULL FROM test_data
 ----
 true
 
 query I
-SELECT pac_sum(hash(rowid)::UBIGINT, (value % 127)::TINYINT) IS NOT NULL FROM test_data
+SELECT pac_sum(hash(rowid)::UBIGINT, (value % 127)::TINYINT, 0.0) IS NOT NULL FROM test_data
 ----
 true
 
@@ -74,13 +74,13 @@ true
 
 # Test ungrouped: NULL in value is ignored, result is NOT NULL
 query I
-SELECT pac_sum(hash(rowid)::UBIGINT, CASE WHEN rowid = 100 THEN NULL ELSE value END::INTEGER) IS NOT NULL FROM test_data
+SELECT pac_sum(hash(rowid)::UBIGINT, CASE WHEN rowid = 100 THEN NULL ELSE value END::INTEGER, 0.0) IS NOT NULL FROM test_data
 ----
 true
 
 # Test ungrouped: NULL in key_hash is ignored, result is NOT NULL
 query I
-SELECT pac_sum(CASE WHEN rowid = 50 THEN NULL ELSE hash(rowid)::UBIGINT END, value::INTEGER) IS NOT NULL FROM test_data
+SELECT pac_sum(CASE WHEN rowid = 50 THEN NULL ELSE hash(rowid)::UBIGINT END, value::INTEGER, 0.0) IS NOT NULL FROM test_data
 ----
 true
 
@@ -93,7 +93,7 @@ FROM range(30) t(i)
 
 # All groups should have non-NULL results (NULLs are just ignored)
 query II
-SELECT grp, pac_sum(hash(rowid)::UBIGINT, value) IS NULL AS is_null
+SELECT grp, pac_sum(hash(rowid)::UBIGINT, value, 0.0) IS NULL AS is_null
 FROM test_null_groups
 GROUP BY grp
 ORDER BY grp
@@ -107,7 +107,7 @@ DROP TABLE test_null_groups
 
 # Test: all non-NULL values gives non-NULL result
 query I
-SELECT pac_sum(hash(rowid)::UBIGINT, value::INTEGER) IS NOT NULL FROM test_data
+SELECT pac_sum(hash(rowid)::UBIGINT, value::INTEGER, 0.0) IS NOT NULL FROM test_data
 ----
 true
 
@@ -122,7 +122,7 @@ CREATE TABLE test_tinyint_flush AS
 SELECT i AS rowid, 10::TINYINT AS value FROM range(8) t(i)
 
 query I
-SELECT pac_sum(hash(rowid)::UBIGINT, value) IS NOT NULL FROM test_tinyint_flush
+SELECT pac_sum(hash(rowid)::UBIGINT, value, 0.0) IS NOT NULL FROM test_tinyint_flush
 ----
 true
 
@@ -136,7 +136,7 @@ CREATE TABLE test_smallint_flush AS
 SELECT i AS rowid, (i % 100)::SMALLINT AS value FROM range(100) t(i)
 
 query I
-SELECT pac_sum(hash(rowid)::UBIGINT, value) IS NOT NULL FROM test_smallint_flush
+SELECT pac_sum(hash(rowid)::UBIGINT, value, 0.0) IS NOT NULL FROM test_smallint_flush
 ----
 true
 
@@ -150,7 +150,7 @@ CREATE TABLE test_integer_flush AS
 SELECT i AS rowid, (i % 1000)::INTEGER AS value FROM range(1000) t(i)
 
 query I
-SELECT pac_sum(hash(rowid)::UBIGINT, value) IS NOT NULL FROM test_integer_flush
+SELECT pac_sum(hash(rowid)::UBIGINT, value, 0.0) IS NOT NULL FROM test_integer_flush
 ----
 true
 
@@ -164,7 +164,7 @@ CREATE TABLE test_bigint_flush AS
 SELECT i AS rowid, (i * 1000000)::BIGINT AS value FROM range(1000) t(i)
 
 query I
-SELECT pac_sum(hash(rowid)::UBIGINT, value) IS NOT NULL FROM test_bigint_flush
+SELECT pac_sum(hash(rowid)::UBIGINT, value, 0.0) IS NOT NULL FROM test_bigint_flush
 ----
 true
 
@@ -180,7 +180,7 @@ SELECT i AS rowid,
 FROM range(20) t(i)
 
 query I
-SELECT pac_sum(hash(rowid)::UBIGINT, value) IS NOT NULL FROM test_large_tinyint
+SELECT pac_sum(hash(rowid)::UBIGINT, value, 0.0) IS NOT NULL FROM test_large_tinyint
 ----
 true
 
@@ -193,7 +193,7 @@ CREATE TABLE test_float_sum AS
 SELECT i AS rowid, (i * 0.5)::FLOAT AS value FROM range(1000) t(i)
 
 query I
-SELECT pac_sum(hash(rowid)::UBIGINT, value) IS NOT NULL FROM test_float_sum
+SELECT pac_sum(hash(rowid)::UBIGINT, value, 0.0) IS NOT NULL FROM test_float_sum
 ----
 true
 
@@ -206,7 +206,7 @@ CREATE TABLE test_double_sum AS
 SELECT i AS rowid, (i * 0.123456789)::DOUBLE AS value FROM range(1000) t(i)
 
 query I
-SELECT pac_sum(hash(rowid)::UBIGINT, value) IS NOT NULL FROM test_double_sum
+SELECT pac_sum(hash(rowid)::UBIGINT, value, 0.0) IS NOT NULL FROM test_double_sum
 ----
 true
 
@@ -226,7 +226,7 @@ SELECT i AS rowid, i % 3 AS grp,
 FROM range(300) t(i)
 
 query II
-SELECT grp, pac_sum(hash(rowid)::UBIGINT, value) IS NULL AS is_null
+SELECT grp, pac_sum(hash(rowid)::UBIGINT, value, 0.0) IS NULL AS is_null
 FROM test_grouped_nulls
 GROUP BY grp
 ORDER BY grp

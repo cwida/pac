@@ -23,7 +23,7 @@ namespace duckdb {
 struct PacAggregateLocalState;
 
 // Compute the PAC noise variance (delta) from per-sample values and mutual information budget mi.
-// Throws InvalidInputException if mi <= 0.
+// Throws InvalidInputException if mi < 0.
 double ComputeDeltaFromValues(const std::vector<double> &values, double mi);
 
 // Initialize thread-local state for pac_aggregate (reads pac_seed setting).

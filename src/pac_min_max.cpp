@@ -69,7 +69,7 @@ static void PacMinMaxUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, da
 				state.seen_null = true;
 				return;
 #else
-				continue; // safe mode: ignore NULLs
+				continue;                        // safe mode: ignore NULLs
 #endif
 			}
 			PacMinMaxUpdateOne<State, IS_MAX>(state, hashes[h_idx],
@@ -429,8 +429,8 @@ static unique_ptr<FunctionData> PacMinMaxBind(ClientContext &ctx, AggregateFunct
 		}
 		auto mi_val = ExpressionExecutor::EvaluateScalar(ctx, *args[2]);
 		mi = mi_val.GetValue<double>();
-		if (mi <= 0.0) {
-			throw InvalidInputException("pac_%s: mi must be > 0", IS_MAX ? "max" : "min");
+		if (mi < 0.0) {
+			throw InvalidInputException("pac_%s: mi must be >= 0", IS_MAX ? "max" : "min");
 		}
 	}
 

@@ -83,6 +83,10 @@ static inline double DeterministicNormalSample(std::mt19937_64 &gen, bool &has_s
 
 // Finalize: compute noisy sample from the 64 counters (works on double array)
 double PacNoisySampleFrom64Counters(const double counters[64], double mi, std::mt19937_64 &gen) {
+	// mi=0 means no noise - return counter 42 directly (no RNG consumption)
+	if (mi == 0.0) {
+		return counters[41];
+	}
 	constexpr int N = 64;
 	// Compute empirical (second-moment) variance across the 64 counters and use it
 	// to determine the noise variance. We reuse ComputeSecondMomentVariance here.
@@ -151,8 +155,8 @@ static double ComputeSecondMomentVariance(const std::vector<double> &values) {
 // Exported helper: compute the PAC noise variance (delta) from values and mi.
 // This implements the header-declared ComputeDeltaFromValues and is reused by other files.
 double ComputeDeltaFromValues(const std::vector<double> &values, double mi) {
-	if (mi <= 0.0) {
-		throw InvalidInputException("ComputeDeltaFromValues: mi must be > 0");
+	if (mi < 0.0) {
+		throw InvalidInputException("ComputeDeltaFromValues: mi must be >= 0");
 	}
 	double sigma2 = ComputeSecondMomentVariance(values);
 	double delta = sigma2 / (2.0 * mi);
@@ -203,8 +207,8 @@ static void PacAggregateScalar(DataChunk &args, ExpressionState &state, Vector &
 
 		// --- read mi, k ---
 		double mi = mi_vec.GetValue(row).GetValue<double>();
-		if (mi <= 0.0) {
-			throw InvalidInputException("pac_aggregate: mi must be > 0");
+		if (mi < 0.0) {
+			throw InvalidInputException("pac_aggregate: mi must be >= 0");
 		}
 		idx_t kidx = kvals.sel ? kvals.sel->get_index(row) : row;
 		int k = kdata[kidx];

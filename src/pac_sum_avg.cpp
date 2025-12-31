@@ -48,7 +48,7 @@ template <bool SIGNED>
 AUTOVECTORIZE inline void // main worker function for probabilistically adding one DOUBLE to the 64 sum total
 PacSumUpdateOne(PacSumDoubleState &state, uint64_t key_hash, double value, ArenaAllocator &) {
 	// Note: ArenaAllocator not used for double state (no lazy allocation)
-#ifdef PAC_SUM_FLOAT_CASCADING
+#ifdef PAC_SUMAVG_FLOAT_CASCADING
 	if (PacSumDoubleState::FloatSubtotalFitsDouble(value)) {
 		AddToTotalsFloat(state.probabilistic_total_float, static_cast<float>(value), key_hash);
 		state.Flush32(value);
@@ -62,7 +62,7 @@ PacSumUpdateOne(PacSumDoubleState &state, uint64_t key_hash, double value, Arena
 template <bool SIGNED>
 AUTOVECTORIZE inline void PacSumUpdateOne(PacSumIntState<SIGNED> &state, uint64_t key_hash, hugeint_t value,
                                           ArenaAllocator &allocator) {
-#ifndef PAC_SUM_NONCASCADING
+#ifndef PAC_SUMAVG_NONCASCADING
 	state.allocator = &allocator;
 	state.EnsureLevelAllocated(state.probabilistic_total128, idx_t(64));
 #endif
@@ -170,6 +170,7 @@ template <bool SIGNED>
 AUTOVECTORIZE static void PacSumCombineInt(Vector &src, Vector &dst, idx_t count, ArenaAllocator &allocator) {
 	auto src_state = FlatVector::GetData<PacSumIntState<SIGNED> *>(src);
 	auto dst_state = FlatVector::GetData<PacSumIntState<SIGNED> *>(dst);
+
 	for (idx_t i = 0; i < count; i++) {
 #ifdef PAC_SUMAVG_UNSAFENULL
 		if (src_state[i]->seen_null) {
@@ -190,6 +191,22 @@ AUTOVECTORIZE static void PacSumCombineInt(Vector &src, Vector &dst, idx_t count
 			if (!d->allocator) {
 				d->allocator = &allocator; // Ensure dst has allocator pointer
 			}
+
+			// Before combining each level, check if dst would overflow - if so, flush dst first
+			// (if exact_total is non-zero, the level is allocated; if both are zero, no overflow)
+			if (CHECK_BOUNDS_8(s->exact_total8 + d->exact_total8)) {
+				d->Flush8(0, true);
+			}
+			if (CHECK_BOUNDS_16(s->exact_total16 + d->exact_total16)) {
+				d->Flush16(0, true);
+			}
+			if (CHECK_BOUNDS_32(s->exact_total32 + d->exact_total32)) {
+				d->Flush32(0, true);
+			}
+			if (CHECK_BOUNDS_64(s->exact_total64 + d->exact_total64, s->exact_total64, d->exact_total64)) {
+				d->Flush64(0, true);
+			}
+
 			// Combine at each level (handles null checks and pointer moves internally)
 			hugeint_t dummy = 0; // level 128 has no exact_total
 			CombineLevel(s->probabilistic_total8, d->probabilistic_total8, s->exact_total8, d->exact_total8, 8);
@@ -216,7 +233,7 @@ AUTOVECTORIZE static void PacSumCombineDouble(Vector &src, Vector &dst, idx_t co
 			continue;
 		}
 #endif
-#ifdef PAC_SUM_FLOAT_CASCADING
+#ifdef PAC_SUMAVG_FLOAT_CASCADING
 		src_state[i]->Flush();
 #endif
 		dst_state[i]->exact_count += src_state[i]->exact_count;
@@ -378,8 +395,8 @@ PacSumBind(ClientContext &ctx, AggregateFunction &, vector<unique_ptr<Expression
 		}
 		auto mi_val = ExpressionExecutor::EvaluateScalar(ctx, *args[2]);
 		mi = mi_val.GetValue<double>();
-		if (mi <= 0.0) {
-			throw InvalidInputException("pac_sum: mi must be > 0");
+		if (mi < 0.0) {
+			throw InvalidInputException("pac_sum: mi must be >= 0");
 		}
 	}
 	// Read pac_seed setting (optional) to produce deterministic RNG seed for tests
@@ -562,8 +579,8 @@ static unique_ptr<FunctionData> BindDecimalPacAvg(ClientContext &ctx, AggregateF
 		}
 		auto mi_val = ExpressionExecutor::EvaluateScalar(ctx, *args[2]);
 		mi = mi_val.GetValue<double>();
-		if (mi <= 0.0) {
-			throw InvalidInputException("pac_avg: mi must be > 0");
+		if (mi < 0.0) {
+			throw InvalidInputException("pac_avg: mi must be >= 0");
 		}
 	}
 	uint64_t seed = std::random_device {}();

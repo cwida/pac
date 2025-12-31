@@ -6,19 +6,20 @@ static unique_ptr<FunctionData> // Bind function for pac_count with optional mi 
 PacCountBind(ClientContext &ctx, AggregateFunction &func, vector<unique_ptr<Expression>> &args) {
 	double mi = 128.0; // default
 
-	// Handle mi parameter based on function signature:
-	// - {UBIGINT, DOUBLE}: mi is args[1]
-	// - {UBIGINT, ANY, DOUBLE}: mi is args[2]
-	// Check if the last declared argument type is DOUBLE (the mi parameter)
-	if (args.size() >= 2 && func.arguments.back().id() == LogicalTypeId::DOUBLE) {
-		idx_t mi_arg_idx = args.size() - 1;
-		if (!args[mi_arg_idx]->IsFoldable()) {
-			throw InvalidInputException("pac_count: mi parameter must be a constant");
-		}
-		auto mi_val = ExpressionExecutor::EvaluateScalar(ctx, *args[mi_arg_idx]);
-		mi = mi_val.GetValue<double>();
-		if (mi <= 0.0) {
-			throw InvalidInputException("pac_count: mi must be > 0");
+	// Handle mi parameter - check each argument position for a foldable numeric constant
+	// This handles both explicit DOUBLE signature and ANY signature where user passes a constant
+	for (idx_t i = 1; i < args.size(); i++) {
+		auto &arg = args[i];
+		// Check if this is a foldable constant that could be mi
+		if (arg->IsFoldable() && (arg->return_type.IsNumeric() || arg->return_type.id() == LogicalTypeId::UNKNOWN)) {
+			auto val = ExpressionExecutor::EvaluateScalar(ctx, *arg);
+			if (val.type().IsNumeric()) {
+				mi = val.GetValue<double>();
+				if (mi < 0.0) {
+					throw InvalidInputException("pac_count: mi must be >= 0");
+				}
+				break; // Found mi, stop looking
+			}
 		}
 	}
 
@@ -253,6 +254,18 @@ AUTOVECTORIZE void PacCountCombine(Vector &src, Vector &dst, AggregateInputData 
 		if (!d->allocator) {
 			d->allocator = &aggr.allocator;
 		}
+
+		// Before combining each level, check if dst would overflow - if so, flush dst first
+		if (d->probabilistic_total8 && s->exact_total8 + d->exact_total8 > UINT8_MAX) {
+			d->Flush8(0, true);
+		}
+		if (d->probabilistic_total16 && s->exact_total16 + d->exact_total16 > UINT16_MAX) {
+			d->Flush16(0, true);
+		}
+		if (d->probabilistic_total32 && s->exact_total32 + d->exact_total32 > UINT32_MAX) {
+			d->Flush32(0, true);
+		}
+		// Level 64 cannot overflow within uint64_t range
 
 		// Combine at each level
 		CombineLevel<uint8_t>(s->probabilistic_total8, d->probabilistic_total8, s->exact_total8, d->exact_total8);
