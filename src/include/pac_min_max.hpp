@@ -305,12 +305,12 @@ struct PacMinMaxState {
 	}
 
 	// ========== Common fields (defined once for both modes) ==========
+	TMAX global_bound; // For MAX: min of all maxes; for MIN: max of all mins
 	uint16_t update_count;
 	bool initialized;
 #ifdef PAC_MINMAX_UNSAFENULL
 	bool seen_null;
 #endif
-
 #ifdef PAC_MINMAX_NONCASCADING
 	// ========== Non-cascading mode: single fixed-width array ==========
 	TMAX extremes[64];
@@ -344,7 +344,6 @@ struct PacMinMaxState {
 	// All pointers defined, but ordered so unused ones are at the end.
 	// DuckDB allocates only up to the needed pointer based on state_size.
 	uint8_t current_level; // 1, 2, 3, 4, or 5
-	TMAX global_bound;     // For MAX: min of all maxes; for MIN: max of all mins
 
 	// Pointer fields ordered by level - unused ones at the end won't be allocated
 	T1 *extremes_level1; // integers: [u]int8_t*,  floating point: float*
