@@ -31,7 +31,7 @@ void RegisterPacMaxFunctions(ExtensionLoader &loader);
 // huge aggregates, then we never allocate them (memory saving).
 //
 // when upgrading the size (e.g. 16->32-bits) we want to keep using the memory used for 16-bits
-// therefore, memory is organized in "banks"of the size needed for 8-bits, and when upgrading 
+// therefore, memory is organized in "banks"of the size needed for 8-bits, and when upgrading
 // we progressivly allocate more banks, re-using the old ones also for the bigger size;
 //
 // Cascading/banking is only implemented for integers.
@@ -65,73 +65,35 @@ static constexpr uint16_t BOUND_RECOMPUTE_INTERVAL = 2048;
 // prototyped here: https://godbolt.org/z/Tbq3jWWY6
 // ============================================================================
 
-// SWAR traits for different element sizes
-// BitsT: signed type for mask generation (same size as element)
-// UintT: unsigned type for bitwise ops on value (same size as element)
-template <int SIZE>
-struct SWARTraits;
-
-template <>
-struct SWARTraits<1> { // int8
-	using BitsT = int8_t;
-	using UintT = uint8_t;
-	static constexpr uint64_t MASK = 0x0101010101010101ULL;
-	static constexpr int SHIFTS = 8;
-	static constexpr int ELEM_PER_U64 = 8;
-};
-
-template <>
-struct SWARTraits<2> { // int16
-	using BitsT = int16_t;
-	using UintT = uint16_t;
-	static constexpr uint64_t MASK = 0x0001000100010001ULL;
-	static constexpr int SHIFTS = 16;
-	static constexpr int ELEM_PER_U64 = 4;
-};
-
-template <>
-struct SWARTraits<4> { // int32, float
-	using BitsT = int32_t;
-	using UintT = uint32_t;
-	static constexpr uint64_t MASK = 0x0000000100000001ULL;
-	static constexpr int SHIFTS = 32;
-	static constexpr int ELEM_PER_U64 = 2;
-};
-
-template <>
-struct SWARTraits<8> { // int64, double - linear layout
-	using BitsT = int64_t;
-	using UintT = uint64_t;
-	static constexpr uint64_t MASK = 1ULL;
-	static constexpr int SHIFTS = 64;
-	static constexpr int ELEM_PER_U64 = 1;
-};
-
-template <>
-struct SWARTraits<16> { // hugeint - linear layout
-	using BitsT = int64_t;
-	using UintT = uint64_t;
-	static constexpr uint64_t MASK = 1ULL;
-	static constexpr int SHIFTS = 64;
-	static constexpr int ELEM_PER_U64 = 1;
-};
-
 // Unified SIMD Min/Max update kernel that works for all integers <=64 and double,float even
 // Updates `count` elements in result[], using bits [start_bit..start_bit+count) from key_hash
 template <typename T, bool IS_MAX, int SIZE = sizeof(T)>
 struct UpdateExtremesKernel {
-	using Traits = SWARTraits<SIZE>;
-	using BitsT = typename Traits::BitsT;
-	using UintT = typename Traits::UintT;
+	// Type aliases (signed/unsigned variants of SIZE-byte integers)
+	using BitsT = typename std::conditional<
+	    SIZE == 1, int8_t,
+	    typename std::conditional<SIZE == 2, int16_t,
+	                              typename std::conditional<SIZE == 4, int32_t, int64_t>::type>::type>::type;
+	using UintT = typename std::conditional<
+	    SIZE == 1, uint8_t,
+	    typename std::conditional<SIZE == 2, uint16_t,
+	                              typename std::conditional<SIZE == 4, uint32_t, uint64_t>::type>::type>::type;
+
+	// SWAR constants computed from SIZE
+	static constexpr int SHIFTS = SIZE * 8; // 8, 16, 32, 64
+	static constexpr uint64_t MASK = SIZE == 1   ? 0x0101010101010101ULL
+	                                 : SIZE == 2 ? 0x0001000100010001ULL
+	                                 : SIZE == 4 ? 0x0000000100000001ULL
+	                                             : 1ULL;
 
 	AUTOVECTORIZE static inline void update(T *__restrict__ result, uint64_t key_hash, T value, int start_bit,
 	                                        int count) {
 		union {
-			uint64_t u64[Traits::SHIFTS]; // keyhash as uint64
-			BitsT bits[64];               // signed int type as wide as T (we want 0x00 - 1 to become 0xFF)
+			uint64_t u64[SHIFTS]; // keyhash as uint64
+			BitsT bits[64];       // signed int type as wide as T (we want 0x00 - 1 to become 0xFF)
 		} buf;
-		for (int i = 0; i < Traits::SHIFTS; i++) {
-			buf.u64[i] = (key_hash >> i) & Traits::MASK; // process multiple T in one uint64 (SWAR)
+		for (int i = 0; i < SHIFTS; i++) {
+			buf.u64[i] = (key_hash >> i) & MASK; // process multiple T in one uint64 (SWAR)
 		}
 		for (int i = 0; i < count; i++) {
 			int bit_idx = start_bit + i;

@@ -62,7 +62,7 @@ void RegisterPacCountFunctions(ExtensionLoader &);
 //#define PAC_COUNT_NONLAZY 1  // Pre-allocate all levels at initialization
 //#define PAC_COUNT_NONBANKED 1 // will directly aggregate in uint64_t probabilistic_total[64] (no cascading/banking)
 
-// Two levels: subtotal8 (inline, uint8_t[64] packed as uint64_t[8]) flushes to banked total (uint16/32/64 depending 
+// Two levels: subtotal8 (inline, uint8_t[64] packed as uint64_t[8]) flushes to banked total (uint16/32/64 depending
 // on count magnitude).
 
 struct PacCountState {
