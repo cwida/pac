@@ -158,18 +158,6 @@ struct PacCountState {
 		}
 	}
 
-	// Check if adding subtotal8 would overflow current level
-	bool WouldOverflow(uint8_t add_count) const {
-		if (total_level == 0)
-			return false;
-		uint64_t new_count = static_cast<uint64_t>(subtotal8_count) + add_count;
-		if (total_level == 16)
-			return new_count > UINT16_MAX;
-		if (total_level == 32)
-			return new_count > UINT32_MAX;
-		return false; // uint64 can't overflow from uint8 additions
-	}
-
 	// Flush subtotal8 to total
 	void Flush(ArenaAllocator &allocator) {
 		if (subtotal8_count == 0)

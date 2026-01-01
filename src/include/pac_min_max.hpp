@@ -285,14 +285,14 @@ struct PacMinMaxFloatingState {
 // ============================================================================
 // SIGNED: signed vs unsigned
 // IS_MAX: true for pac_max, false for pac_min
-// MAXLEVEL: maximum cascading level (1-5)
+// MAXLEVEL: maximum cascading level (8, 16, 32, 64, or 128 bits)
 //
-// Level abstraction:
-//   Level 1: int8/uint8       ( 1 byte,  uses SWAR)
-//   Level 2: int16/uint16     ( 2 bytes, uses SWAR)
-//   Level 3: int32/uint32     ( 4 bytes, uses SWAR)
-//   Level 4: int64/uint64     ( 8 bytes, linear)
-//   Level 5: hugeint/uhugeint (16 bytes, linear)
+// Level abstraction (by bit width):
+//   Level  8: int8/uint8       ( 1 byte,  uses SWAR)
+//   Level 16: int16/uint16     ( 2 bytes, uses SWAR)
+//   Level 32: int32/uint32     ( 4 bytes, uses SWAR)
+//   Level 64: int64/uint64     ( 8 bytes, linear)
+//   Level 128: hugeint/uhugeint (16 bytes, linear)
 //
 // All pointer fields are always defined but ordered by level at the end of the struct.
 // We use offsetof() to report smaller state_size to DuckDB, so it allocates only
@@ -301,12 +301,11 @@ struct PacMinMaxFloatingState {
 template <bool SIGNED, bool IS_MAX, int MAXLEVEL>
 struct PacMinMaxState {
 	// Constants
-	static constexpr int MINLEVEL = 1;
-	static constexpr int NUMLEVEL = 5;
+	static constexpr int MINLEVEL = 8;
 
-	// Type aliases for integers: T1=int8, T2=int16, T3=int32, T4=int64, T5=hugeint
+	// Type aliases for integers by bit width
 	template <bool S>
-	using SignedInt = typename std::conditional<S, int8_t, uint8_t>::type;
+	using SignedInt8 = typename std::conditional<S, int8_t, uint8_t>::type;
 	template <bool S>
 	using SignedInt16 = typename std::conditional<S, int16_t, uint16_t>::type;
 	template <bool S>
@@ -314,21 +313,21 @@ struct PacMinMaxState {
 	template <bool S>
 	using SignedInt64 = typename std::conditional<S, int64_t, uint64_t>::type;
 	template <bool S>
-	using SignedHuge = typename std::conditional<S, hugeint_t, uhugeint_t>::type;
+	using SignedInt128 = typename std::conditional<S, hugeint_t, uhugeint_t>::type;
 
-	using T1 = SignedInt<SIGNED>;
-	using T2 = SignedInt16<SIGNED>;
-	using T3 = SignedInt32<SIGNED>;
-	using T4 = SignedInt64<SIGNED>;
-	using T5 = SignedHuge<SIGNED>;
+	using T8 = SignedInt8<SIGNED>;
+	using T16 = SignedInt16<SIGNED>;
+	using T32 = SignedInt32<SIGNED>;
+	using T64 = SignedInt64<SIGNED>;
+	using T128 = SignedInt128<SIGNED>;
 
-	// TMAX: type at MAXLEVEL (helper to select T1-T5 by level)
+	// TMAX: type at MAXLEVEL (helper to select type by bit width)
 	template <int L>
 	using TAtLevel = typename std::conditional<
-	    L == 5, T5,
+	    L == 128, T128,
 	    typename std::conditional<
-	        L == 4, T4,
-	        typename std::conditional<L == 3, T3, typename std::conditional<L == 2, T2, T1>::type>::type>::type>::type;
+	        L == 64, T64,
+	        typename std::conditional<L == 32, T32, typename std::conditional<L == 16, T16, T8>::type>::type>::type>::type;
 	using TMAX = TAtLevel<MAXLEVEL>;
 	using ValueType = TMAX;
 
@@ -339,31 +338,31 @@ struct PacMinMaxState {
 	}
 
 	// Returns the init value as double (for detecting never-updated counters)
-	// Counters start at level 1, so we use T1's init value
+	// Counters start at level 8, so we use T8's init value
 	static double InitAsDouble() {
-		return ToDouble(TypeInit<T1>());
+		return ToDouble(TypeInit<T8>());
 	}
 
-	// Check if value fits at level 1 (int8/uint8)
-	static inline bool FitsInLevel1(TMAX val) {
+	// Check if value fits at level 8 (int8/uint8)
+	static inline bool FitsInLevel8(TMAX val) {
 		return val >= static_cast<TMAX>(SIGNED ? INT8_MIN : 0) &&
 		       val <= static_cast<TMAX>(SIGNED ? INT8_MAX : UINT8_MAX);
 	}
 
-	// Check if value fits at level 2 (int16/uint16)
-	static inline bool FitsInLevel2(TMAX val) {
+	// Check if value fits at level 16 (int16/uint16)
+	static inline bool FitsInLevel16(TMAX val) {
 		return val >= static_cast<TMAX>(SIGNED ? INT16_MIN : 0) &&
 		       val <= static_cast<TMAX>(SIGNED ? INT16_MAX : UINT16_MAX);
 	}
 
-	// Check if value fits at level 3 (int32/uint32)
-	static inline bool FitsInLevel3(TMAX val) {
+	// Check if value fits at level 32 (int32/uint32)
+	static inline bool FitsInLevel32(TMAX val) {
 		return val >= static_cast<TMAX>(SIGNED ? INT32_MIN : 0) &&
 		       val <= static_cast<TMAX>(SIGNED ? INT32_MAX : UINT32_MAX);
 	}
 
-	// Check if value fits at level 4 (int64/uint64)
-	static inline bool FitsInLevel4(TMAX val) {
+	// Check if value fits at level 64 (int64/uint64)
+	static inline bool FitsInLevel64(TMAX val) {
 		return val >= static_cast<TMAX>(SIGNED ? INT64_MIN : 0) &&
 		       val <= static_cast<TMAX>(SIGNED ? INT64_MAX : UINT64_MAX);
 	}
@@ -409,27 +408,27 @@ struct PacMinMaxState {
 	// Memory is allocated incrementally to avoid waste when upgrading levels.
 	//
 	// Bank layout:
-	//   bank0: 64 bytes inline (always present, for level 1)
-	//   banks1: 1×64 bytes (allocated for level 2+)
-	//   banks2: 2×64 bytes (allocated for level 3+)
-	//   banks3: 4×64 bytes (allocated for level 4+)
-	//   banks4: 8×64 bytes (allocated for level 5)
+	//   bank0: 64 bytes inline (always present, for level 8)
+	//   banks1: 1×64 bytes (allocated for level 16+)
+	//   banks2: 2×64 bytes (allocated for level 32+)
+	//   banks3: 4×64 bytes (allocated for level 64+)
+	//   banks4: 8×64 bytes (allocated for level 128)
 	//
 	// Total banks per level:
-	//   Level 1 (int8):         1 bank  =  64 bytes
-	//   Level 2 (int16):        2 banks = 128 bytes
-	//   Level 3 (int32):        4 banks = 256 bytes
-	//   Level 4 (int64):        8 banks = 512 bytes
-	//   Level 5 (hugeint):     16 banks = 1024 bytes
+	//   Level  8 (int8):         1 bank  =  64 bytes
+	//   Level 16 (int16):        2 banks = 128 bytes
+	//   Level 32 (int32):        4 banks = 256 bytes
+	//   Level 64 (int64):        8 banks = 512 bytes
+	//   Level 128 (hugeint):    16 banks = 1024 bytes
 
-	uint8_t current_level; // 1, 2, 3, 4, or 5
+	uint8_t current_level; // 8, 16, 32, 64, or 128
 
 	// Bank storage - inline bank0 + pointers to additional banks
-	alignas(64) uint8_t bank0[64]; // Always present (level 1)
-	uint8_t *banks1;               // 1 bank (64 bytes) for level 2+
-	uint8_t *banks2;               // 2 banks (128 bytes) for level 3+
-	uint8_t *banks3;               // 4 banks (256 bytes) for level 4+
-	uint8_t *banks4;               // 8 banks (512 bytes) for level 5
+	alignas(64) uint8_t bank0[64]; // Always present (level 8)
+	uint8_t *banks1;               // 1 bank (64 bytes) for level 16+
+	uint8_t *banks2;               // 2 banks (128 bytes) for level 32+
+	uint8_t *banks3;               // 4 banks (256 bytes) for level 64+
+	uint8_t *banks4;               // 8 banks (512 bytes) for level 128
 
 	// Get pointer to bank n (0-15)
 	inline uint8_t *GetBank(int n) const {
@@ -562,60 +561,60 @@ struct PacMinMaxState {
 	void AllocateFirstLevel(ArenaAllocator &allocator) {
 #ifdef PAC_MINMAX_NONLAZY
 		// Pre-allocate all levels that exist for this MAXLEVEL
-		if (MAXLEVEL == 5) {
-			AllocateBanksForType<T5>(allocator);
-			InitializeBanks<T5>(TypeInit<T5>());
-		} else if (MAXLEVEL == 4) {
-			AllocateBanksForType<T4>(allocator);
-			InitializeBanks<T4>(TypeInit<T4>());
-		} else if (MAXLEVEL == 3) {
-			AllocateBanksForType<T3>(allocator);
-			InitializeBanks<T3>(TypeInit<T3>());
-		} else if (MAXLEVEL == 2) {
-			AllocateBanksForType<T2>(allocator);
-			InitializeBanks<T2>(TypeInit<T2>());
+		if (MAXLEVEL == 128) {
+			AllocateBanksForType<T128>(allocator);
+			InitializeBanks<T128>(TypeInit<T128>());
+		} else if (MAXLEVEL == 64) {
+			AllocateBanksForType<T64>(allocator);
+			InitializeBanks<T64>(TypeInit<T64>());
+		} else if (MAXLEVEL == 32) {
+			AllocateBanksForType<T32>(allocator);
+			InitializeBanks<T32>(TypeInit<T32>());
+		} else if (MAXLEVEL == 16) {
+			AllocateBanksForType<T16>(allocator);
+			InitializeBanks<T16>(TypeInit<T16>());
 		} else {
-			AllocateBanksForType<T1>(allocator);
-			InitializeBanks<T1>(TypeInit<T1>());
+			AllocateBanksForType<T8>(allocator);
+			InitializeBanks<T8>(TypeInit<T8>());
 		}
 		current_level = MAXLEVEL;
 #else
-		// Allocate banks needed for level 1 type (T1)
-		// For int8: 1 bank (bank0 inline), for float: 4 banks
-		AllocateBanksForType<T1>(allocator);
-		InitializeBanks<T1>(TypeInit<T1>());
-		current_level = 1;
+		// Allocate banks needed for level 8 type (T8)
+		// For int8: 1 bank (bank0 inline)
+		AllocateBanksForType<T8>(allocator);
+		InitializeBanks<T8>(TypeInit<T8>());
+		current_level = 8;
 #endif
 		update_count = 0;
 		global_bound = TypeInit<TMAX>();
 		initialized = true;
 	}
 
-	void UpgradeToLevel2(ArenaAllocator &allocator) {
-		if (MAXLEVEL >= 2) {
-			UpgradeLevelImpl<T1, T2>(allocator, TypeInit<T1>(), TypeInit<T2>());
-			current_level = 2;
+	void UpgradeToLevel16(ArenaAllocator &allocator) {
+		if (MAXLEVEL >= 16) {
+			UpgradeLevelImpl<T8, T16>(allocator, TypeInit<T8>(), TypeInit<T16>());
+			current_level = 16;
 		}
 	}
 
-	void UpgradeToLevel3(ArenaAllocator &allocator) {
-		if (MAXLEVEL >= 3) {
-			UpgradeLevelImpl<T2, T3>(allocator, TypeInit<T2>(), TypeInit<T3>());
-			current_level = 3;
+	void UpgradeToLevel32(ArenaAllocator &allocator) {
+		if (MAXLEVEL >= 32) {
+			UpgradeLevelImpl<T16, T32>(allocator, TypeInit<T16>(), TypeInit<T32>());
+			current_level = 32;
 		}
 	}
 
-	void UpgradeToLevel4(ArenaAllocator &allocator) {
-		if (MAXLEVEL >= 4) {
-			UpgradeLevelImpl<T3, T4>(allocator, TypeInit<T3>(), TypeInit<T4>());
-			current_level = 4;
+	void UpgradeToLevel64(ArenaAllocator &allocator) {
+		if (MAXLEVEL >= 64) {
+			UpgradeLevelImpl<T32, T64>(allocator, TypeInit<T32>(), TypeInit<T64>());
+			current_level = 64;
 		}
 	}
 
-	void UpgradeToLevel5(ArenaAllocator &allocator) {
-		if (MAXLEVEL >= 5) {
-			UpgradeLevelImpl<T4, T5>(allocator, TypeInit<T4>(), TypeInit<T5>());
-			current_level = 5;
+	void UpgradeToLevel128(ArenaAllocator &allocator) {
+		if (MAXLEVEL >= 128) {
+			UpgradeLevelImpl<T64, T128>(allocator, TypeInit<T64>(), TypeInit<T128>());
+			current_level = 128;
 		}
 	}
 
@@ -636,58 +635,57 @@ struct PacMinMaxState {
 	// This gathers to a temp buffer and extracts using SWAR conversion
 	template <typename T>
 	T GetValueAs(int j) const {
-		// Levels 3-5: only for integers
-		if (MAXLEVEL >= 5 && current_level >= 5) {
-			T5 buf[64];
-			GatherToBuf<T5>(buf);
+		if (MAXLEVEL >= 128 && current_level >= 128) {
+			T128 buf[64];
+			GatherToBuf<T128>(buf);
 			return static_cast<T>(buf[j]); // hugeint is linear
 		}
-		if (MAXLEVEL >= 4 && current_level >= 4) {
-			T4 buf[64];
-			GatherToBuf<T4>(buf);
+		if (MAXLEVEL >= 64 && current_level >= 64) {
+			T64 buf[64];
+			GatherToBuf<T64>(buf);
 			return static_cast<T>(buf[j]); // int64 is linear
 		}
-		if (MAXLEVEL >= 3 && current_level >= 3) {
-			T3 buf[64];
-			GatherToBuf<T3>(buf);
+		if (MAXLEVEL >= 32 && current_level >= 32) {
+			T32 buf[64];
+			GatherToBuf<T32>(buf);
 			return static_cast<T>(buf[LinearToSWAR<2>(j)]); // int32 SWAR
 		}
-		if (MAXLEVEL >= 2 && current_level >= 2) {
-			T2 buf[64];
-			GatherToBuf<T2>(buf);
+		if (MAXLEVEL >= 16 && current_level >= 16) {
+			T16 buf[64];
+			GatherToBuf<T16>(buf);
 			return static_cast<T>(buf[LinearToSWAR<4>(j)]); // int16 SWAR
 		}
-		T1 buf[64];
-		GatherToBuf<T1>(buf);
+		T8 buf[64];
+		GatherToBuf<T8>(buf);
 		return static_cast<T>(buf[LinearToSWAR<8>(j)]); // int8 SWAR
 	}
 
 	void GetTotalsAsDouble(double *dst) const {
 		// Gather from banks and apply SWAR extraction based on type
-		if (MAXLEVEL >= 5 && current_level == 5) {
-			T5 buf[64];
-			GatherToBuf<T5>(buf);
+		if (MAXLEVEL >= 128 && current_level == 128) {
+			T128 buf[64];
+			GatherToBuf<T128>(buf);
 			for (int i = 0; i < 64; i++) {
 				dst[i] = ToDouble(buf[i]); // hugeint is linear
 			}
-		} else if (MAXLEVEL >= 4 && current_level == 4) {
-			T4 buf[64];
-			GatherToBuf<T4>(buf);
+		} else if (MAXLEVEL >= 64 && current_level == 64) {
+			T64 buf[64];
+			GatherToBuf<T64>(buf);
 			for (int i = 0; i < 64; i++) {
 				dst[i] = ToDouble(buf[i]); // int64 is linear
 			}
-		} else if (MAXLEVEL >= 3 && current_level == 3) {
-			T3 buf[64];
-			GatherToBuf<T3>(buf);
-			ExtractSWAR<T3, 2>(buf, dst); // int32: 2 per u64
-		} else if (MAXLEVEL >= 2 && current_level == 2) {
-			T2 buf[64];
-			GatherToBuf<T2>(buf);
-			ExtractSWAR<T2, 4>(buf, dst); // int16: 4 per u64
-		} else if (current_level == 1) {
-			T1 buf[64];
-			GatherToBuf<T1>(buf);
-			ExtractSWAR<T1, 8>(buf, dst); // int8: 8 per u64
+		} else if (MAXLEVEL >= 32 && current_level == 32) {
+			T32 buf[64];
+			GatherToBuf<T32>(buf);
+			ExtractSWAR<T32, 2>(buf, dst); // int32: 2 per u64
+		} else if (MAXLEVEL >= 16 && current_level == 16) {
+			T16 buf[64];
+			GatherToBuf<T16>(buf);
+			ExtractSWAR<T16, 4>(buf, dst); // int16: 4 per u64
+		} else if (current_level == 8) {
+			T8 buf[64];
+			GatherToBuf<T8>(buf);
+			ExtractSWAR<T8, 8>(buf, dst); // int8: 8 per u64
 		} else {                          // Not initialized - return init values
 			double init_val = ToDouble(TypeInit<TMAX>());
 			for (int i = 0; i < 64; i++) {
@@ -698,38 +696,38 @@ struct PacMinMaxState {
 
 	// Upgrade level if value doesn't fit in current level
 	void MaybeUpgrade(ArenaAllocator &allocator, TMAX value) {
-		if (current_level == 1 && !FitsInLevel1(value)) {
-			UpgradeToLevel2(allocator);
+		if (current_level == 8 && !FitsInLevel8(value)) {
+			UpgradeToLevel16(allocator);
 		}
-		if (MAXLEVEL >= 3 && current_level == 2 && !FitsInLevel2(value)) {
-			UpgradeToLevel3(allocator);
+		if (MAXLEVEL >= 32 && current_level == 16 && !FitsInLevel16(value)) {
+			UpgradeToLevel32(allocator);
 		}
-		if (MAXLEVEL >= 4 && current_level == 3 && !FitsInLevel3(value)) {
-			UpgradeToLevel4(allocator);
+		if (MAXLEVEL >= 64 && current_level == 32 && !FitsInLevel32(value)) {
+			UpgradeToLevel64(allocator);
 		}
-		if (MAXLEVEL >= 5 && current_level == 4 && !FitsInLevel4(value)) {
-			UpgradeToLevel5(allocator);
+		if (MAXLEVEL >= 128 && current_level == 64 && !FitsInLevel64(value)) {
+			UpgradeToLevel128(allocator);
 		}
 	}
 
 	// Update extremes at current level using SIMD-friendly implementation
 	AUTOVECTORIZE void UpdateAtCurrentLevel(uint64_t key_hash, TMAX value) {
 		uint8_t *banks[16]; // Max banks needed (for hugeint)
-		if (current_level == 1) {
-			GetBankPointers<T1>(banks);
-			UpdateExtremes<T1, IS_MAX>(banks, key_hash, static_cast<T1>(value));
-		} else if (MAXLEVEL >= 2 && current_level == 2) {
-			GetBankPointers<T2>(banks);
-			UpdateExtremes<T2, IS_MAX>(banks, key_hash, static_cast<T2>(value));
-		} else if (MAXLEVEL >= 3 && current_level == 3) {
-			GetBankPointers<T3>(banks);
-			UpdateExtremes<T3, IS_MAX>(banks, key_hash, static_cast<T3>(value));
-		} else if (MAXLEVEL >= 4 && current_level == 4) {
-			GetBankPointers<T4>(banks);
-			UpdateExtremes<T4, IS_MAX>(banks, key_hash, static_cast<T4>(value));
-		} else if (MAXLEVEL >= 5 && current_level == 5) {
-			GetBankPointers<T5>(banks);
-			UpdateExtremes<T5, IS_MAX>(banks, key_hash, static_cast<T5>(value));
+		if (current_level == 8) {
+			GetBankPointers<T8>(banks);
+			UpdateExtremes<T8, IS_MAX>(banks, key_hash, static_cast<T8>(value));
+		} else if (MAXLEVEL >= 16 && current_level == 16) {
+			GetBankPointers<T16>(banks);
+			UpdateExtremes<T16, IS_MAX>(banks, key_hash, static_cast<T16>(value));
+		} else if (MAXLEVEL >= 32 && current_level == 32) {
+			GetBankPointers<T32>(banks);
+			UpdateExtremes<T32, IS_MAX>(banks, key_hash, static_cast<T32>(value));
+		} else if (MAXLEVEL >= 64 && current_level == 64) {
+			GetBankPointers<T64>(banks);
+			UpdateExtremes<T64, IS_MAX>(banks, key_hash, static_cast<T64>(value));
+		} else if (MAXLEVEL >= 128 && current_level == 128) {
+			GetBankPointers<T128>(banks);
+			UpdateExtremes<T128, IS_MAX>(banks, key_hash, static_cast<T128>(value));
 		}
 	}
 
@@ -754,56 +752,56 @@ struct PacMinMaxState {
 			return;
 		}
 		if (!initialized) {
-			AllocateBanksForType<T1>(allocator);
-			InitializeBanks<T1>(TypeInit<T1>());
-			current_level = 1;
+			AllocateBanksForType<T8>(allocator);
+			InitializeBanks<T8>(TypeInit<T8>());
+			current_level = 8;
 			update_count = 0;
 			global_bound = TypeInit<TMAX>();
 			initialized = true;
 		}
 		// Upgrade this state to match src level
-		if (MAXLEVEL >= 2 && current_level == 1 && current_level < src.current_level) {
-			UpgradeToLevel2(allocator);
+		if (MAXLEVEL >= 16 && current_level == 8 && current_level < src.current_level) {
+			UpgradeToLevel16(allocator);
 		}
-		if (MAXLEVEL >= 3 && current_level == 2 && current_level < src.current_level) {
-			UpgradeToLevel3(allocator);
+		if (MAXLEVEL >= 32 && current_level == 16 && current_level < src.current_level) {
+			UpgradeToLevel32(allocator);
 		}
-		if (MAXLEVEL >= 4 && current_level == 3 && current_level < src.current_level) {
-			UpgradeToLevel4(allocator);
+		if (MAXLEVEL >= 64 && current_level == 32 && current_level < src.current_level) {
+			UpgradeToLevel64(allocator);
 		}
-		if (MAXLEVEL >= 5 && current_level == 4 && current_level < src.current_level) {
-			UpgradeToLevel5(allocator);
+		if (MAXLEVEL >= 128 && current_level == 64 && current_level < src.current_level) {
+			UpgradeToLevel128(allocator);
 		}
 		// Combine at current level using element accessors
-		if (current_level == 1) {
+		if (current_level == 8) {
 			for (int j = 0; j < 64; j++) {
-				T1 mine = GetElement<T1>(j);
-				T1 theirs = src.template GetValueAs<T1>(j);
-				SetElement<T1>(j, PAC_BETTER(mine, theirs));
+				T8 mine = GetElement<T8>(j);
+				T8 theirs = src.template GetValueAs<T8>(j);
+				SetElement<T8>(j, PAC_BETTER(mine, theirs));
 			}
-		} else if (MAXLEVEL >= 2 && current_level == 2) {
+		} else if (MAXLEVEL >= 16 && current_level == 16) {
 			for (int j = 0; j < 64; j++) {
-				T2 mine = GetElement<T2>(j);
-				T2 theirs = src.template GetValueAs<T2>(j);
-				SetElement<T2>(j, PAC_BETTER(mine, theirs));
+				T16 mine = GetElement<T16>(j);
+				T16 theirs = src.template GetValueAs<T16>(j);
+				SetElement<T16>(j, PAC_BETTER(mine, theirs));
 			}
-		} else if (MAXLEVEL >= 3 && current_level == 3) {
+		} else if (MAXLEVEL >= 32 && current_level == 32) {
 			for (int j = 0; j < 64; j++) {
-				T3 mine = GetElement<T3>(j);
-				T3 theirs = src.template GetValueAs<T3>(j);
-				SetElement<T3>(j, PAC_BETTER(mine, theirs));
+				T32 mine = GetElement<T32>(j);
+				T32 theirs = src.template GetValueAs<T32>(j);
+				SetElement<T32>(j, PAC_BETTER(mine, theirs));
 			}
-		} else if (MAXLEVEL >= 4 && current_level == 4) {
+		} else if (MAXLEVEL >= 64 && current_level == 64) {
 			for (int j = 0; j < 64; j++) {
-				T4 mine = GetElement<T4>(j);
-				T4 theirs = src.template GetValueAs<T4>(j);
-				SetElement<T4>(j, PAC_BETTER(mine, theirs));
+				T64 mine = GetElement<T64>(j);
+				T64 theirs = src.template GetValueAs<T64>(j);
+				SetElement<T64>(j, PAC_BETTER(mine, theirs));
 			}
-		} else if (MAXLEVEL >= 5 && current_level == 5) {
+		} else if (MAXLEVEL >= 128 && current_level == 128) {
 			for (int j = 0; j < 64; j++) {
-				T5 mine = GetElement<T5>(j);
-				T5 theirs = src.template GetValueAs<T5>(j);
-				SetElement<T5>(j, PAC_BETTER(mine, theirs));
+				T128 mine = GetElement<T128>(j);
+				T128 theirs = src.template GetValueAs<T128>(j);
+				SetElement<T128>(j, PAC_BETTER(mine, theirs));
 			}
 		}
 		RecomputeBound();
