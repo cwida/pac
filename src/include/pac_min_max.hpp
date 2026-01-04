@@ -424,7 +424,7 @@ struct PacMinMaxState {
 	uint8_t current_level; // 8, 16, 32, 64, or 128
 
 	// Bank storage - inline bank0 + pointers to additional banks
-	alignas(64) uint8_t bank0[64]; // Always present (level 8)
+	uint8_t bank0[64]; // Always present (level 8)
 	uint8_t *banks1;               // 1 bank (64 bytes) for level 16+
 	uint8_t *banks2;               // 2 banks (128 bytes) for level 32+
 	uint8_t *banks3;               // 4 banks (256 bytes) for level 64+
