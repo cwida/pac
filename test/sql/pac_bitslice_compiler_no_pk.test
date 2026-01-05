@@ -144,7 +144,7 @@ query I
 SELECT SUM(a.val)
 FROM bitslice_a a JOIN bitslice_b b ON a.grp = b.grp
 ----
-560
+615
 
 # 7) COUNT with JOIN + GROUP BY
 query II
@@ -158,6 +158,71 @@ ORDER BY a.grp
 2	25
 3	20
 4	20
+
+# ========== LEFT JOIN TEST CASES ==========
+
+# Test LEFT JOIN with no-PK table on left
+query III
+SELECT a.grp, COUNT(*), SUM(COALESCE(b.val_b, 0))
+FROM bitslice_a a
+LEFT JOIN bitslice_b b ON a.grp = b.grp
+GROUP BY a.grp
+ORDER BY a.grp
+----
+0	25	0
+1	35	60
+2	25	120
+3	20	120
+4	20	280
+
+# Test LEFT JOIN with aggregate on right table (no PK)
+query III
+SELECT a.grp, SUM(a.val), COUNT(b.id)
+FROM bitslice_a a
+LEFT JOIN bitslice_b b ON a.grp = b.grp AND b.other > 2
+GROUP BY a.grp
+ORDER BY a.grp
+----
+0	15	5
+1	21	7
+2	22	5
+3	44	8
+4	43	4
+
+# Test LEFT JOIN with NULL handling (no PK)
+statement ok
+INSERT INTO bitslice_a VALUES (100, 5, 99, 0);
+
+query II
+SELECT a.grp, SUM(a.val)
+FROM bitslice_a a
+LEFT JOIN bitslice_b b ON a.grp = b.grp
+GROUP BY a.grp
+ORDER BY a.grp
+----
+0	75
+1	105
+2	110
+3	110
+4	215
+5	0
+
+statement ok
+DELETE FROM bitslice_a WHERE id = 100;
+
+# Test multiple LEFT JOINs with no-PK tables
+query II
+SELECT a.grp, SUM(a.val)
+FROM bitslice_a a
+LEFT JOIN bitslice_b b ON a.grp = b.grp
+LEFT JOIN bitslice_a c ON a.grp2 = c.grp2
+GROUP BY a.grp
+ORDER BY a.grp
+LIMIT 3
+----
+0	450
+1	705
+2	865
 
 # Edge case: table that actually has a column named "rowid"
 statement ok

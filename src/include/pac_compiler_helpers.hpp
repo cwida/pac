@@ -17,7 +17,9 @@ void ReplanWithoutOptimizers(ClientContext &context, const std::string &query, u
 // Find the first LogicalGet node in `plan`. Returns a pointer to the unique_ptr that holds the
 // found node (so it can be replaced) and sets out_table_idx to the LogicalGet.table_index.
 // If not found, returns nullptr and sets out_table_idx to DConstants::INVALID_INDEX.
-unique_ptr<LogicalOperator> *FindPrivacyUnitGetNode(unique_ptr<LogicalOperator> &plan);
+// If pu_table_name is provided, only returns a LogicalGet matching that table name.
+unique_ptr<LogicalOperator> *FindPrivacyUnitGetNode(unique_ptr<LogicalOperator> &plan,
+                                                    const std::string &pu_table_name = "");
 
 void AddRowIDColumn(LogicalGet &get);
 

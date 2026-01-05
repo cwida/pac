@@ -47,8 +47,10 @@ static bool ContainsDisallowedJoin(const LogicalOperator &op) {
 	    op.type == LogicalOperatorType::LOGICAL_DEPENDENT_JOIN || op.type == LogicalOperatorType::LOGICAL_ASOF_JOIN ||
 	    op.type == LogicalOperatorType::LOGICAL_POSITIONAL_JOIN) {
 		auto &join = op.Cast<LogicalJoin>();
-		if (join.join_type != JoinType::INNER) {
-			// Non-inner join detected: signal disallowed join via boolean return to let caller throw
+		// Allow INNER and LEFT joins; reject all others
+		if (join.join_type != JoinType::INNER && join.join_type != JoinType::LEFT &&
+		    join.join_type != JoinType::RIGHT) {
+			// Non-inner/left join detected: signal disallowed join via boolean return to let caller throw
 			return true;
 		}
 	} else if (op.type == LogicalOperatorType::LOGICAL_DELIM_JOIN || op.type == LogicalOperatorType::LOGICAL_ANY_JOIN ||
@@ -343,7 +345,7 @@ PACCompatibilityResult PACRewriteQueryCheck(LogicalOperator &plan, ClientContext
 		throw InvalidInputException("PAC rewrite: DISTINCT is not supported for PAC compilation");
 	}
 	if (ContainsDisallowedJoin(plan)) {
-		throw InvalidInputException("PAC rewrite: only INNER JOINs are supported for PAC compilation");
+		throw InvalidInputException("PAC rewrite: only INNER and LEFT JOINs are supported for PAC compilation");
 	}
 
 	// If we reach here, the plan is eligible for rewrite/compilation

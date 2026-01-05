@@ -121,8 +121,7 @@ static unique_ptr<Expression> BuildXorHashFromPKs(OptimizerExtensionInput &input
 // New helper: find the unique_ptr reference to a LogicalGet node by table name.
 // Returns a pointer to the owning unique_ptr so callers can replace/mutate it in-place.
 // Also optionally returns information about the parent join if the node is part of a join.
-static unique_ptr<LogicalOperator> *FindNodeRefByTable(unique_ptr<LogicalOperator> *root,
-                                                       const std::string &table_name,
+static unique_ptr<LogicalOperator> *FindNodeRefByTable(unique_ptr<LogicalOperator> *root, const std::string &table_name,
                                                        LogicalOperator **parent_out = nullptr,
                                                        idx_t *child_idx_out = nullptr) {
 	if (!root || !root->get()) {
@@ -565,9 +564,9 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 }
 
 void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
-                      const std::vector<std::string> &pks, bool use_rowid) {
+                      const std::vector<std::string> &pks, bool use_rowid, const std::string &pu_table_name) {
 
-	auto pu_scan_ptr = FindPrivacyUnitGetNode(plan);
+	auto pu_scan_ptr = FindPrivacyUnitGetNode(plan, pu_table_name);
 	auto &get = pu_scan_ptr->get()->Cast<LogicalGet>();
 	if (use_rowid) {
 		AddRowIDColumn(get);
@@ -747,7 +746,7 @@ void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExten
 	ReplanWithoutOptimizers(input.context, query, plan);
 
 	if (pu_present_in_tree) {
-		ModifyPlanWithPU(input, plan, pks, use_rowid);
+		ModifyPlanWithPU(input, plan, pks, use_rowid, check.scanned_pu_tables[0]);
 	} else {
 		ModifyPlanWithoutPU(check, input, plan, gets_missing, gets_present, fk_path_to_use, privacy_unit);
 	}

@@ -13,6 +13,7 @@
 #include "duckdb/planner/operator/logical_aggregate.hpp"
 #include "duckdb/planner/operator/logical_projection.hpp"
 #include "duckdb/common/constants.hpp"
+#include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 
 #include <vector>
 
@@ -40,7 +41,8 @@ void ReplanWithoutOptimizers(ClientContext &context, const std::string &query, u
 	plan = optimizer.Optimize(std::move(planner.plan));
 }
 
-unique_ptr<LogicalOperator> *FindPrivacyUnitGetNode(unique_ptr<LogicalOperator> &plan) {
+unique_ptr<LogicalOperator> *FindPrivacyUnitGetNode(unique_ptr<LogicalOperator> &plan,
+                                                    const std::string &pu_table_name) {
 	unique_ptr<LogicalOperator> *found_ptr = nullptr;
 	if (!plan) {
 		return nullptr;
@@ -56,8 +58,19 @@ unique_ptr<LogicalOperator> *FindPrivacyUnitGetNode(unique_ptr<LogicalOperator> 
 			continue;
 		}
 		if (cur->type == LogicalOperatorType::LOGICAL_GET) {
-			found_ptr = cur_ptr;
-			break;
+			// If a specific table name is provided, only match that table
+			if (!pu_table_name.empty()) {
+				auto &get = cur->Cast<LogicalGet>();
+				auto tblptr = get.GetTable();
+				if (tblptr && tblptr->name == pu_table_name) {
+					found_ptr = cur_ptr;
+					break;
+				}
+			} else {
+				// No specific table name provided, return the first LogicalGet
+				found_ptr = cur_ptr;
+				break;
+			}
 		}
 		for (auto &c : cur->children) {
 			stack.push_back(&c);
@@ -65,7 +78,12 @@ unique_ptr<LogicalOperator> *FindPrivacyUnitGetNode(unique_ptr<LogicalOperator> 
 	}
 
 	if (!found_ptr) {
-		throw InternalException("PAC Compiler: could not find LogicalGet node in plan");
+		if (!pu_table_name.empty()) {
+			throw InternalException("PAC Compiler: could not find LogicalGet node for table " + pu_table_name +
+			                        " in plan");
+		} else {
+			throw InternalException("PAC Compiler: could not find LogicalGet node in plan");
+		}
 	}
 
 	return found_ptr;
