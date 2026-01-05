@@ -14,6 +14,7 @@
 #include <duckdb/parser/expression/function_expression.hpp>
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
+#include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/function/function_binder.hpp"
 #include "duckdb/catalog/catalog_entry/aggregate_function_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
@@ -119,8 +120,11 @@ static unique_ptr<Expression> BuildXorHashFromPKs(OptimizerExtensionInput &input
 
 // New helper: find the unique_ptr reference to a LogicalGet node by table name.
 // Returns a pointer to the owning unique_ptr so callers can replace/mutate it in-place.
+// Also optionally returns information about the parent join if the node is part of a join.
 static unique_ptr<LogicalOperator> *FindNodeRefByTable(unique_ptr<LogicalOperator> *root,
-                                                       const std::string &table_name) {
+                                                       const std::string &table_name,
+                                                       LogicalOperator **parent_out = nullptr,
+                                                       idx_t *child_idx_out = nullptr) {
 	if (!root || !root->get()) {
 		return nullptr;
 	}
@@ -132,9 +136,15 @@ static unique_ptr<LogicalOperator> *FindNodeRefByTable(unique_ptr<LogicalOperato
 			return root;
 		}
 	}
-	for (auto &child_ref : node->children) {
-		auto res = FindNodeRefByTable(&child_ref, table_name);
+	for (idx_t i = 0; i < node->children.size(); i++) {
+		auto res = FindNodeRefByTable(&node->children[i], table_name, parent_out, child_idx_out);
 		if (res) {
+			if (parent_out && !*parent_out) {
+				*parent_out = node;
+				if (child_idx_out) {
+					*child_idx_out = i;
+				}
+			}
 			return res;
 		}
 	}
@@ -387,17 +397,56 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 		idx++;
 	}
 
-	// Find the unique_ptr reference to the existing LogicalGet for gets_present[0]
-	// Use the shared helper to locate the owning unique_ptr so we can replace it safely
-	unique_ptr<LogicalOperator> *target_ref =
-	    FindNodeRefByTable(&plan, gets_present.empty() ? std::string() : gets_present[0]);
+	// Find the unique_ptr reference to the existing table that connects to the missing tables
+	// We need to find the last present table in the FK path, which is the connection point
+	LogicalOperator *parent_join = nullptr;
+	idx_t child_idx_in_parent = 0;
+	unique_ptr<LogicalOperator> *target_ref = nullptr;
+
+	// Find the last present table in the FK path (ordered)
+	// This is the table that connects to the first missing table
+	string connecting_table;
+	if (!fk_path.empty()) {
+		// Go through the FK path and find the last table that's in gets_present
+		for (auto &table_in_path : fk_path) {
+			bool is_present = false;
+			for (auto &present : gets_present) {
+				if (table_in_path == present) {
+					is_present = true;
+					connecting_table = table_in_path;
+					break;
+				}
+			}
+			// Once we hit a missing table, we've found our connection point
+			if (!is_present) {
+				break;
+			}
+		}
+	}
+
+	// If we couldn't find a connecting table, fall back to the first present table
+	if (connecting_table.empty() && !gets_present.empty()) {
+		connecting_table = gets_present[0];
+	}
+
+	target_ref = FindNodeRefByTable(&plan, connecting_table, &parent_join, &child_idx_in_parent);
 	if (!target_ref) {
 		throw InternalException("PAC compiler: could not find existing LogicalGet for table " +
-		                        (gets_present.empty() ? std::string("<none>") : gets_present[0]));
+		                        (connecting_table.empty() ? std::string("<none>") : connecting_table));
+	}
+
+	// Check if the target node is part of a LEFT JOIN
+	bool is_left_join = false;
+	JoinType original_join_type = JoinType::INNER;
+	if (parent_join && parent_join->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
+		auto &parent_join_op = parent_join->Cast<LogicalComparisonJoin>();
+		original_join_type = parent_join_op.join_type;
+		is_left_join = (original_join_type == JoinType::LEFT);
 	}
 
 	// We create the joins in this order:
-	// the PU joins with ordered_table_names[0], then this join node joins with ordered_table_names[1], ...
+	// the existing node joins with ordered_table_names[0], then this join node joins with ordered_table_names[1], ...
+	// All intermediate joins are INNER joins to reach the privacy unit
 	unique_ptr<LogicalOperator> final_join;
 	unique_ptr<LogicalOperator> existing_node = (*target_ref)->Copy(input.context);
 
@@ -420,6 +469,16 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 
 	// Use ReplaceNode to insert the join and handle column binding remapping
 	ReplaceNode(plan, *target_ref, final_join);
+
+	// If the original was a LEFT JOIN, we need to restore it at the top level
+	// The INNER joins to reach the PU are now inside the LEFT JOIN structure
+	if (is_left_join && parent_join && parent_join->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
+		auto &parent_join_op = parent_join->Cast<LogicalComparisonJoin>();
+		// The join type should already be LEFT, but make sure the structure is correct
+		// The INNER join chain is now in place of the original child
+		parent_join_op.join_type = original_join_type;
+	}
+
 #if DEBUG
 	plan->Print();
 
@@ -459,11 +518,18 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 		string function_name = old_aggr.function.name;
 
 		// Extract the original aggregate's value child expression (e.g., the `val` in SUM(val))
+		// COUNT(*) has no children, so we create a constant 1 expression when there's no child
 		unique_ptr<Expression> value_child;
 		if (old_aggr.children.empty()) {
-			throw InternalException("PAC compiler: expected aggregate to have a child expression");
+			// COUNT(*) case - create a constant 1
+			if (function_name == "count_star" || function_name == "count") {
+				value_child = make_uniq_base<Expression, BoundConstantExpression>(Value::BIGINT(1));
+			} else {
+				throw InternalException("PAC compiler: expected aggregate to have a child expression");
+			}
+		} else {
+			value_child = old_aggr.children[0]->Copy();
 		}
-		value_child = old_aggr.children[0]->Copy();
 
 		// Get PAC function name
 		string pac_function_name = GetPacAggregateFunctionName(function_name);
@@ -539,11 +605,18 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 		string function_name = old_aggr.function.name;
 
 		// Extract the original aggregate's value child expression (e.g., the `val` in SUM(val))
+		// COUNT(*) has no children, so we create a constant 1 expression when there's no child
 		unique_ptr<Expression> value_child;
 		if (old_aggr.children.empty()) {
-			throw InternalException("PAC compiler: expected aggregate to have a child expression");
+			// COUNT(*) case - create a constant 1
+			if (function_name == "count_star" || function_name == "count") {
+				value_child = make_uniq_base<Expression, BoundConstantExpression>(Value::BIGINT(1));
+			} else {
+				throw InternalException("PAC compiler: expected aggregate to have a child expression");
+			}
+		} else {
+			value_child = old_aggr.children[0]->Copy();
 		}
-		value_child = old_aggr.children[0]->Copy();
 
 		// Get PAC function name
 		string pac_function_name = GetPacAggregateFunctionName(function_name);
