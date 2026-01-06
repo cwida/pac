@@ -33,10 +33,10 @@ static bool ContainsCrossJoinWithGenerateSeries(const LogicalOperator &op) {
 	return false;
 }
 
-static bool IsAllowedAggregate(const std::string &func) {
-	static const std::unordered_set<std::string> allowed = {
-	    "sum", "sum_no_overflow", "count", "count_star", "avg", "min", "max"};
-	std::string lower_func = func;
+static bool IsAllowedAggregate(const string &func) {
+	static const std::unordered_set<string> allowed = {"sum", "sum_no_overflow", "count", "count_star", "avg", "min",
+	                                                   "max"};
+	string lower_func = func;
 	std::transform(lower_func.begin(), lower_func.end(), lower_func.begin(), ::tolower);
 	return allowed.count(lower_func) > 0;
 }
@@ -114,7 +114,7 @@ static bool ContainsAggregation(const LogicalOperator &op) {
 }
 
 // helper: traverse the plan and count how many times each table/CTE name is scanned
-void CountScans(const LogicalOperator &op, std::unordered_map<std::string, idx_t> &counts) {
+void CountScans(const LogicalOperator &op, std::unordered_map<string, idx_t> &counts) {
 	if (op.type == LogicalOperatorType::LOGICAL_GET) {
 		auto &scan = op.Cast<LogicalGet>();
 		auto table_entry = scan.GetTable();
@@ -128,7 +128,7 @@ void CountScans(const LogicalOperator &op, std::unordered_map<std::string, idx_t
 }
 
 PACCompatibilityResult PACRewriteQueryCheck(LogicalOperator &plan, ClientContext &context,
-                                            const std::vector<std::string> &pac_tables, bool replan_in_progress) {
+                                            const vector<string> &pac_tables, bool replan_in_progress) {
 	PACCompatibilityResult result;
 
 	// If a replan/compilation is already in progress by the optimizer extension, skip compatibility checks
@@ -145,7 +145,7 @@ PACCompatibilityResult PACRewriteQueryCheck(LogicalOperator &plan, ClientContext
 	// Case 2: no PAC tables? (return empty result, nothing to do)
 
 	// count all scanned tables/CTEs in the plan
-	std::unordered_map<std::string, idx_t> scan_counts;
+	std::unordered_map<string, idx_t> scan_counts;
 	CountScans(plan, scan_counts);
 
 	// Record which configured PAC tables were scanned in this plan. The optimizer
@@ -168,7 +168,7 @@ PACCompatibilityResult PACRewriteQueryCheck(LogicalOperator &plan, ClientContext
 		if (pac_count == 0) {
 			continue;
 		}
-		std::string sample_name = std::string("_pac_internal_sample_") + t;
+		string sample_name = string("_pac_internal_sample_") + t;
 		idx_t sample_count = 0;
 		auto it = scan_counts.find(sample_name);
 		if (it != scan_counts.end()) {
@@ -203,7 +203,7 @@ PACCompatibilityResult PACRewriteQueryCheck(LogicalOperator &plan, ClientContext
 	}
 
 	// Build a vector of scanned table names to check FK links
-	std::vector<std::string> scanned_tables;
+	vector<string> scanned_tables;
 	for (auto &kv : scan_counts) {
 		scanned_tables.push_back(kv.first);
 	}
@@ -211,7 +211,7 @@ PACCompatibilityResult PACRewriteQueryCheck(LogicalOperator &plan, ClientContext
 	// Populate scanned_non_pac_tables: scanned tables that are not in the configured pac_tables
 	// and are not internal sample tables (named _pac_internal_sample_<table>). This is useful
 	// to know which external/non-PAC tables were read by the query.
-	std::unordered_set<std::string> pac_set(pac_tables.begin(), pac_tables.end());
+	std::unordered_set<string> pac_set(pac_tables.begin(), pac_tables.end());
 	for (auto &name : scanned_tables) {
 		if (name.rfind("_pac_internal_sample_", 0) == 0) {
 			// internal sample table, skip
