@@ -16,6 +16,145 @@ template <bool IS_MAX>
 using PacMinMaxDoubleState = PacMinMaxFloatingState<double, IS_MAX>;
 
 // ============================================================================
+// FlushBufferIfNeeded - flush input buffer and transition to aggregation mode
+// Only used in banked mode. No-op for non-banked or floating-point states.
+// ============================================================================
+
+// Forward declaration of PacMinMaxUpdateOneAggregation
+template <class State, bool IS_MAX>
+AUTOVECTORIZE static inline void PacMinMaxUpdateOneAggregation(State &state, uint64_t key_hash,
+                                                               typename State::ValueType value,
+                                                               ArenaAllocator &allocator);
+
+// Helper to flush input buffer for integer states (banked mode only)
+template <bool SIGNED, bool IS_MAX, int MAXLEVEL>
+static inline void FlushBufferIfNeeded(PacMinMaxState<SIGNED, IS_MAX, MAXLEVEL> &state, ArenaAllocator &allocator) {
+#if !defined(PAC_MINMAX_NONBANKED) && !defined(PAC_MINMAX_NOBUFFERING)
+	if (state.IsBuffering()) {
+		// Copy buffer to stack before AllocateFirstLevel overwrites union
+		using State = PacMinMaxState<SIGNED, IS_MAX, MAXLEVEL>;
+		uint64_t saved_hashes[State::BUFFER_CAPACITY];
+		typename State::TMAX saved_values[State::BUFFER_CAPACITY];
+		uint8_t buf_count = state.GetBufferCount();
+		for (uint8_t i = 0; i < buf_count; i++) {
+			saved_hashes[i] = state.buf_hashes[i];
+			saved_values[i] = state.buf_values[i];
+		}
+		// Transition to aggregation mode
+		state.AllocateFirstLevel(allocator);
+		// Process buffered values
+		for (uint8_t i = 0; i < buf_count; i++) {
+			PacMinMaxUpdateOneAggregation<State, IS_MAX>(state, saved_hashes[i], saved_values[i], allocator);
+		}
+	}
+#endif
+}
+
+// Pointer overload for use in Finalize
+template <bool SIGNED, bool IS_MAX, int MAXLEVEL>
+static inline void FlushBufferIfNeeded(PacMinMaxState<SIGNED, IS_MAX, MAXLEVEL> *state, ArenaAllocator &allocator) {
+	FlushBufferIfNeeded(*state, allocator);
+}
+
+// No-op for floating-point states (no buffering)
+template <typename T, bool IS_MAX>
+static inline void FlushBufferIfNeeded(PacMinMaxFloatingState<T, IS_MAX> &, ArenaAllocator &) {
+}
+template <typename T, bool IS_MAX>
+static inline void FlushBufferIfNeeded(PacMinMaxFloatingState<T, IS_MAX> *, ArenaAllocator &) {
+}
+
+// ============================================================================
+// PacMinMaxUpdateOneAggregation - update without buffering check
+// ============================================================================
+
+template <class State, bool IS_MAX>
+AUTOVECTORIZE static inline void PacMinMaxUpdateOneAggregation(State &state, uint64_t key_hash,
+                                                               typename State::ValueType value,
+                                                               ArenaAllocator &allocator) {
+#ifdef PAC_MINMAX_NONBANKED
+	// NONBANKED: state is already initialized
+#ifndef PAC_MINMAX_NOBOUNDOPT
+	if (!PAC_IS_BETTER(value, state.global_bound)) {
+		return; // early out
+	}
+#endif
+	UpdateExtremes<typename State::ValueType, IS_MAX>(state.extremes, key_hash, value);
+	state.RecomputeBound();
+#else
+	// Banked mode: ensure first level is allocated (needed for NOBUFFERING mode)
+	if (!state.initialized) {
+		state.AllocateFirstLevel(allocator);
+	}
+#ifndef PAC_MINMAX_NOBOUNDOPT
+	if (!PAC_IS_BETTER(value, state.global_bound)) {
+		return; // early out
+	}
+#endif
+	state.MaybeUpgrade(allocator, value);
+	state.UpdateAtCurrentLevel(key_hash, value);
+	state.RecomputeBound();
+#endif
+}
+
+// ============================================================================
+// Input buffering helpers - use overloading to avoid if constexpr (C++17)
+// ============================================================================
+
+// Try to buffer a value for integer states - returns true if buffered, false if should aggregate
+template <bool SIGNED, bool IS_MAX, int MAXLEVEL>
+static inline bool TryBufferValue(PacMinMaxState<SIGNED, IS_MAX, MAXLEVEL> &state, uint64_t key_hash,
+                                  typename PacMinMaxState<SIGNED, IS_MAX, MAXLEVEL>::TMAX value,
+                                  ArenaAllocator &allocator) {
+#if !defined(PAC_MINMAX_NONBANKED) && !defined(PAC_MINMAX_NOBUFFERING)
+	using State = PacMinMaxState<SIGNED, IS_MAX, MAXLEVEL>;
+	if (state.IsBuffering()) {
+		uint8_t buf_idx = state.GetBufferCount();
+		if (buf_idx < State::BUFFER_CAPACITY) {
+			// Still have buffer space - store and return
+			state.buf_hashes[buf_idx] = key_hash;
+			state.buf_values[buf_idx] = value;
+			state.SetBufferCount(buf_idx + 1);
+			return true;
+		}
+		// Buffer full - flush it (sets buffering=false, initialized=true)
+		FlushBufferIfNeeded(state, allocator);
+	}
+#endif
+	return false;
+}
+
+// Floating-point states don't buffer - always return false
+template <typename T, bool IS_MAX>
+static inline bool TryBufferValue(PacMinMaxFloatingState<T, IS_MAX> &, uint64_t, T, ArenaAllocator &) {
+	return false;
+}
+
+// Flush src's buffer directly into dst for integer states - returns true if src was buffering
+template <bool SIGNED, bool IS_MAX, int MAXLEVEL>
+static inline bool FlushSrcBufferIntoDst(PacMinMaxState<SIGNED, IS_MAX, MAXLEVEL> *src,
+                                         PacMinMaxState<SIGNED, IS_MAX, MAXLEVEL> *dst, ArenaAllocator &allocator) {
+#if !defined(PAC_MINMAX_NONBANKED) && !defined(PAC_MINMAX_NOBUFFERING)
+	using State = PacMinMaxState<SIGNED, IS_MAX, MAXLEVEL>;
+	if (src->IsBuffering()) {
+		uint8_t buf_count = src->GetBufferCount();
+		for (uint8_t j = 0; j < buf_count; j++) {
+			PacMinMaxUpdateOneAggregation<State, IS_MAX>(*dst, src->buf_hashes[j], src->buf_values[j], allocator);
+		}
+		return true;
+	}
+#endif
+	return false;
+}
+
+// Floating-point states don't buffer - always return false
+template <typename T, bool IS_MAX>
+static inline bool FlushSrcBufferIntoDst(PacMinMaxFloatingState<T, IS_MAX> *, PacMinMaxFloatingState<T, IS_MAX> *,
+                                         ArenaAllocator &) {
+	return false;
+}
+
+// ============================================================================
 // PacMinMaxUpdateOne - process one value into the aggregation state (64 extremes)
 // Works for both int and float states via the common interface
 // ============================================================================
@@ -23,24 +162,10 @@ using PacMinMaxDoubleState = PacMinMaxFloatingState<double, IS_MAX>;
 template <class State, bool IS_MAX>
 AUTOVECTORIZE static inline void PacMinMaxUpdateOne(State &state, uint64_t key_hash, typename State::ValueType value,
                                                     ArenaAllocator &allocator) {
-#ifndef PAC_MINMAX_NONBANKED
-	if (!state.initialized) {
-		state.AllocateFirstLevel(allocator); // cascading mode allocates levels in increasing width, upgrades upon need
+	if (TryBufferValue(state, key_hash, value, allocator)) {
+		return; // Value was buffered, don't aggregate yet
 	}
-#endif
-#ifndef PAC_MINMAX_NOBOUNDOPT
-	if (!PAC_IS_BETTER(value, state.global_bound)) { // Compare value against global_bound
-		return;                                      // early out
-	}
-#endif
-#ifdef PAC_MINMAX_NONBANKED
-	UpdateExtremes<typename State::ValueType, IS_MAX>(state.extremes, key_hash, value);
-	state.RecomputeBound();
-#else
-	state.MaybeUpgrade(allocator, value);        // Upgrade level if value doesn't fit in current level
-	state.UpdateAtCurrentLevel(key_hash, value); // here the SIMD magic happens
-	state.RecomputeBound();                      // once every 2048 calls recomputes the bound
-#endif
+	PacMinMaxUpdateOneAggregation<State, IS_MAX>(state, key_hash, value, allocator);
 }
 
 // DuckDB method for processing one vector for  aggregation without GROUP BY (there is only a single state)
@@ -73,7 +198,7 @@ static void PacMinMaxUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, da
 				state.seen_null = true;
 				return;
 #else
-				continue;                        // safe mode: ignore NULLs
+				continue; // safe mode: ignore NULLs
 #endif
 			}
 			PacMinMaxUpdateOne<State, IS_MAX>(state, hashes[h_idx],
@@ -140,7 +265,17 @@ AUTOVECTORIZE static void PacMinMaxCombine(Vector &src, Vector &dst, AggregateIn
 		}
 		d->global_bound = ComputeGlobalBound<typename State::ValueType, typename State::ValueType, IS_MAX>(d->extremes);
 #else
-		dst_state[i]->CombineWith(*src_state[i], aggr.allocator);
+		auto *s = src_state[i];
+		auto *d = dst_state[i];
+
+		// First flush dst's buffer (allocates in dst which we keep)
+		FlushBufferIfNeeded(*d, aggr.allocator);
+
+		// If src is buffering, flush its values directly into dst (avoids allocating in src)
+		if (FlushSrcBufferIntoDst(s, d, aggr.allocator)) {
+			continue;
+		}
+		d->CombineWith(*s, aggr.allocator);
 #endif
 	}
 }
@@ -166,6 +301,8 @@ static void PacMinMaxFinalize(Vector &states, AggregateInputData &input, Vector 
 			continue;
 		}
 #endif
+		// Flush any buffered values before finalization
+		FlushBufferIfNeeded(state[i], input.allocator);
 		double buf[64];
 		state[i]->GetTotalsAsDouble(buf);
 		for (int j = 0; j < 64; j++) {
@@ -191,6 +328,9 @@ static void PacMinMaxInitialize(const AggregateFunction &, data_ptr_t p) {
 	memset(p, 0, State::StateSize());
 #ifdef PAC_MINMAX_NONBANKED
 	reinterpret_cast<State *>(p)->Initialize();
+#else
+	// Integer states start in buffering mode, floating-point states initialize immediately
+	reinterpret_cast<State *>(p)->InitializeBufferingMode();
 #endif
 }
 

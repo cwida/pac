@@ -10,10 +10,12 @@ namespace duckdb {
 #define UPPERBOUND_BITWIDTH(bits) (1LL << ((bits - SIGNED) - ACCUMULATE_BITMARGIN))
 #define LOWERBOUND_BITWIDTH(bits) -(static_cast<int64_t>(SIGNED) << ((bits - SIGNED) - ACCUMULATE_BITMARGIN))
 
+// Aggregation-only update (no buffering check, no exact_count increment)
+// Used internally by PacSumUpdateOne after buffering phase
 template <bool SIGNED>
-AUTOVECTORIZE inline void // main worker function for probabilistically adding one INTEGER to the 64 (sub)total
-PacSumUpdateOne(PacSumIntState<SIGNED> &state, uint64_t key_hash, typename PacSumIntState<SIGNED>::T64 value,
-                ArenaAllocator &allocator) {
+AUTOVECTORIZE inline void PacSumUpdateOneAggregation(PacSumIntState<SIGNED> &state, uint64_t key_hash,
+                                                     typename PacSumIntState<SIGNED>::T64 value,
+                                                     ArenaAllocator &allocator) {
 #ifdef PAC_SUMAVG_NONCASCADING
 	AddToTotalsSimple(state.probabilistic_total128, value, key_hash);
 #else
@@ -23,13 +25,13 @@ PacSumUpdateOne(PacSumIntState<SIGNED> &state, uint64_t key_hash, typename PacSu
 	}
 #endif
 	if ((SIGNED && value < 0) ? (value >= LOWERBOUND_BITWIDTH(8)) : (value < UPPERBOUND_BITWIDTH(8))) {
-		state.exact_total8 = PacSumIntState<SIGNED>::EnsureLevelAllocated(allocator, state.probabilistic_total8, 8,
-                                                                          state.exact_total8);
+		state.exact_total8 =
+		    PacSumIntState<SIGNED>::EnsureLevelAllocated(allocator, state.probabilistic_total8, 8, state.exact_total8);
 		state.Flush8(allocator, value, false);
 		AddToTotalsSWAR<int8_t, uint8_t, 0x0101010101010101ULL>(state.probabilistic_total8, value, key_hash);
 	} else if ((SIGNED && value < 0) ? (value >= LOWERBOUND_BITWIDTH(16)) : (value < UPPERBOUND_BITWIDTH(16))) {
 		state.exact_total16 = PacSumIntState<SIGNED>::EnsureLevelAllocated(allocator, state.probabilistic_total16, 16,
-                                                                           state.exact_total16);
+		                                                                   state.exact_total16);
 		state.Flush16(allocator, value, false);
 		AddToTotalsSWAR<int16_t, uint16_t, 0x0001000100010001ULL>(state.probabilistic_total16, value, key_hash);
 	} else if ((SIGNED && value < 0) ? (value >= LOWERBOUND_BITWIDTH(32)) : (value < UPPERBOUND_BITWIDTH(32))) {
@@ -46,6 +48,67 @@ PacSumUpdateOne(PacSumIntState<SIGNED> &state, uint64_t key_hash, typename PacSu
 #endif
 }
 
+// Helper to flush input buffer and transition to aggregation mode.
+// Copies buffered values to stack, initializes aggregation state, then processes them.
+// No-op if not buffering. exact_count is preserved (stored outside union).
+template <bool SIGNED>
+static inline void FlushBufferIfNeeded(PacSumIntState<SIGNED> &state, ArenaAllocator &allocator) {
+#if !defined(PAC_SUMAVG_NONCASCADING) && !defined(PAC_SUMAVG_NOBUFFERING)
+	if (state.IsBuffering()) {
+		// Copy buffer to stack before InitializeAggregationState overwrites union
+		uint64_t saved_hashes[PacSumIntState<SIGNED>::BUFFER_CAPACITY];
+		typename PacSumIntState<SIGNED>::T64 saved_values[PacSumIntState<SIGNED>::BUFFER_CAPACITY];
+		uint8_t buf_count = static_cast<uint8_t>(state.exact_count);
+		for (uint8_t i = 0; i < buf_count; i++) {
+			saved_hashes[i] = state.buf_hashes[i];
+			saved_values[i] = state.buf_values[i];
+		}
+		// Transition to aggregation mode (exact_count preserved - it's outside the union)
+		state.InitializeAggregationState();
+		// Process buffered values
+		for (uint8_t i = 0; i < buf_count; i++) {
+			PacSumUpdateOneAggregation<SIGNED>(state, saved_hashes[i], saved_values[i], allocator);
+		}
+	}
+#endif
+}
+
+// Overload for pointer (used by Finalize)
+template <bool SIGNED>
+static inline void FlushBufferIfNeeded(PacSumIntState<SIGNED> *state, ArenaAllocator &allocator) {
+	FlushBufferIfNeeded(*state, allocator);
+}
+
+// No-op for double state (never buffers)
+static inline void FlushBufferIfNeeded(PacSumDoubleState *, ArenaAllocator &) {
+}
+
+template <bool SIGNED>
+AUTOVECTORIZE inline void // main worker function for probabilistically adding one INTEGER to the 64 (sub)total
+PacSumUpdateOne(PacSumIntState<SIGNED> &state, uint64_t key_hash, typename PacSumIntState<SIGNED>::T64 value,
+                ArenaAllocator &allocator) {
+#if !defined(PAC_SUMAVG_NONCASCADING) && !defined(PAC_SUMAVG_NOBUFFERING)
+	// Input buffering: buffer first 3 values before allocating any arrays.
+	// This avoids memory leaks when DuckDB abandons pre-aggregation hash tables.
+	if (state.IsBuffering()) {
+		uint8_t buf_idx = static_cast<uint8_t>(state.exact_count);
+		if (buf_idx < PacSumIntState<SIGNED>::BUFFER_CAPACITY) {
+			// Still have buffer space - store and return
+			state.buf_hashes[buf_idx] = key_hash;
+			state.buf_values[buf_idx] = value;
+			state.exact_count++;
+			return;
+		}
+		// Buffer full (4th value arrived) - flush buffered values first
+		FlushBufferIfNeeded(state, allocator);
+		// Fall through to process current value below
+	}
+#endif
+	// Increment count and perform aggregation
+	state.exact_count++;
+	PacSumUpdateOneAggregation<SIGNED>(state, key_hash, value, allocator);
+}
+
 template <bool SIGNED>
 AUTOVECTORIZE inline void // main worker function for probabilistically adding one DOUBLE to the 64 sum total
 PacSumUpdateOne(PacSumDoubleState &state, uint64_t key_hash, double value, ArenaAllocator &) {
@@ -60,10 +123,10 @@ PacSumUpdateOne(PacSumDoubleState &state, uint64_t key_hash, double value, Arena
 	AddToTotalsSimple(state.probabilistic_total, value, key_hash);
 }
 
-// Overload for HUGEINT input - adds directly to hugeint_t total (no cascading since values don't fit in subtotal)
+// Aggregation-only for HUGEINT - adds directly to hugeint_t total
 template <bool SIGNED>
-AUTOVECTORIZE inline void PacSumUpdateOne(PacSumIntState<SIGNED> &state, uint64_t key_hash, hugeint_t value,
-                                          ArenaAllocator &allocator) {
+AUTOVECTORIZE inline void PacSumUpdateOneAggregation(PacSumIntState<SIGNED> &state, uint64_t key_hash, hugeint_t value,
+                                                     ArenaAllocator &allocator) {
 #ifndef PAC_SUMAVG_NONCASCADING
 	PacSumIntState<SIGNED>::EnsureLevelAllocated(allocator, state.probabilistic_total128, idx_t(64));
 #endif
@@ -72,6 +135,18 @@ AUTOVECTORIZE inline void PacSumUpdateOne(PacSumIntState<SIGNED> &state, uint64_
 			state.probabilistic_total128[j] += value;
 		}
 	}
+}
+
+// Overload for HUGEINT input - adds directly to hugeint_t total (no cascading since values don't fit in subtotal)
+template <bool SIGNED>
+AUTOVECTORIZE inline void PacSumUpdateOne(PacSumIntState<SIGNED> &state, uint64_t key_hash, hugeint_t value,
+                                          ArenaAllocator &allocator) {
+#if !defined(PAC_SUMAVG_NONCASCADING) && !defined(PAC_SUMAVG_NOBUFFERING)
+	// HUGEINT can't be buffered in T64 buffer without loss, so flush any buffered T64 values first
+	FlushBufferIfNeeded(state, allocator);
+#endif
+	state.exact_count++;
+	PacSumUpdateOneAggregation<SIGNED>(state, key_hash, value, allocator);
 }
 
 template <class State, bool SIGNED, class VALUE_TYPE, class INPUT_TYPE>
@@ -89,8 +164,8 @@ static void PacSumUpdate(Vector inputs[], data_ptr_t state_p, idx_t count, Arena
 	auto values = UnifiedVectorFormat::GetData<INPUT_TYPE>(value_data);
 
 	// Fast path: if both vectors have no nulls, skip per-row validity check
+	// Note: exact_count is incremented by PacSumUpdateOne (handles buffering)
 	if (hash_data.validity.AllValid() && value_data.validity.AllValid()) {
-		state.exact_count += count; // increment count by batch size
 		for (idx_t i = 0; i < count; i++) {
 			auto h_idx = hash_data.sel->get_index(i);
 			auto v_idx = value_data.sel->get_index(i);
@@ -108,7 +183,6 @@ static void PacSumUpdate(Vector inputs[], data_ptr_t state_p, idx_t count, Arena
 				continue; // safe mode: ignore NULLs
 #endif
 			}
-			state.exact_count++;
 			PacSumUpdateOne<SIGNED>(state, hashes[h_idx], ConvertValue<VALUE_TYPE>::convert(values[v_idx]), allocator);
 		}
 	}
@@ -125,6 +199,7 @@ static void PacSumScatterUpdate(Vector inputs[], Vector &states, idx_t count, Ar
 	auto values = UnifiedVectorFormat::GetData<INPUT_TYPE>(value_data);
 	auto state_ptrs = UnifiedVectorFormat::GetData<State *>(sdata);
 
+	// Note: exact_count is incremented by PacSumUpdateOne (handles buffering)
 	for (idx_t i = 0; i < count; i++) {
 		auto h_idx = hash_data.sel->get_index(i);
 		auto v_idx = value_data.sel->get_index(i);
@@ -140,7 +215,6 @@ static void PacSumScatterUpdate(Vector inputs[], Vector &states, idx_t count, Ar
 			continue; // safe mode: ignore NULLs
 		} else {
 #endif
-			state->exact_count++;
 			PacSumUpdateOne<SIGNED>(*state, hashes[h_idx], ConvertValue<VALUE_TYPE>::convert(values[v_idx]), allocator);
 		}
 	}
@@ -188,6 +262,21 @@ AUTOVECTORIZE static void PacSumCombineInt(Vector &src, Vector &dst, idx_t count
 #else
 			auto *s = src_state[i];
 			auto *d = dst_state[i];
+
+#ifndef PAC_SUMAVG_NOBUFFERING
+			// Flush destination buffer first (transition to aggregation mode)
+			FlushBufferIfNeeded(*d, allocator);
+
+			// If source is buffering, process its buffered values into destination
+			if (s->IsBuffering()) {
+				uint8_t s_count = static_cast<uint8_t>(s->exact_count);
+				for (uint8_t j = 0; j < s_count; j++) {
+					d->exact_count++;
+					PacSumUpdateOneAggregation<SIGNED>(*d, s->buf_hashes[j], s->buf_values[j], allocator);
+				}
+				continue; // Source fully processed, skip normal combine
+			}
+#endif
 
 			// Handle exact_totals: if sum would overflow, flush dst (passing src's value so it becomes
 			// the new exact_total after flush). Otherwise just add. Both must be allocated to overflow.
@@ -269,7 +358,8 @@ static void PacSumFinalize(Vector &states, AggregateInputData &input, Vector &re
 		}
 #endif
 		double buf[64];
-		state[i]->Flush(input.allocator);
+		FlushBufferIfNeeded(state[i], input.allocator); // Flush input buffer if still buffering
+		state[i]->Flush(input.allocator);               // Flush cascading levels
 		state[i]->GetTotalsAsDouble(buf);
 		if (DIVIDE_BY_COUNT) {
 			double divisor = static_cast<double>(state[i]->exact_count) * scale_divisor;
@@ -277,8 +367,9 @@ static void PacSumFinalize(Vector &states, AggregateInputData &input, Vector &re
 				buf[j] /= divisor;
 			}
 		}
+		double noise = PacNoisySampleFrom64Counters(buf, mi, gen);
 		// the random counter we choose to read is #42 (but we start counting from 0, so [41])
-		data[offset + i] = FromDouble<ACC_TYPE>(PacNoisySampleFrom64Counters(buf, mi, gen) + buf[41]);
+		data[offset + i] = FromDouble<ACC_TYPE>(noise + buf[41]);
 	}
 }
 
@@ -420,6 +511,11 @@ static idx_t PacSumIntStateSize(const AggregateFunction &) {
 
 static void PacSumIntInitialize(const AggregateFunction &, data_ptr_t state_p) {
 	memset(state_p, 0, sizeof(PacSumIntState<true>)); // memset to 0 works for both signed and unsigned
+#if !defined(PAC_SUMAVG_NONCASCADING) && !defined(PAC_SUMAVG_NOBUFFERING)
+	// Set buffering = true for new states (memset sets it to false)
+	auto state = reinterpret_cast<PacSumIntState<true> *>(state_p);
+	state->buffering = true;
+#endif
 }
 
 static idx_t PacSumDoubleStateSize(const AggregateFunction &) {

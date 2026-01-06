@@ -59,10 +59,11 @@ void RegisterPacCountFunctions(ExtensionLoader &);
 //   banks2: 2 banks (128 bytes) - with banks1 = uint32_t[64]
 //   banks3: 4 banks (256 bytes) - with banks1+2 = uint64_t[64]
 
-//#define PAC_COUNT_NONLAZY 1  // Pre-allocate all levels at initialization
+//#define PAC_COUNT_NONLAZY 1  // Pre-allocate all levels at initialization (set via CXXFLAGS)
 //#define PAC_COUNT_NONBANKED 1 // will directly aggregate in uint64_t probabilistic_total[64] (no cascading/banking)
+//#define PAC_COUNT_NOBUFFERING 1 // Disable input buffering (allocate immediately)
 
-// Two levels: subtotal8 (inline, uint8_t[64] packed as uint64_t[8]) flushes to banked total (uint16/32/64 depending
+// Two levels: subtotal8 (banks0, uint8_t[64] packed as uint64_t[8]) flushes to banked total (uint16/32/64 depending
 // on count magnitude).
 
 struct PacCountState {
@@ -73,33 +74,85 @@ struct PacCountState {
 	void GetTotalsAsDouble(double *dst) const {
 		ToDoubleArray(probabilistic_total, dst);
 	}
+	bool IsBuffering() const {
+		return false;
+	}
 #else
+	// Input buffering: buffer first 4 hash values before allocating banks0
+	static constexpr uint8_t BUFFER_CAPACITY = 4;
+
 	uint8_t subtotal8_count; // counts in subtotal8 before flush (max 255)
 	uint8_t total_level;     // 0=none, 16, 32, or 64
+	bool buffering;          // true = buffering mode, false = aggregation mode
 
-	// Level 1: inline subtotal (SWAR uint8_t)
-	uint64_t probabilistic_subtotal8[8]; // 64 bytes
+	// Union: buffering mode uses buf_hashes, aggregation mode uses banks0
+	union {
+		uint64_t buf_hashes[BUFFER_CAPACITY]; // Buffering mode: store hash values
+		struct {                              // Aggregation mode: bank pointers
+			uint8_t *banks0;                  // 1 bank (64 bytes) for subtotal8
+			uint8_t *banks1;                  // 2 banks (128 bytes) for total16
+			uint8_t *banks2;                  // 2 banks (128 bytes) for total32
+			uint8_t *banks3;                  // 4 banks (256 bytes) for total64
+		};
+	};
 
-	// Level 2: banked total storage (lazily allocated)
-	uint8_t *banks1; // 2 banks (128 bytes) needed for "probabilistic_subtotal16"
-	uint8_t *banks2; // 2 banks (128 bytes) needed for "probabilistic_subtotal32"
-	uint8_t *banks3; // 4 banks (256 bytes) needed for "probabilistic_subtotal64"
-
-	// Get bank pointer (0-7)
-	inline uint8_t *GetBank(int n) const {
-		if (n < 2)
-			return banks1 + n * 64;
-		if (n < 4)
-			return banks2 + (n - 2) * 64;
-		return banks3 + (n - 4) * 64;
+	bool IsBuffering() const {
+#ifdef PAC_COUNT_NOBUFFERING
+		return false;
+#else
+		return buffering;
+#endif
 	}
 
-	// Number of banks for total level: 16->2, 32->4, 64->8
+	uint8_t GetBufferCount() const {
+		return subtotal8_count; // reuse subtotal8_count for buffer count in buffering mode
+	}
+
+	void SetBufferCount(uint8_t count) {
+		subtotal8_count = count;
+	}
+
+	// Get bank pointer (0-7): bank 0 is banks0, banks 1-2 are banks1, etc.
+	inline uint8_t *GetBank(int n) const {
+		if (n == 0)
+			return banks0;
+		if (n < 3)
+			return banks1 + (n - 1) * 64;
+		if (n < 5)
+			return banks2 + (n - 3) * 64;
+		return banks3 + (n - 5) * 64;
+	}
+
+	// Get subtotal8 as uint64_t array (for SWAR operations)
+	inline uint64_t *GetSubtotal8() const {
+		return reinterpret_cast<uint64_t *>(banks0);
+	}
+
+	// Number of banks for total level: 16->2, 32->4, 64->8 (starting from bank 1)
 	static constexpr int BanksForLevel(int level) {
 		return level / 8;
 	}
 
-	// Allocate banks for level (only allocates what's new)
+	// Allocate banks0 (subtotal8) and transition to aggregation mode
+	void AllocateFirstLevel(ArenaAllocator &allocator) {
+		buffering = false;
+		// Zero out pointers (union was previously holding buf_hashes)
+		banks1 = banks2 = banks3 = nullptr;
+		banks0 = reinterpret_cast<uint8_t *>(allocator.AllocateAligned(64));
+		memset(banks0, 0, 64);
+		subtotal8_count = 0;
+		total_level = 0;
+	}
+
+	// Allocate only banks0 without resetting other banks (for Finalize after Combine)
+	void EnsureBanks0Allocated(ArenaAllocator &allocator) {
+		if (!banks0) {
+			banks0 = reinterpret_cast<uint8_t *>(allocator.AllocateAligned(64));
+			memset(banks0, 0, 64);
+		}
+	}
+
+	// Allocate banks for total level (only allocates what's new)
 	void AllocateBanks(ArenaAllocator &allocator, int level) {
 		if (!banks1) {
 			banks1 = reinterpret_cast<uint8_t *>(allocator.Allocate(128));
@@ -116,16 +169,17 @@ struct PacCountState {
 	}
 
 	// Upgrade total to wider type, preserving values
+	// Total banks start at bank 1 (banks1), not bank 0 (banks0 is subtotal8)
 	template <typename SRC_T, typename DST_T>
 	void UpgradeTotal(ArenaAllocator &allocator, int new_level) {
 		constexpr int SRC_PER_BANK = 64 / sizeof(SRC_T);
 		constexpr int DST_PER_BANK = 64 / sizeof(DST_T);
 		int old_banks = BanksForLevel(total_level);
 
-		// Gather old values
+		// Gather old values from total banks (starting at bank 1)
 		SRC_T old_values[64];
 		for (int b = 0; b < old_banks; b++) {
-			auto *src = reinterpret_cast<SRC_T *>(GetBank(b));
+			auto *src = reinterpret_cast<SRC_T *>(GetBank(b + 1)); // +1 to skip banks0
 			for (int i = 0; i < SRC_PER_BANK; i++)
 				old_values[b * SRC_PER_BANK + i] = src[i];
 		}
@@ -134,7 +188,7 @@ struct PacCountState {
 		AllocateBanks(allocator, new_level);
 		int new_banks = BanksForLevel(new_level);
 		for (int b = 0; b < new_banks; b++) {
-			auto *dst = reinterpret_cast<DST_T *>(GetBank(b));
+			auto *dst = reinterpret_cast<DST_T *>(GetBank(b + 1)); // +1 to skip banks0
 			for (int i = 0; i < DST_PER_BANK; i++) {
 				int idx = b * DST_PER_BANK + i;
 				dst[i] = (idx < 64) ? static_cast<DST_T>(old_values[idx]) : 0;
@@ -143,24 +197,24 @@ struct PacCountState {
 		total_level = new_level;
 	}
 
-	// Add subtotal8 to total, upgrading if needed
+	// Add subtotal8 (banks0) to total (banks1+), upgrading if needed
 	template <typename T>
 	AUTOVECTORIZE void AddSubtotalToTotal() {
 		constexpr int ELEMS_PER_BANK = 64 / sizeof(T);
 		int num_banks = BanksForLevel(total_level);
-		auto *sub = reinterpret_cast<const uint8_t *>(probabilistic_subtotal8);
+		auto *sub = reinterpret_cast<const uint8_t *>(banks0);
 
 		for (int b = 0; b < num_banks; b++) {
-			auto *dst = reinterpret_cast<T *>(GetBank(b));
+			auto *dst = reinterpret_cast<T *>(GetBank(b + 1)); // +1 to skip banks0
 			for (int i = 0; i < ELEMS_PER_BANK; i++) {
 				dst[i] += static_cast<T>(sub[b * ELEMS_PER_BANK + i]);
 			}
 		}
 	}
 
-	// Flush subtotal8 to total
+	// Flush subtotal8 (banks0) to total (banks1+)
 	void Flush(ArenaAllocator &allocator) {
-		if (subtotal8_count == 0)
+		if (IsBuffering() || subtotal8_count == 0)
 			return;
 
 		// Determine required level for new total
@@ -187,16 +241,15 @@ struct PacCountState {
 		else
 			AddSubtotalToTotal<uint64_t>();
 
-		memset(probabilistic_subtotal8, 0, 64);
+		memset(banks0, 0, 64);
 		subtotal8_count = 0;
 	}
 
 	// Estimate max count in any counter (conservative: assumes all bits set)
 	uint64_t GetMaxPossibleCount() const {
 		if (total_level == 64) {
-			auto *p = reinterpret_cast<const uint64_t *>(banks1);
-			uint64_t m = p[0];
-			for (int i = 1; i < 64; i++)
+			uint64_t m = 0;
+			for (int i = 0; i < 64; i++)
 				m = std::max(m, GetTotalElement<uint64_t>(i));
 			return m;
 		}
@@ -215,17 +268,17 @@ struct PacCountState {
 		return 0;
 	}
 
-	// Get element from banked total
+	// Get element from banked total (total banks start at bank 1)
 	template <typename T>
 	T GetTotalElement(int i) const {
 		constexpr int PER_BANK = 64 / sizeof(T);
 		int bank = i / PER_BANK, off = i % PER_BANK;
-		return reinterpret_cast<const T *>(GetBank(bank))[off];
+		return reinterpret_cast<const T *>(GetBank(bank + 1))[off]; // +1 to skip banks0
 	}
 
 	void GetTotalsAsDouble(double *dst) const {
-		// First get subtotal8 values
-		auto *sub = reinterpret_cast<const uint8_t *>(probabilistic_subtotal8);
+		// First get subtotal8 values from banks0
+		auto *sub = reinterpret_cast<const uint8_t *>(banks0);
 		for (int i = 0; i < 64; i++)
 			dst[i] = static_cast<double>(sub[i]);
 

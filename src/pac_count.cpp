@@ -35,6 +35,9 @@ static idx_t PacCountStateSize(const AggregateFunction &) {
 
 static void PacCountInitialize(const AggregateFunction &, data_ptr_t state_ptr) {
 	memset(state_ptr, 0, sizeof(PacCountState));
+#if !defined(PAC_COUNT_NONBANKED) && !defined(PAC_COUNT_NOBUFFERING)
+	reinterpret_cast<PacCountState *>(state_ptr)->buffering = true;
+#endif
 }
 
 #ifdef PAC_COUNT_NONBANKED
@@ -44,16 +47,86 @@ AUTOVECTORIZE static inline void PacCountUpdateHash(uint64_t key_hash, PacCountS
 	}
 }
 #else
-AUTOVECTORIZE static inline void PacCountUpdateHash(uint64_t key_hash, PacCountState &state,
-                                                    ArenaAllocator &allocator) {
-	// SWAR update to subtotal8
+// Forward declaration
+AUTOVECTORIZE static inline void PacCountUpdateHashAggregation(uint64_t key_hash, PacCountState &state,
+                                                               ArenaAllocator &allocator);
+
+// Flush buffer and process buffered hashes
+static inline void FlushBufferIfNeeded(PacCountState &state, ArenaAllocator &allocator) {
+#ifndef PAC_COUNT_NOBUFFERING
+	if (state.IsBuffering()) {
+		// Save buffered hashes before AllocateFirstLevel overwrites union
+		uint64_t saved_hashes[PacCountState::BUFFER_CAPACITY];
+		uint8_t buf_count = state.GetBufferCount();
+		for (uint8_t i = 0; i < buf_count; i++) {
+			saved_hashes[i] = state.buf_hashes[i];
+		}
+		// Transition to aggregation mode
+		state.AllocateFirstLevel(allocator);
+		// Process buffered hashes
+		for (uint8_t i = 0; i < buf_count; i++) {
+			PacCountUpdateHashAggregation(saved_hashes[i], state, allocator);
+		}
+	}
+#endif
+}
+
+// Flush src's buffer directly into dst
+static inline bool FlushSrcBufferIntoDst(PacCountState *src, PacCountState *dst, ArenaAllocator &allocator) {
+#ifndef PAC_COUNT_NOBUFFERING
+	if (src->IsBuffering()) {
+		uint8_t buf_count = src->GetBufferCount();
+		for (uint8_t i = 0; i < buf_count; i++) {
+			PacCountUpdateHashAggregation(src->buf_hashes[i], *dst, allocator);
+		}
+		return true;
+	}
+#endif
+	return false;
+}
+
+// Core aggregation logic (no buffering check)
+AUTOVECTORIZE static inline void PacCountUpdateHashAggregation(uint64_t key_hash, PacCountState &state,
+                                                               ArenaAllocator &allocator) {
+#ifdef PAC_COUNT_NONLAZY
+	// Pre-allocate all banks on first update
+	if (state.total_level == 0) {
+		state.AllocateBanks(allocator, 64);
+		state.total_level = 64;
+	}
+#endif
+	// SWAR update to subtotal8 (banks0)
+	auto *subtotal8 = state.GetSubtotal8();
 	for (int j = 0; j < 8; j++) {
-		state.probabilistic_subtotal8[j] += (key_hash >> j) & PAC_COUNT_MASK;
+		subtotal8[j] += (key_hash >> j) & PAC_COUNT_MASK;
 	}
 	// Flush if subtotal8 would overflow
 	if (++state.subtotal8_count == 255) {
 		state.Flush(allocator);
 	}
+}
+
+AUTOVECTORIZE static inline void PacCountUpdateHash(uint64_t key_hash, PacCountState &state,
+                                                    ArenaAllocator &allocator) {
+#ifndef PAC_COUNT_NOBUFFERING
+	// Try to buffer the hash
+	if (state.IsBuffering()) {
+		uint8_t buf_idx = state.GetBufferCount();
+		if (buf_idx < PacCountState::BUFFER_CAPACITY) {
+			state.buf_hashes[buf_idx] = key_hash;
+			state.SetBufferCount(buf_idx + 1);
+			return;
+		}
+		// Buffer full - flush it
+		FlushBufferIfNeeded(state, allocator);
+	}
+#else
+	// NOBUFFERING: ensure first level allocated
+	if (!state.banks0) {
+		state.AllocateFirstLevel(allocator);
+	}
+#endif
+	PacCountUpdateHashAggregation(key_hash, state, allocator);
 }
 #endif
 
@@ -141,26 +214,13 @@ static inline int RequiredLevel(uint64_t count) {
 	return (count <= UINT16_MAX) ? 16 : (count <= UINT32_MAX) ? 32 : 64;
 }
 
-// Combine src banks into dst banks (same type, direct add)
-template <typename T>
+// Combine src banks into dst banks (supports same type or widening)
+template <typename DST_T, typename SRC_T = DST_T>
 AUTOVECTORIZE static inline void CombineBanks(PacCountState *d, const PacCountState *s) {
-	constexpr int ELEMS_PER_BANK = 64 / sizeof(T);
-	int num_banks = PacCountState::BanksForLevel(sizeof(T) * 8);
-	for (int b = 0; b < num_banks; b++) {
-		auto *dp = reinterpret_cast<T *>(d->GetBank(b));
-		auto *sp = reinterpret_cast<const T *>(s->GetBank(b));
-		for (int j = 0; j < ELEMS_PER_BANK; j++)
-			dp[j] += sp[j];
-	}
-}
-
-// Combine src (narrower) into dst (wider) using element access
-template <typename DST_T, typename SRC_T>
-AUTOVECTORIZE static inline void CombineBanksWiden(PacCountState *d, const PacCountState *s) {
 	constexpr int ELEMS_PER_BANK = 64 / sizeof(DST_T);
 	int num_banks = PacCountState::BanksForLevel(sizeof(DST_T) * 8);
 	for (int b = 0; b < num_banks; b++) {
-		auto *dp = reinterpret_cast<DST_T *>(d->GetBank(b));
+		auto *dp = reinterpret_cast<DST_T *>(d->GetBank(b + 1)); // +1 to skip banks0 (subtotal8)
 		for (int j = 0; j < ELEMS_PER_BANK; j++) {
 			dp[j] += s->GetTotalElement<SRC_T>(b * ELEMS_PER_BANK + j);
 		}
@@ -173,6 +233,14 @@ AUTOVECTORIZE void PacCountCombine(Vector &src, Vector &dst, AggregateInputData 
 	for (idx_t i = 0; i < count; i++) {
 		auto *s = src_state[i];
 		auto *d = dst_state[i];
+
+		// First flush dst's buffer (allocates in dst which we keep)
+		FlushBufferIfNeeded(*d, aggr.allocator);
+
+		// If src is buffering, flush its values directly into dst (avoids allocating in src)
+		if (FlushSrcBufferIntoDst(s, d, aggr.allocator)) {
+			continue;
+		}
 
 		s->Flush(aggr.allocator);
 		d->Flush(aggr.allocator);
@@ -204,14 +272,14 @@ AUTOVECTORIZE void PacCountCombine(Vector &src, Vector &dst, AggregateInputData 
 			if (s->total_level == 32)
 				CombineBanks<uint32_t>(d, s);
 			else
-				CombineBanksWiden<uint32_t, uint16_t>(d, s);
+				CombineBanks<uint32_t, uint16_t>(d, s);
 		} else {
 			if (s->total_level == 64)
 				CombineBanks<uint64_t>(d, s);
 			else if (s->total_level == 32)
-				CombineBanksWiden<uint64_t, uint32_t>(d, s);
+				CombineBanks<uint64_t, uint32_t>(d, s);
 			else
-				CombineBanksWiden<uint64_t, uint16_t>(d, s);
+				CombineBanks<uint64_t, uint16_t>(d, s);
 		}
 	}
 }
@@ -225,6 +293,12 @@ void PacCountFinalize(Vector &states, AggregateInputData &input, Vector &result,
 	double mi = input.bind_data->Cast<PacBindData>().mi;
 
 	for (idx_t i = 0; i < count; i++) {
+#ifndef PAC_COUNT_NONBANKED
+		// Flush any buffered values before finalization
+		FlushBufferIfNeeded(*state[i], input.allocator);
+		// Ensure banks0 is allocated (for states that only received data via Combine)
+		state[i]->EnsureBanks0Allocated(input.allocator);
+#endif
 		state[i]->Flush(input.allocator);
 		double buf[64];
 		state[i]->GetTotalsAsDouble(buf);

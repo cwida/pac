@@ -34,6 +34,15 @@ void RegisterPacMaxFunctions(ExtensionLoader &loader);
 // therefore, memory is organized in "banks"of the size needed for 8-bits, and when upgrading
 // we progressivly allocate more banks, re-using the old ones also for the bigger size;
 //
+// DuckDB's parallel aggregation partitions per thread and creates small 32K hash-tables, which get abandoned
+// when they fill. This means that dynamically allocated aggregate state memory leaks. Typically, it happens
+// when every group-by key in the hash table just had one insert for it (or a few). With abandoning the input
+// is just partitioned, and reprocessed later. If you generate group-ids with range(100M) / 100 you get group locality
+// and do not suffer from this, but with range(100M) % 1M you get very different performance due to this.
+//
+// We therefore delay any aggregate processing (and thus allocation) until 3-4 (hash,value) pairs have been received.
+// These values are buffered in the state memory (it becomes a union because of this dual use).
+//
 // Cascading/banking is only implemented for integers.
 // Floating-point directly aggregate in their own datatyue (float,double): double does not
 // attempt to use float for small values. This is done to make the code less complex.
@@ -46,6 +55,9 @@ void RegisterPacMaxFunctions(ExtensionLoader &loader);
 //#define PAC_MINMAX_NONBANKED 1
 //#define PAC_MINMAX_NONLAZY 1
 //#define PAC_MINMAX_NOBOUNDOPT 1
+// Buffer capacity: 3 for types ≤64 bits, 2 for 128-bit types (must fit in 64-byte bank0)
+// Define PAC_MINMAX_NOBUFFERING to disable input buffering (state initialized at level 8 immediately)
+//#define PAC_MINMAX_NOBUFFERING 1
 
 // NULL handling: by default we ignore NULLs (safe behavior, like DuckDB's MIN/MAX).
 // Define PAC_MINMAX_UNSAFENULL to return NULL if any input value is NULL.
@@ -278,6 +290,18 @@ struct PacMinMaxFloatingState {
 	static idx_t StateSize() {
 		return sizeof(PacMinMaxFloatingState);
 	}
+
+	// No buffering for floating-point state (arrays are inline)
+	static constexpr bool SUPPORTS_BUFFERING = false;
+
+	bool IsBuffering() const {
+		return false;
+	}
+
+	// Called at initialization - floating-point states initialize immediately
+	void InitializeBufferingMode() {
+		Initialize();
+	}
 };
 
 // ============================================================================
@@ -327,7 +351,8 @@ struct PacMinMaxState {
 	    L == 128, T128,
 	    typename std::conditional<
 	        L == 64, T64,
-	        typename std::conditional<L == 32, T32, typename std::conditional<L == 16, T16, T8>::type>::type>::type>::type;
+	        typename std::conditional<L == 32, T32, typename std::conditional<L == 16, T16, T8>::type>::type>::type>::
+	    type;
 	using TMAX = TAtLevel<MAXLEVEL>;
 	using ValueType = TMAX;
 
@@ -368,7 +393,6 @@ struct PacMinMaxState {
 	}
 
 	// ========== Common fields (defined once for both modes) ==========
-	TMAX global_bound; // For MAX: min of all maxes; for MIN: max of all mins
 	uint16_t update_count;
 	bool initialized;
 #ifdef PAC_MINMAX_UNSAFENULL
@@ -376,6 +400,7 @@ struct PacMinMaxState {
 #endif
 #ifdef PAC_MINMAX_NONBANKED
 	// ========== Non-banked mode: single fixed-width contiguous array ==========
+	TMAX global_bound; // For MAX: min of all maxes; for MIN: max of all mins
 	TMAX extremes[64];
 
 	void GetTotalsAsDouble(double *dst) const {
@@ -407,8 +432,8 @@ struct PacMinMaxState {
 	// Banks are 64-byte aligned chunks (one AVX-512 register each).
 	// Memory is allocated incrementally to avoid waste when upgrading levels.
 	//
-	// Bank layout:
-	//   bank0: 64 bytes inline (always present, for level 8)
+	// Bank layout (all dynamically allocated):
+	//   banks0: 1×64 bytes (allocated for level 8+)
 	//   banks1: 1×64 bytes (allocated for level 16+)
 	//   banks2: 2×64 bytes (allocated for level 32+)
 	//   banks3: 4×64 bytes (allocated for level 64+)
@@ -421,19 +446,61 @@ struct PacMinMaxState {
 	//   Level 64 (int64):        8 banks = 512 bytes
 	//   Level 128 (hugeint):    16 banks = 1024 bytes
 
-	uint8_t current_level; // 8, 16, 32, 64, or 128
+	// Input buffering: buffer first 2 values before allocating any banks.
+	static constexpr bool SUPPORTS_BUFFERING = true;
+	static constexpr uint8_t BUFFER_CAPACITY = 2;
 
-	// Bank storage - inline bank0 + pointers to additional banks
-	uint8_t bank0[64]; // Always present (level 8)
-	uint8_t *banks1;               // 1 bank (64 bytes) for level 16+
-	uint8_t *banks2;               // 2 banks (128 bytes) for level 32+
-	uint8_t *banks3;               // 4 banks (256 bytes) for level 64+
-	uint8_t *banks4;               // 8 banks (512 bytes) for level 128
+	bool buffering;        // true = buffering mode, false = aggregation mode
+	uint8_t current_level; // 8, 16, 32, 64, or 128 (only valid when !buffering)
+
+	// Union: buffering mode uses buf_*, aggregation mode uses banks pointers + global_bound
+	union {
+		struct { // Buffering mode storage
+			uint64_t buf_hashes[BUFFER_CAPACITY];
+			TMAX buf_values[BUFFER_CAPACITY];
+		};
+		struct {               // Aggregation mode: all bank pointers and global_bound
+			uint8_t *banks0;   // 1 bank (64 bytes) for level 8+
+			TMAX global_bound; // between banks0 and banks1 for hugeint alignment
+			uint8_t *banks1;   // 1 bank (64 bytes) for level 16+
+			uint8_t *banks2;   // 2 banks (128 bytes) for level 32+
+			uint8_t *banks3;   // 4 banks (256 bytes) for level 64+
+			uint8_t *banks4;   // 8 banks (512 bytes) for level 128
+		};
+	};
+
+	// Check if in buffering mode
+	bool IsBuffering() const {
+		return buffering;
+	}
+
+	// Get number of buffered values (only valid when IsBuffering())
+	uint8_t GetBufferCount() const {
+		// We use update_count to track buffer count in buffering mode
+		// (it's repurposed since we don't recompute bounds while buffering)
+		return static_cast<uint8_t>(update_count);
+	}
+
+	// Set buffer count (only valid when IsBuffering())
+	void SetBufferCount(uint8_t count) {
+		update_count = count;
+	}
+
+	// Called at initialization - integer states start in buffering mode
+	// (NOBUFFERING mode defers to AllocateFirstLevel which has allocator)
+	void InitializeBufferingMode() {
+#ifdef PAC_MINMAX_NOBUFFERING
+		buffering = false; // Will be fully initialized in AllocateFirstLevel
+#else
+		buffering = true;
+		// update_count (used as buffer count) is already 0 from memset
+#endif
+	}
 
 	// Get pointer to bank n (0-15)
 	inline uint8_t *GetBank(int n) const {
 		if (n < 2) {
-			return (n == 0) ? const_cast<uint8_t *>(bank0) : banks1;
+			return (n == 0) ? banks0 : banks1;
 		}
 		if (n < 4) {
 			return banks2 + (n - 2) * 64;
@@ -505,6 +572,9 @@ struct PacMinMaxState {
 	// Allocate banks based on number of banks needed (only allocates new banks)
 	// num_banks: 1,2,4,8,16 depending on element type size
 	inline void AllocateBanksForCount(ArenaAllocator &allocator, int num_banks) {
+		if (num_banks >= 1 && !banks0) {
+			banks0 = reinterpret_cast<uint8_t *>(allocator.Allocate(64));
+		}
 		if (num_banks >= 2 && !banks1) {
 			banks1 = reinterpret_cast<uint8_t *>(allocator.Allocate(64));
 		}
@@ -559,6 +629,9 @@ struct PacMinMaxState {
 	}
 
 	void AllocateFirstLevel(ArenaAllocator &allocator) {
+		buffering = false; // Transition to aggregation mode
+		// Zero out bank pointers (union was previously holding buffer data)
+		banks0 = banks1 = banks2 = banks3 = banks4 = nullptr;
 #ifdef PAC_MINMAX_NONLAZY
 		// Pre-allocate all levels that exist for this MAXLEVEL
 		if (MAXLEVEL == 128) {
@@ -752,6 +825,8 @@ struct PacMinMaxState {
 			return;
 		}
 		if (!initialized) {
+			// Zero out bank pointers (union was previously holding buffer data)
+			banks0 = banks1 = banks2 = banks3 = banks4 = nullptr;
 			AllocateBanksForType<T8>(allocator);
 			InitializeBanks<T8>(TypeInit<T8>());
 			current_level = 8;
@@ -808,30 +883,10 @@ struct PacMinMaxState {
 	}
 #endif
 
-	// State size for DuckDB allocation - uses offsetof to exclude unused pointer fields
-	// State size is based on max banks needed for TMAX (the largest type at MAXLEVEL):
-	//   1 bank:   only bank0 (inline)
-	//   2 banks:  need banks1 pointer
-	//   4 banks:  need banks2 pointer
-	//   8 banks:  need banks3 pointer
-	//   16 banks: need banks4 pointer
+	// State size for DuckDB allocation
+	// With all bank pointers inside the union, the state size is fixed
 	static idx_t StateSize() {
-#ifdef PAC_MINMAX_NONBANKED
 		return sizeof(PacMinMaxState);
-#else
-		// Compute max banks based on type at MAXLEVEL
-		constexpr int MAX_BANKS = sizeof(TMAX);
-		if (MAX_BANKS >= 16) {
-			return sizeof(PacMinMaxState);
-		} else if (MAX_BANKS >= 8) {
-			return offsetof(PacMinMaxState, banks4);
-		} else if (MAX_BANKS >= 4) {
-			return offsetof(PacMinMaxState, banks3);
-		} else if (MAX_BANKS >= 2) {
-			return offsetof(PacMinMaxState, banks2);
-		}
-		return offsetof(PacMinMaxState, banks1);
-#endif
 	}
 };
 
