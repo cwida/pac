@@ -12,12 +12,12 @@ set(EXTENSION_NAME ${TARGET_NAME}_extension)
 set(LOADABLE_EXTENSION_NAME ${TARGET_NAME}_loadable_extension)
 
 project(${TARGET_NAME})
-include_directories(src/include third_party/lpts)
+include_directories(src/include)
 include_directories(benchmark/include)
 
 # Extension sources
 set(EXTENSION_SOURCES src/pac_extension.cpp src/pac_optimizer.cpp src/pac_privacy_unit.cpp
-        src/pac_compatibility_check.cpp src/pac_aggregate.cpp src/pac_helpers.cpp third_party/lpts/logical_plan_to_sql.cpp
+        src/pac_compatibility_check.cpp src/pac_aggregate.cpp src/pac_helpers.cpp
         src/pac_count.cpp src/pac_sum_avg.cpp src/pac_min_max.cpp src/pac_bitslice_compiler.cpp src/pac_compiler_helpers.cpp
         src/pac_expression_builder.cpp src/pac_plan_traversal.cpp)
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
@@ -33,8 +33,9 @@ install(
 # Build a single unified test executable that invokes all tests via src/test/test_runner.cpp
 add_executable(pac_test_runner
     src/test/test_runner.cpp
-    src/test/test_compiler_functions.cpp
-    src/test/test_pac_privacy_columns.cpp)
+    src/test/test_plan_traversal.cpp
+    src/test/test_schema_metadata.cpp
+    src/test/test_compiler_functions.cpp)
 target_link_libraries(pac_test_runner ${EXTENSION_NAME})
 
 # TPCH + PAC benchmark runner

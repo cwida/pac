@@ -4,22 +4,54 @@
 
 #include <iostream>
 #include "include/test_compiler_functions.hpp"
-#include "include/test_privacy_columns.hpp"
+#include "include/test_schema_metadata.hpp"
+#include "include/test_plan_traversal.hpp"
 
 int main() {
-	std::cerr << "Starting unified test runner...\n";
+	std::cerr << "===========================================\n";
+	std::cerr << "Starting PAC Extension Test Suite\n";
+	std::cerr << "===========================================\n";
 
-	std::cerr << "Running compiler function tests...\n";
+	int total_failures = 0;
+
+	// Test 1: Compiler Functions (ReplaceNode, column binding verification)
+	std::cerr << "\n[1/3] Running compiler function tests...\n";
 	int code = duckdb::RunCompilerFunctionTests();
 	if (code != 0) {
-		std::cerr << "RunCompilerFunctionTests failed with code " << code << "\n";
+		std::cerr << "❌ RunCompilerFunctionTests failed with code " << code << "\n";
+		total_failures++;
+	} else {
+		std::cerr << "✓ Compiler function tests passed\n";
 	}
 
-	std::cerr << "\nRunning privacy columns tests...\n";
-	code = duckdb::RunPrivacyColumnsTests();
+	// Test 2: Schema Metadata (FindPrimaryKey, FindForeignKeys, FindForeignKeyBetween)
+	std::cerr << "\n[2/3] Running schema metadata tests...\n";
+	code = duckdb::RunSchemaMetadataTests();
 	if (code != 0) {
-		std::cerr << "RunPrivacyColumnsTests failed with code " << code << "\n";
+		std::cerr << "❌ RunSchemaMetadataTests failed with code " << code << "\n";
+		total_failures++;
+	} else {
+		std::cerr << "✓ Schema metadata tests passed\n";
 	}
 
-	return 0;
+	// Test 3: Plan Traversal (FindPrivacyUnitGetNode, FindTopAggregate, etc.)
+	std::cerr << "\n[3/3] Running plan traversal tests...\n";
+	code = duckdb::RunPlanTraversalTests();
+	if (code != 0) {
+		std::cerr << "❌ RunPlanTraversalTests failed with code " << code << "\n";
+		total_failures++;
+	} else {
+		std::cerr << "✓ Plan traversal tests passed\n";
+	}
+
+	// Summary
+	std::cerr << "\n===========================================\n";
+	if (total_failures == 0) {
+		std::cerr << "✅ ALL TEST SUITES PASSED!\n";
+	} else {
+		std::cerr << "❌ " << total_failures << " TEST SUITE(S) FAILED\n";
+	}
+	std::cerr << "===========================================\n";
+
+	return total_failures;
 }
