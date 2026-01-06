@@ -347,6 +347,8 @@ static void PacSumFinalize(Vector &states, AggregateInputData &input, Vector &re
 	uint64_t seed = input.bind_data ? input.bind_data->Cast<PacBindData>().seed : std::random_device {}();
 	std::mt19937_64 gen(seed);
 	double mi = input.bind_data ? input.bind_data->Cast<PacBindData>().mi : 128.0;
+	bool use_deterministic_noise =
+	    input.bind_data ? input.bind_data->Cast<PacBindData>().use_deterministic_noise : true;
 	// scale_divisor is used by pac_avg on DECIMAL to convert internal integer representation back to decimal
 	double scale_divisor = input.bind_data ? input.bind_data->Cast<PacBindData>().scale_divisor : 1.0;
 
@@ -367,7 +369,7 @@ static void PacSumFinalize(Vector &states, AggregateInputData &input, Vector &re
 				buf[j] /= divisor;
 			}
 		}
-		double noise = PacNoisySampleFrom64Counters(buf, mi, gen);
+		double noise = PacNoisySampleFrom64Counters(buf, mi, gen, use_deterministic_noise);
 		// the random counter we choose to read is #42 (but we start counting from 0, so [41])
 		data[offset + i] = FromDouble<ACC_TYPE>(noise + buf[41]);
 	}
@@ -502,7 +504,14 @@ PacSumBind(ClientContext &ctx, AggregateFunction &, vector<unique_ptr<Expression
 	if (ctx.TryGetCurrentSetting("pac_seed", pac_seed_val) && !pac_seed_val.IsNull()) {
 		seed = uint64_t(pac_seed_val.GetValue<int64_t>());
 	}
-	return make_uniq<PacBindData>(mi, seed);
+
+	bool use_deterministic_noise = false;
+	Value pac_det_noise_val;
+	if (ctx.TryGetCurrentSetting("pac_deterministic_noise", pac_det_noise_val) && !pac_det_noise_val.IsNull()) {
+		use_deterministic_noise = pac_det_noise_val.GetValue<bool>();
+	}
+
+	return make_uniq<PacBindData>(mi, seed, 1.0, use_deterministic_noise);
 }
 
 static idx_t PacSumIntStateSize(const AggregateFunction &) {

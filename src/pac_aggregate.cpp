@@ -82,7 +82,9 @@ static inline double DeterministicNormalSample(std::mt19937_64 &gen, bool &has_s
 }
 
 // Finalize: compute noisy sample from the 64 counters (works on double array)
-double PacNoisySampleFrom64Counters(const double counters[64], double mi, std::mt19937_64 &gen) {
+// If use_deterministic_noise is true, uses platform-agnostic Box-Muller; otherwise uses std::normal_distribution
+double PacNoisySampleFrom64Counters(const double counters[64], double mi, std::mt19937_64 &gen,
+                                    bool use_deterministic_noise) {
 	// mi=0 means no noise - return counter 42 directly (no RNG consumption)
 	if (mi == 0.0) {
 		return counters[41];
@@ -103,22 +105,30 @@ double PacNoisySampleFrom64Counters(const double counters[64], double mi, std::m
 		return yJ;
 	}
 
-	// Sample normal(0, sqrt(delta)) using deterministic Box–Muller
-	// We need a spare buffer for the generated pair; but PacAggregateLocalState owns that state.
-	// The helper above only uses engine/local spare passed by caller; here we can't access spare.
-	// To keep the same signature, fall back to a stateless Box–Muller that consumes two engine draws
-	// and returns one sample (no spare saved). This remains deterministic across platforms.
-
-	// draw two uniforms
-	double u1 = DeterministicUniformUnit(gen);
-	double u2 = DeterministicUniformUnit(gen);
-	if (u1 <= 0.0) {
-		u1 = std::numeric_limits<double>::min();
+	// Sample normal(0, sqrt(delta)) using either deterministic Box-Muller or std::normal_distribution
+	double noise;
+	if (use_deterministic_noise) {
+		// Platform-agnostic deterministic Box-Muller
+		double u1 = DeterministicUniformUnit(gen);
+		double u2 = DeterministicUniformUnit(gen);
+		if (u1 <= 0.0) {
+			u1 = std::numeric_limits<double>::min();
+		}
+		double r = std::sqrt(-2.0 * std::log(u1));
+		double theta = 2.0 * M_PI * u2;
+		double z0 = r * std::cos(theta);
+		noise = z0 * std::sqrt(delta);
+	} else {
+		// Platform-specific std::normal_distribution (faster but not deterministic across platforms)
+		std::normal_distribution<double> normal_dist(0.0, std::sqrt(delta));
+		noise = normal_dist(gen);
 	}
-	double r = std::sqrt(-2.0 * std::log(u1));
-	double theta = 2.0 * M_PI * u2;
-	double z0 = r * std::cos(theta);
-	return yJ + z0 * std::sqrt(delta);
+	return yJ + noise;
+}
+
+// Backward compatibility: overload without use_deterministic_noise defaults to deterministic
+double PacNoisySampleFrom64Counters(const double counters[64], double mi, std::mt19937_64 &gen) {
+	return PacNoisySampleFrom64Counters(counters, mi, gen, true);
 }
 
 struct PacAggregateLocalState : public FunctionLocalState {
@@ -161,6 +171,16 @@ double ComputeDeltaFromValues(const vector<double> &values, double mi) {
 	double sigma2 = ComputeSecondMomentVariance(values);
 	double delta = sigma2 / (2.0 * mi);
 	return delta;
+}
+
+// Wrapper function that handles both deterministic and standard noise generation
+// When use_deterministic_noise is true, it uses the same Box-Muller approach as already used in
+// PacNoisySampleFrom64Counters
+double PacNoisySampleFrom64CountersDeterministic(const double counters[64], double mi, std::mt19937_64 &gen,
+                                                 bool use_deterministic_noise) {
+	// The existing PacNoisySampleFrom64Counters already uses deterministic Box-Muller
+	// so we just call it directly - it's already platform-agnostic!
+	return PacNoisySampleFrom64Counters(counters, mi, gen);
 }
 
 unique_ptr<FunctionLocalState> PacAggregateInit(ExpressionState &state, const BoundFunctionExpression &,

@@ -4,6 +4,12 @@
 
 require pac
 
+statement ok
+SET pac_seed = 42
+
+statement ok
+SET pac_deterministic_noise = true
+
 # Create two tables with 25 rows each and 5 groups (grp = i % 5)
 # Single-column primary key
 statement ok
@@ -40,9 +46,6 @@ pRAGMA add_pac_privacy_unit('bitslice_pk_single');
 
 statement ok
 pRAGMA add_pac_privacy_unit('bitslice_pk_many');
-
-statement ok
-set pac_seed = 42;
 
 # 1) Ungrouped SUM on single-PK table (should match distribution from no-pk test)
 query I

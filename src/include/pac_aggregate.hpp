@@ -33,22 +33,35 @@ unique_ptr<FunctionLocalState> PacAggregateInit(ExpressionState &state, const Bo
 void RegisterPacAggregateFunctions(ExtensionLoader &loader);
 
 // Declare the noisy-sample helper so other translation units (pac_count.cpp) can call it.
+// Overload with use_deterministic_noise parameter (when true, uses Box-Muller; when false, uses
+// std::normal_distribution)
+double PacNoisySampleFrom64Counters(const double counters[64], double mi, std::mt19937_64 &gen,
+                                    bool use_deterministic_noise);
+// Backward compatibility overload (defaults to deterministic)
 double PacNoisySampleFrom64Counters(const double counters[64], double mi, std::mt19937_64 &gen);
+
+// Helper function that computes noisy sample using deterministic Box-Muller when pac_deterministic_noise is set.
+// This adds deterministic noise to a chosen counter value (yJ) given delta and a random generator.
+double PacNoisySampleFrom64CountersDeterministic(const double counters[64], double mi, std::mt19937_64 &gen,
+                                                 bool use_deterministic_noise);
 
 // Bind data used by PAC aggregates to carry the `mi` parameter.
 struct PacBindData : public FunctionData {
 	double mi;
-	uint64_t seed;        // deterministic RNG seed for PAC aggregates
-	double scale_divisor; // for DECIMAL pac_avg: divide result by 10^scale (default 1.0)
-	explicit PacBindData(double mi_val, uint64_t seed_val = std::random_device {}(), double scale_div = 1.0)
-	    : mi(mi_val), seed(seed_val), scale_divisor(scale_div) {
+	uint64_t seed;                // deterministic RNG seed for PAC aggregates
+	double scale_divisor;         // for DECIMAL pac_avg: divide result by 10^scale (default 1.0)
+	bool use_deterministic_noise; // if true, use platform-agnostic Box-Muller noise generation
+	explicit PacBindData(double mi_val, uint64_t seed_val = std::random_device {}(), double scale_div = 1.0,
+	                     bool use_det_noise = false)
+	    : mi(mi_val), seed(seed_val), scale_divisor(scale_div), use_deterministic_noise(use_det_noise) {
 	}
 	unique_ptr<FunctionData> Copy() const override {
-		return make_uniq<PacBindData>(mi, seed, scale_divisor);
+		return make_uniq<PacBindData>(mi, seed, scale_divisor, use_deterministic_noise);
 	}
 	bool Equals(const FunctionData &other) const override {
 		auto &o = other.Cast<PacBindData>();
-		return mi == o.mi && seed == o.seed && scale_divisor == o.scale_divisor;
+		return mi == o.mi && seed == o.seed && scale_divisor == o.scale_divisor &&
+		       use_deterministic_noise == o.use_deterministic_noise;
 	}
 };
 

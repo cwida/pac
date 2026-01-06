@@ -7,6 +7,12 @@
 require pac
 
 statement ok
+SET pac_seed = 42
+
+statement ok
+SET pac_deterministic_noise = true
+
+statement ok
 SET pac_noise = false;
 
 statement ok

@@ -70,6 +70,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	db.config.AddExtensionOption("pac_noise", "apply PAC noise", LogicalType::BOOLEAN);
 	// Add option to set deterministic RNG seed for PAC functions (useful for tests)
 	db.config.AddExtensionOption("pac_seed", "deterministic RNG seed for PAC functions", LogicalType::BIGINT);
+	// Add option to force deterministic (architecture-agnostic) noise generation for testing (default false)
+	db.config.AddExtensionOption("pac_deterministic_noise", "use architecture-agnostic noise generation for testing",
+	                             LogicalType::BOOLEAN, Value::BOOLEAN(false));
 	// Add option to configure the number of samples (m) used by PAC (default 128)
 	db.config.AddExtensionOption("pac_m", "number of per-sample subsets (m)", LogicalType::INTEGER);
 	// Add option to toggle enforcement of per-sample array length == pac_m (default true)

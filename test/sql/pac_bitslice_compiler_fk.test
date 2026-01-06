@@ -4,6 +4,12 @@
 
 require pac
 
+statement ok
+SET pac_seed = 42
+
+statement ok
+SET pac_deterministic_noise = true
+
 # Create PU table (primary key) and a non-PU table referencing it via FK
 statement ok
 CREATE TABLE bitslice_fk_pu(

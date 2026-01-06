@@ -4,6 +4,12 @@
 
 require pac
 
+statement ok
+SET pac_seed = 42
+
+statement ok
+SET pac_deterministic_noise = true
+
 # Create two tables with 25 rows each and 5 groups (grp = i % 5)
 statement ok
 CREATE TABLE bitslice_a AS
@@ -17,9 +23,6 @@ FROM range(25) t(i)
 
 statement ok
 pRAGMA add_pac_privacy_unit('bitslice_a');
-
-statement ok
-set pac_seed = 42;
 
 # 1) Ungrouped SUM / COUNT on a single table
 query I
@@ -266,4 +269,3 @@ DROP TABLE bitslice_b
 
 statement ok
 DROP TABLE bitslice_with_rowid
-

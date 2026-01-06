@@ -7,6 +7,13 @@ require pac
 statement ok
 PRAGMA enable_verification
 
+# Set deterministic seed for cross-CPU reproducibility
+statement ok
+SET pac_seed = 42
+
+statement ok
+SET pac_deterministic_noise = true
+
 # Create test data with 4000 rows
 statement ok
 CREATE TABLE test_data AS
@@ -25,7 +32,13 @@ SELECT typeof(pac_sum(hash(rowid)::UBIGINT, value::INTEGER, 0.0)) FROM test_data
 ----
 HUGEINT
 
-# Test with explicit mi parameter (0.0 for deterministic results)
+# Test with non-zero mi parameter (deterministic results due to pac_seed)
+query I
+SELECT pac_sum(hash(rowid)::UBIGINT, value::INTEGER, 128.0) IS NOT NULL FROM test_data
+----
+true
+
+# Test with explicit mi parameter (0.0 for no noise)
 query I
 SELECT pac_sum(hash(rowid)::UBIGINT, value::INTEGER, 0.0) IS NOT NULL FROM test_data
 ----

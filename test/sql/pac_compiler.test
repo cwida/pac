@@ -5,6 +5,12 @@
 require pac
 
 statement ok
+SET pac_seed = 42
+
+statement ok
+SET pac_deterministic_noise = true
+
+statement ok
 PRAGMA remove_pac_privacy_unit('t_single');
 
 statement ok
@@ -43,4 +49,3 @@ PRAGMA add_pac_privacy_unit('t_single');
 
 statement ok
 PRAGMA remove_pac_privacy_unit('t_single');
-
