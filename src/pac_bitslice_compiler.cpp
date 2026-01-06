@@ -254,8 +254,8 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 }
 
 void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExtensionInput &input,
-                             unique_ptr<LogicalOperator> &plan, const string &privacy_unit,
-                             const string &query, const string &query_hash) {
+                             unique_ptr<LogicalOperator> &plan, const string &privacy_unit, const string &query,
+                             const string &query_hash) {
 
 #ifdef DEBUG
 	Printer::Print("CompilePacBitsliceQuery called for PU=" + privacy_unit + " hash=" + query_hash);
