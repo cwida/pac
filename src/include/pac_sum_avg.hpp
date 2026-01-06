@@ -354,13 +354,13 @@ struct PacSumIntState {
 	// NOTE: Caller must copy buf_hashes/buf_values to stack BEFORE calling this,
 	// as this method overwrites the union with aggregation state fields.
 	void InitializeAggregationState() {
-		// Zero out union fields first before changing buffering state
+		// Set buffering first - this changes which union member is active
+		buffering = false;
+		// Now initialize all fields in the aggregating struct
 		exact_total8 = exact_total16 = exact_total32 = exact_total64 = 0;
 		probabilistic_total8 = probabilistic_total16 = nullptr;
 		probabilistic_total32 = probabilistic_total64 = nullptr;
 		probabilistic_total128 = nullptr;
-		// Now transition to aggregation mode
-		buffering = false;
 	}
 
 	void Flush(ArenaAllocator &allocator) {

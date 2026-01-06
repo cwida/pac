@@ -135,11 +135,8 @@ struct PacCountState {
 
 	// Allocate banks0 (subtotal8) and transition to aggregation mode
 	void AllocateFirstLevel(ArenaAllocator &allocator) {
-		// Zero out union first (while still in buffering mode conceptually)
-		banks0 = nullptr;
-		banks1 = nullptr;
-		banks2 = nullptr;
-		banks3 = nullptr;
+		// Zero the entire union first (32 bytes) to clear any buffered hash data
+		memset(&buf_hashes, 0, sizeof(buf_hashes));
 		// Now transition to aggregation mode
 		buffering = false;
 		banks0 = reinterpret_cast<uint8_t *>(allocator.AllocateAligned(64));
