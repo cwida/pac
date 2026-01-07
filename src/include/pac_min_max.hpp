@@ -1,5 +1,5 @@
 //
-// pac_min_max.hpp - PAC MIN/MAX aggregate functions
+// Created by ila on 12/19/25.
 //
 
 #ifndef PAC_MIN_MAX_HPP
@@ -27,15 +27,15 @@ void RegisterPacMaxFunctions(ExtensionLoader &loader);
 //
 // the state directly keeps TYPE probabilistic totals[64] (no cascading with smaller types)
 // we tried cascading, but it does not help much, and usually BOUNDSOP means that most
-// aggregations actually need to do an actual MIN/MAX and do not touch the array
+// aggregations actually do not need to do an actual MIN/MAX and do not touch the array,
 // hence optimizing its size does not reduce the footprint much, and for code
 // simplicity it was removed.
 //
 // In order to keep the size of the states low, it is more important to delay the state
 // allocation until multiple values have been received (buffering). Processing a buffer
-// rather than individual values reduces cache misses and increases chances for SIMD
+// rather than individual values reduces cache misses and increases chances for SIMD.
 //
-// While we predicate the counting and SWAR-optimize it, we  provide a naive IF..THEN baseline that is SIMD-unfriendly
+// While we predicate the counting and SWAR-optimize it, we provide a naive IF..THEN baseline that is SIMD-unfriendly.
 //
 // Define PAC_MINMAX_NOBUFFERING to disable the buffering optimization.
 // Define PAC_MINMAX_NOBOUNDOPT to disable global bound optimization.
@@ -51,58 +51,55 @@ static constexpr uint16_t BOUND_RECOMPUTE_INTERVAL = 2048;
 #define PAC_BETTER(a, b)    (PAC_IS_BETTER(a, b) ? (a) : (b))
 #define PAC_WORSE(a, b)     (PAC_IS_BETTER(a, b) ? (b) : (a))
 
-// SWAR update for signed types and floats (bit-select approach)
+// SIMD-friendly branchless update (bit-select approach)
 // Works for all sizes: 8-bit (SHIFTS=8), 16-bit (SHIFTS=16), 32-bit (SHIFTS=32), 64-bit (SHIFTS=64)
-template <typename T, typename UintT, typename BitsT, int SHIFTS, uint64_t MASK, bool IS_MAX>
-AUTOVECTORIZE inline void UpdateExtremesSWAR(T *extremes, uint64_t key_hash, T value) {
-	union {
-		uint64_t u64[SHIFTS];
-		BitsT bits[64];
+template <typename T, typename UintT, typename BitsT, int SHIFTS, uint64_t MASK, bool IS_MAX, bool SIGNED>
+AUTOVECTORIZE inline void UpdateExtremesSIMD(T *extremes, uint64_t key_hash, T value) {
+	union {                   // union to deal with bit extraction of uint_t key_hash and differently sized T
+		uint64_t u64[SHIFTS]; // an array of 64-bit uints that is equally big as 64 values of T
+		BitsT bits[64];       // signed type with width equal to T (the type being aggregated)
 	} buf;
-	for (int i = 0; i < SHIFTS; i++) {
-		buf.u64[i] = (key_hash >> i) & MASK;
+	for (int i = 0; i < SHIFTS; i++) {       // fewer iterations than 64 here (SWAR)
+		buf.u64[i] = (key_hash >> i) & MASK; // this operates on the uint64_t key_hash granularity
 	}
-	for (int i = 0; i < 64; i++) {
+	for (int i = 0; i < 64; i++) {                     // 64 iterations on 64 T values => hopefully will autovectorize
 		UintT mask = static_cast<UintT>(-buf.bits[i]); // 1->0xFF..., 0->0x00
-		union {
-			T val;
-			UintT bits;
-		} extreme_u, result_u, out;
-		extreme_u.val = PAC_BETTER(value, extremes[i]);
-		result_u.val = extremes[i];
-		out.bits = (extreme_u.bits & mask) | (result_u.bits & ~mask);
-		extremes[i] = out.val;
-	}
-}
-
-// Unsigned integer update - faster approach using mask on value directly
-// MAX: value & mask -> 0 if inactive (won't beat current), value if active
-// MIN: value | ~mask -> all 1s if inactive (won't beat current), value if active
-template <typename T, typename UintT, typename BitsT, int SHIFTS, uint64_t MASK, bool IS_MAX>
-AUTOVECTORIZE inline void UpdateExtremesUnsigned(T *extremes, uint64_t key_hash, T value) {
-	union {
-		uint64_t u64[SHIFTS];
-		BitsT bits[64];
-	} buf;
-	for (int i = 0; i < SHIFTS; i++) {
-		buf.u64[i] = (key_hash >> i) & MASK;
-	}
-	for (int i = 0; i < 64; i++) {
-		UintT mask = static_cast<UintT>(-buf.bits[i]);
-		if (IS_MAX) {
-			extremes[i] = std::max(static_cast<T>(value & mask), extremes[i]);
-		} else {
-			extremes[i] = std::min(static_cast<T>(value | static_cast<T>(~mask)), extremes[i]);
+		union {    // union to mitigate between type T and its bitwise representation (for 0x00/0xFF minmax masking)
+			T val; // could e.g. be float, i.e. non-integer (float and double use SIGNED)
+			UintT bits; // because float is 32-bits, if T=float => UintT = uint32_t
+		} extreme_u, value_u, result_u;
+		extreme_u.val = extremes[i];
+		if (SIGNED) { // SIGNED and IS_MAX are compile-time booleans; non-active paths will be compiled away
+			value_u.val = PAC_BETTER(value, extreme_u.val);
+			result_u.bits = (value_u.bits & mask) | (extreme_u.bits & ~mask); // masking on bits
+			extremes[i] = result_u.val; // same value but now viewed as (multiple SWAR) values of type T
+		} else {                     // only unsigned integer types T below here; this is a bit faster:
+			// for unsigned max, we can zero the value if not selected, and run max(result,extreme)
+			// for unsigned min, we can set all bits of the value if not selected, and run min(result,extreme)
+			value_u.val = value;
+			result_u.bits = IS_MAX ? (value_u.bits & mask) : (value_u.bits | ~mask); // operation on bits
+			extremes[i] = PAC_BETTER(result_u.val, extreme_u.val); // operation on values (but in the same CPU register)
 		}
 	}
 }
 
-// Branchless hugeint update - apply mask to both 64-bit halves
-template <typename T, bool IS_MAX>
-AUTOVECTORIZE inline void UpdateExtremesHugeint(T *extremes, uint64_t key_hash, T value) {
+// Specialization for hugeint_t - branchless 128-bit update
+template <bool IS_MAX, bool SIGNED>
+AUTOVECTORIZE inline void UpdateExtremesSIMD(hugeint_t *extremes, uint64_t key_hash, hugeint_t value) {
 	for (int i = 0; i < 64; i++) {
 		uint64_t mask = -((key_hash >> i) & 1);
-		T better = PAC_BETTER(value, extremes[i]);
+		hugeint_t better = PAC_BETTER(value, extremes[i]);
+		extremes[i].lower = (better.lower & mask) | (extremes[i].lower & ~mask);
+		extremes[i].upper = (better.upper & mask) | (extremes[i].upper & ~mask);
+	}
+}
+
+// Specialization for uhugeint_t - branchless 128-bit update
+template <bool IS_MAX, bool SIGNED>
+AUTOVECTORIZE inline void UpdateExtremesSIMD(uhugeint_t *extremes, uint64_t key_hash, uhugeint_t value) {
+	for (int i = 0; i < 64; i++) {
+		uint64_t mask = -((key_hash >> i) & 1);
+		uhugeint_t better = PAC_BETTER(value, extremes[i]);
 		extremes[i].lower = (better.lower & mask) | (extremes[i].lower & ~mask);
 		extremes[i].upper = (better.upper & mask) | (extremes[i].upper & ~mask);
 	}
@@ -200,12 +197,12 @@ struct PacMinMaxState {
 // ============================================================================
 // Update specializations - instantiated where called
 // PAC_MINMAX_NOSIMD: use simple branching scalar loop (for benchmarking)
-// Default: use branchless SWAR/mask-based updates
+// Default: use branchless SIMD-friendly updates
 // ============================================================================
 
+// Macro to define Update specializations for regular types (8/16/32/64-bit)
 #ifdef PAC_MINMAX_NOSIMD
-// NOSIMD: all types use simple branching scalar loop
-#define DEFINE_UPDATE_SCALAR(T)                                                                                        \
+#define DEFINE_UPDATE(T, UINT_T, BITS_T, SHIFTS, MASK, SIGNED)                                                         \
 	template <>                                                                                                        \
 	inline void PacMinMaxState<T, true>::Update(uint64_t h, T v) {                                                     \
 		UpdateExtremesScalar<T, true>(extremes, h, v);                                                                 \
@@ -214,145 +211,65 @@ struct PacMinMaxState {
 	inline void PacMinMaxState<T, false>::Update(uint64_t h, T v) {                                                    \
 		UpdateExtremesScalar<T, false>(extremes, h, v);                                                                \
 	}
+#else
+#define DEFINE_UPDATE(T, UINT_T, BITS_T, SHIFTS, MASK, SIGNED)                                                         \
+	template <>                                                                                                        \
+	inline void PacMinMaxState<T, true>::Update(uint64_t h, T v) {                                                     \
+		UpdateExtremesSIMD<T, UINT_T, BITS_T, SHIFTS, MASK, true, SIGNED>(extremes, h, v);                             \
+	}                                                                                                                  \
+	template <>                                                                                                        \
+	inline void PacMinMaxState<T, false>::Update(uint64_t h, T v) {                                                    \
+		UpdateExtremesSIMD<T, UINT_T, BITS_T, SHIFTS, MASK, false, SIGNED>(extremes, h, v);                            \
+	}
+#endif
 
-DEFINE_UPDATE_SCALAR(int8_t)
-DEFINE_UPDATE_SCALAR(uint8_t)
-DEFINE_UPDATE_SCALAR(int16_t)
-DEFINE_UPDATE_SCALAR(uint16_t)
-DEFINE_UPDATE_SCALAR(int32_t)
-DEFINE_UPDATE_SCALAR(uint32_t)
-DEFINE_UPDATE_SCALAR(float)
-DEFINE_UPDATE_SCALAR(int64_t)
-DEFINE_UPDATE_SCALAR(uint64_t)
-DEFINE_UPDATE_SCALAR(double)
-DEFINE_UPDATE_SCALAR(hugeint_t)
-DEFINE_UPDATE_SCALAR(uhugeint_t)
+// Macro to define Update specializations for hugeint types (128-bit)
+#ifdef PAC_MINMAX_NOSIMD
+#define DEFINE_UPDATE_HUGE(T, SIGNED)                                                                                  \
+	template <>                                                                                                        \
+	inline void PacMinMaxState<T, true>::Update(uint64_t h, T v) {                                                     \
+		UpdateExtremesScalar<T, true>(extremes, h, v);                                                                 \
+	}                                                                                                                  \
+	template <>                                                                                                        \
+	inline void PacMinMaxState<T, false>::Update(uint64_t h, T v) {                                                    \
+		UpdateExtremesScalar<T, false>(extremes, h, v);                                                                \
+	}
+#else
+#define DEFINE_UPDATE_HUGE(T, SIGNED)                                                                                  \
+	template <>                                                                                                        \
+	inline void PacMinMaxState<T, true>::Update(uint64_t h, T v) {                                                     \
+		UpdateExtremesSIMD<true, SIGNED>(extremes, h, v);                                                              \
+	}                                                                                                                  \
+	template <>                                                                                                        \
+	inline void PacMinMaxState<T, false>::Update(uint64_t h, T v) {                                                    \
+		UpdateExtremesSIMD<false, SIGNED>(extremes, h, v);                                                             \
+	}
+#endif
 
-#undef DEFINE_UPDATE_SCALAR
+// 8-bit types (SWAR 8-way)
+DEFINE_UPDATE(int8_t, uint8_t, int8_t, 8, 0x0101010101010101ULL, true)
+DEFINE_UPDATE(uint8_t, uint8_t, int8_t, 8, 0x0101010101010101ULL, false)
 
-#else // Optimized branchless implementations
+// 16-bit types (SWAR 4-way)
+DEFINE_UPDATE(int16_t, uint16_t, int16_t, 16, 0x0001000100010001ULL, true)
+DEFINE_UPDATE(uint16_t, uint16_t, int16_t, 16, 0x0001000100010001ULL, false)
 
-// int8 (SWAR 8-way, bit-select)
-template <>
-inline void PacMinMaxState<int8_t, true>::Update(uint64_t h, int8_t v) {
-	UpdateExtremesSWAR<int8_t, uint8_t, int8_t, 8, 0x0101010101010101ULL, true>(extremes, h, v);
-}
-template <>
-inline void PacMinMaxState<int8_t, false>::Update(uint64_t h, int8_t v) {
-	UpdateExtremesSWAR<int8_t, uint8_t, int8_t, 8, 0x0101010101010101ULL, false>(extremes, h, v);
-}
+// 32-bit types (SWAR 2-way)
+DEFINE_UPDATE(int32_t, uint32_t, int32_t, 32, 0x0000000100000001ULL, true)
+DEFINE_UPDATE(uint32_t, uint32_t, int32_t, 32, 0x0000000100000001ULL, false)
+DEFINE_UPDATE(float, uint32_t, int32_t, 32, 0x0000000100000001ULL, true)
 
-// uint8 (SWAR 8-way, unsigned optimization)
-template <>
-inline void PacMinMaxState<uint8_t, true>::Update(uint64_t h, uint8_t v) {
-	UpdateExtremesUnsigned<uint8_t, uint8_t, int8_t, 8, 0x0101010101010101ULL, true>(extremes, h, v);
-}
-template <>
-inline void PacMinMaxState<uint8_t, false>::Update(uint64_t h, uint8_t v) {
-	UpdateExtremesUnsigned<uint8_t, uint8_t, int8_t, 8, 0x0101010101010101ULL, false>(extremes, h, v);
-}
+// 64-bit types (SWAR 1-way)
+DEFINE_UPDATE(int64_t, uint64_t, int64_t, 64, 1ULL, true)
+DEFINE_UPDATE(uint64_t, uint64_t, int64_t, 64, 1ULL, false)
+DEFINE_UPDATE(double, uint64_t, int64_t, 64, 1ULL, true)
 
-// int16 (SWAR 4-way, bit-select)
-template <>
-inline void PacMinMaxState<int16_t, true>::Update(uint64_t h, int16_t v) {
-	UpdateExtremesSWAR<int16_t, uint16_t, int16_t, 16, 0x0001000100010001ULL, true>(extremes, h, v);
-}
-template <>
-inline void PacMinMaxState<int16_t, false>::Update(uint64_t h, int16_t v) {
-	UpdateExtremesSWAR<int16_t, uint16_t, int16_t, 16, 0x0001000100010001ULL, false>(extremes, h, v);
-}
+// 128-bit types (hugeint)
+DEFINE_UPDATE_HUGE(hugeint_t, true)
+DEFINE_UPDATE_HUGE(uhugeint_t, false)
 
-// uint16 (SWAR 4-way, unsigned optimization)
-template <>
-inline void PacMinMaxState<uint16_t, true>::Update(uint64_t h, uint16_t v) {
-	UpdateExtremesUnsigned<uint16_t, uint16_t, int16_t, 16, 0x0001000100010001ULL, true>(extremes, h, v);
-}
-template <>
-inline void PacMinMaxState<uint16_t, false>::Update(uint64_t h, uint16_t v) {
-	UpdateExtremesUnsigned<uint16_t, uint16_t, int16_t, 16, 0x0001000100010001ULL, false>(extremes, h, v);
-}
-
-// int32 (SWAR 2-way, bit-select)
-template <>
-inline void PacMinMaxState<int32_t, true>::Update(uint64_t h, int32_t v) {
-	UpdateExtremesSWAR<int32_t, uint32_t, int32_t, 32, 0x0000000100000001ULL, true>(extremes, h, v);
-}
-template <>
-inline void PacMinMaxState<int32_t, false>::Update(uint64_t h, int32_t v) {
-	UpdateExtremesSWAR<int32_t, uint32_t, int32_t, 32, 0x0000000100000001ULL, false>(extremes, h, v);
-}
-
-// uint32 (SWAR 2-way, unsigned optimization)
-template <>
-inline void PacMinMaxState<uint32_t, true>::Update(uint64_t h, uint32_t v) {
-	UpdateExtremesUnsigned<uint32_t, uint32_t, int32_t, 32, 0x0000000100000001ULL, true>(extremes, h, v);
-}
-template <>
-inline void PacMinMaxState<uint32_t, false>::Update(uint64_t h, uint32_t v) {
-	UpdateExtremesUnsigned<uint32_t, uint32_t, int32_t, 32, 0x0000000100000001ULL, false>(extremes, h, v);
-}
-
-// float (SWAR 2-way, bit-select)
-template <>
-inline void PacMinMaxState<float, true>::Update(uint64_t h, float v) {
-	UpdateExtremesSWAR<float, uint32_t, int32_t, 32, 0x0000000100000001ULL, true>(extremes, h, v);
-}
-template <>
-inline void PacMinMaxState<float, false>::Update(uint64_t h, float v) {
-	UpdateExtremesSWAR<float, uint32_t, int32_t, 32, 0x0000000100000001ULL, false>(extremes, h, v);
-}
-
-// int64 (SWAR 1-way, bit-select)
-template <>
-inline void PacMinMaxState<int64_t, true>::Update(uint64_t h, int64_t v) {
-	UpdateExtremesSWAR<int64_t, uint64_t, int64_t, 64, 1ULL, true>(extremes, h, v);
-}
-template <>
-inline void PacMinMaxState<int64_t, false>::Update(uint64_t h, int64_t v) {
-	UpdateExtremesSWAR<int64_t, uint64_t, int64_t, 64, 1ULL, false>(extremes, h, v);
-}
-
-// uint64 (SWAR 1-way, unsigned optimization)
-template <>
-inline void PacMinMaxState<uint64_t, true>::Update(uint64_t h, uint64_t v) {
-	UpdateExtremesUnsigned<uint64_t, uint64_t, int64_t, 64, 1ULL, true>(extremes, h, v);
-}
-template <>
-inline void PacMinMaxState<uint64_t, false>::Update(uint64_t h, uint64_t v) {
-	UpdateExtremesUnsigned<uint64_t, uint64_t, int64_t, 64, 1ULL, false>(extremes, h, v);
-}
-
-// double (SWAR 1-way, bit-select)
-template <>
-inline void PacMinMaxState<double, true>::Update(uint64_t h, double v) {
-	UpdateExtremesSWAR<double, uint64_t, int64_t, 64, 1ULL, true>(extremes, h, v);
-}
-template <>
-inline void PacMinMaxState<double, false>::Update(uint64_t h, double v) {
-	UpdateExtremesSWAR<double, uint64_t, int64_t, 64, 1ULL, false>(extremes, h, v);
-}
-
-// hugeint (branchless 128-bit)
-template <>
-inline void PacMinMaxState<hugeint_t, true>::Update(uint64_t h, hugeint_t v) {
-	UpdateExtremesHugeint<hugeint_t, true>(extremes, h, v);
-}
-template <>
-inline void PacMinMaxState<hugeint_t, false>::Update(uint64_t h, hugeint_t v) {
-	UpdateExtremesHugeint<hugeint_t, false>(extremes, h, v);
-}
-
-// uhugeint (branchless 128-bit)
-template <>
-inline void PacMinMaxState<uhugeint_t, true>::Update(uint64_t h, uhugeint_t v) {
-	UpdateExtremesHugeint<uhugeint_t, true>(extremes, h, v);
-}
-template <>
-inline void PacMinMaxState<uhugeint_t, false>::Update(uint64_t h, uhugeint_t v) {
-	UpdateExtremesHugeint<uhugeint_t, false>(extremes, h, v);
-}
-
-#endif // PAC_MINMAX_NOSIMD
+#undef DEFINE_UPDATE
+#undef DEFINE_UPDATE_HUGE
 
 // ============================================================================
 // PacMinMaxUpdateOne: direct state update (always available)

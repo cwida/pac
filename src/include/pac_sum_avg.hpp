@@ -56,7 +56,7 @@ void RegisterPacAvgFunctions(ExtensionLoader &loader);
 // allocation until multiple values have been received (buffering). Processing a buffer
 // rather than individual values reduces cache misses and increases chances for SIMD
 //
-// While we predicate the counting and SWAR-optimize it, we  provide a naive IF..THEN baseline that is SIMD-unfriendly
+// While we predicate the counting and SWAR-optimize it, we provide a naive IF..THEN baseline that is SIMD-unfriendly
 //
 // Define PAC_MINMAX_NOBUFFERING to disable the buffering optimization.
 // Define PAC_MINMAX_NOCASCADING to disable multi-level ccascading from small into wider types (aggregate in final type)
@@ -79,7 +79,7 @@ PAC_SUMAVG_NOSIMD only makes sense in combination with PAC_SUMAVG_NOCASCADING
 			total[j] += v;
 		}
 #else
-		total[j] += v * static_cast<ACCUM_T>((key_hash >> j) & 1ULL);
+		total[j] += v * static_cast<ACCUM_T>((key_hash >> j) & 1ULL); // multiply value with 0 or 1; then add
 #endif
 	}
 }

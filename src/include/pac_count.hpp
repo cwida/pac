@@ -50,7 +50,7 @@ void RegisterPacCountFunctions(ExtensionLoader &);
 // allocation until multiple values have been received (buffering). Processing a buffer
 // rather than individual values reduces cache misses and increases chances for SIMD
 //
-// While we predicate the counting and SWAR-optimize it, we  provide a naive IF..THEN baseline that is SIMD-unfriendly
+// While we predicate the counting and SWAR-optimize it, we provide a naive IF..THEN baseline that is SIMD-unfriendly
 //
 // Define PAC_MINMAX_NOBUFFERING to disable the buffering optimization.
 // Define PAC_MINMAX_NOCASCADING to disable the pre-aggregation in a uint8_t level
