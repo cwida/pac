@@ -51,19 +51,22 @@ void RegisterPacAvgFunctions(ExtensionLoader &loader);
 // distinct GROUP BY values (and relatively modest sums, therefore), the bigger counters are often not needed.
 // Therefore, we allocate counters lazily now: only when say 8-bits counters overflow we allocate the 16-bits counters
 // This optimization can reduce the memory footprint by 2-8x, which can help in avoiding spilling.
-
-// for benchmarking/reproducibility purposes, we can disable cascading counters (just sum directly to the largest tyoe)
-// and in cascading mode we can still use eager memory allocation.
-//#define PAC_SUMAVG_NOCASCADING 1 // seems 10x slower on Apple
-//#define PAC_SUMAVG_NOSIMD 1  // use if-then-else rather than predicated simd-friendly update
+//
+// In order to keep the size of the states low, it is more important to delay the state
+// allocation until multiple values have been received (buffering). Processing a buffer
+// rather than individual values reduces cache misses and increases chances for SIMD
+//
+// While we predicate the counting and SWAR-optimize it, we  provide a naive IF..THEN baseline that is SIMD-unfriendly
+//
+// Define PAC_MINMAX_NOBUFFERING to disable the buffering optimization.
+// Define PAC_MINMAX_NOCASCADING to disable multi-level ccascading from small into wider types (aggregate in final type)
+// Define PAC_MINMAX_NOSIMD to get the IF..THEN SIMD-unfriendly aggergate computation kernel
+//#define PAC_MINMAX_NOBUFFERING 1
+//#define PAC_MINMAX_NOBCASCADING 1
+//#define PAC_MINMAX_NOSIMD 1
 #if defined(PAC_SUMAVG_NOSIMD) && !defined(PAC_SUMAVG_NOCASCADING)
 PAC_SUMAVG_NOSIMD only makes sense in combination with PAC_SUMAVG_NOCASCADING
 #endif
-    //#define PAC_SUMAVG_NOBUFFERING 1  // Disable buffering wrapper (allocate state immediately)
-
-    // NULL handling: by default we ignore NULLs (safe behavior, like DuckDB's SUM/AVG).
-    // Define PAC_SUMAVG_UNSAFENULL to return NULL if any input value is NULL.
-    //#define PAC_SUMAVG_UNSAFENULL 1
 
     // Simple version for double/[u]int64_t/hugeint (uses multiplication for conditional add)
     // This auto-vectorizes well for 64-bits data-types because key_hash is also 64-bits
@@ -72,7 +75,7 @@ PAC_SUMAVG_NOSIMD only makes sense in combination with PAC_SUMAVG_NOCASCADING
 	ACCUM_T v = static_cast<ACCUM_T>(value);
 	for (int j = 0; j < 64; j++) {
 #ifdef PAC_SUMAVG_NOSIMD
-		if ((key_hash >> j) & 1ULL) {
+		if ((key_hash >> j) & 1ULL) { // IF..THEN cannot be simd-ized (and is 50%:has heavy branch misprediction cost)
 			total[j] += v;
 		}
 #else
@@ -347,17 +350,13 @@ struct PacSumIntState {
 	}
 };
 
-// Double pac_sum state
+// Double pac_sum state is noncascading: directly aggregates float/double into double
 struct PacSumDoubleState {
-	// Field ordering optimized for memory layout
 #ifdef PAC_SUMAVG_UNSAFENULL
 	bool seen_null;
 #endif
 	uint64_t exact_count; // total count of values added (for pac_avg)
 	double probabilistic_total[64];
-
-	AUTOVECTORIZE inline void Flush32(double value, bool force = false) {
-	}
 
 	void GetTotalsAsDouble(double *dst) const {
 		for (int i = 0; i < 64; i++) {
@@ -365,6 +364,8 @@ struct PacSumDoubleState {
 		}
 	}
 	// Interface methods for wrapper compatibility
+	inline void Flush32(double value, bool force = false) {
+	}
 	void Flush(ArenaAllocator &) {
 	}
 	PacSumDoubleState *GetState() {

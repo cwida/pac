@@ -32,8 +32,10 @@ AUTOVECTORIZE inline void // main worker function for probabilistically adding o
 PacSumUpdateOneInternal(PacSumIntState<SIGNED> &state, uint64_t key_hash, typename PacSumIntState<SIGNED>::T64 value,
                         ArenaAllocator &allocator) {
 #ifdef PAC_SUMAVG_NOCASCADING
-	AddToTotalsSimple(state.probabilistic_total128, value, key_hash);
+	AddToTotalsSimple(state.probabilistic_total128, value, key_hash); // directly add the value to the final total
 #else
+	// decide based on the (integer) value, in which level to aggregate (ensure the level is allocated)
+	// note that SIGNED stuff will be compiled away for unsigned types
 	if ((SIGNED && value < 0) ? (value >= LOWERBOUND_BITWIDTH(8)) : (value < UPPERBOUND_BITWIDTH(8))) {
 		state.exact_total8 =
 		    PacSumIntState<SIGNED>::EnsureLevelAllocated(allocator, state.probabilistic_total8, 8, state.exact_total8);
@@ -101,10 +103,9 @@ AUTOVECTORIZE inline void PacSumUpdateOne(ScatterIntState<SIGNED> &state, uint64
                                           ArenaAllocator &a) {
 	PacSumUpdateOneInternal<SIGNED>(state, key_hash, value, a);
 }
-
 #else // Buffering enabled
 
-// Unified FlushBuffer - flushes src's buffer into dst's inner state
+//  FlushBuffer - flushes src's buffer into dst's inner state
 // To flush into self, pass same wrapper for both src and dst
 template <bool SIGNED, typename WrapperT>
 inline void PacSumFlushBuffer(WrapperT &src, WrapperT &dst, ArenaAllocator &a) {

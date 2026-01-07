@@ -44,7 +44,6 @@ static void PacCountInitialize(const AggregateFunction &, data_ptr_t state_ptr) 
 	memset(state_ptr, 0, sizeof(ScatterState));
 }
 
-// Non-grouped update - uses ScatterState with buffering
 void PacCountUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, data_ptr_t state_ptr, idx_t count) {
 	ScatterState &agg = *reinterpret_cast<ScatterState *>(state_ptr);
 	uint64_t query_hash = aggr.bind_data->Cast<PacBindData>().query_hash;
@@ -53,8 +52,8 @@ void PacCountUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, data_ptr_t
 	auto input_data = UnifiedVectorFormat::GetData<uint64_t>(idata);
 	for (idx_t i = 0; i < count; i++) {
 		auto idx = idata.sel->get_index(i);
-		if (idata.validity.RowIsValid(idx)) {
-			PacCountUpdateOne(agg, input_data[idx] ^ query_hash, aggr.allocator);
+		if (idata.validity.RowIsValid(idx)) { // unlike the other aggregates, ungrouped count with buffering was faster
+			PacCountUpdateOne(agg, input_data[idx] ^ query_hash, aggr.allocator); // note: performs buffering
 		}
 	}
 }
@@ -70,12 +69,11 @@ void PacCountColumnUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, data
 		auto h_idx = hash_data.sel->get_index(i);
 		auto c_idx = col_data.sel->get_index(i);
 		if (hash_data.validity.RowIsValid(h_idx) && col_data.validity.RowIsValid(c_idx)) {
-			PacCountUpdateOne(agg, hashes[h_idx] ^ query_hash, aggr.allocator);
+			PacCountUpdateOne(agg, hashes[h_idx] ^ query_hash, aggr.allocator); // note: performs buffering
 		}
 	}
 }
 
-// Scatter update - uses ScatterState
 void PacCountScatterUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states, idx_t count) {
 	uint64_t query_hash = aggr.bind_data->Cast<PacBindData>().query_hash;
 	UnifiedVectorFormat idata, sdata;
@@ -85,7 +83,7 @@ void PacCountScatterUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, Vec
 	auto state_p = UnifiedVectorFormat::GetData<ScatterState *>(sdata);
 	for (idx_t i = 0; i < count; i++) {
 		auto idx = idata.sel->get_index(i);
-		if (idata.validity.RowIsValid(idx)) {
+		if (idata.validity.RowIsValid(idx)) { // to protect against very many groups, thus uses buffering
 			PacCountUpdateOne(*state_p[sdata.sel->get_index(i)], input_data[idx] ^ query_hash, aggr.allocator);
 		}
 	}
@@ -103,6 +101,7 @@ void PacCountColumnScatterUpdate(Vector inputs[], AggregateInputData &aggr, idx_
 		auto h_idx = hash_data.sel->get_index(i);
 		auto c_idx = col_data.sel->get_index(i);
 		if (hash_data.validity.RowIsValid(h_idx) && col_data.validity.RowIsValid(c_idx)) {
+			// to protect against very many groups, thus uses buffering
 			PacCountUpdateOne(*state_p[sdata.sel->get_index(i)], hashes[h_idx] ^ query_hash, aggr.allocator);
 		}
 	}
@@ -114,10 +113,11 @@ void PacCountCombine(Vector &src, Vector &dst, AggregateInputData &aggr, idx_t c
 	auto da = FlatVector::GetData<ScatterState *>(dst);
 	for (idx_t i = 0; i < count; i++) {
 #if !defined(PAC_COUNT_NOBUFFERING) && !defined(PAC_COUNT_NOCASCADING)
+		// flush buffered values into dst (not into src -- it would trigger allocations)
 		sa[i]->FlushBuffer(*da[i], aggr.allocator);
 #endif
 		PacCountState *ss = sa[i]->GetState();
-		if (ss) {
+		if (ss) { // we have an allocated state: flush it into dst
 			PacCountState &ds = *da[i]->EnsureState(aggr.allocator);
 			ss->FlushLevel();
 			for (int j = 0; j < 64; j++) {
@@ -127,7 +127,6 @@ void PacCountCombine(Vector &src, Vector &dst, AggregateInputData &aggr, idx_t c
 	}
 }
 
-// Finalize - uses ScatterState
 void PacCountFinalize(Vector &states, AggregateInputData &input, Vector &result, idx_t count, idx_t offset) {
 	auto aggs = FlatVector::GetData<ScatterState *>(states);
 	auto data = FlatVector::GetData<int64_t>(result);
@@ -137,11 +136,11 @@ void PacCountFinalize(Vector &states, AggregateInputData &input, Vector &result,
 	double buf[64];
 	for (idx_t i = 0; i < count; i++) {
 #if !defined(PAC_COUNT_NOBUFFERING) && !defined(PAC_COUNT_NOCASCADING)
-		aggs[i]->FlushBuffer(*aggs[i], input.allocator);
+		aggs[i]->FlushBuffer(*aggs[i], input.allocator); // flush values into yourself
 #endif
 		PacCountState *s = aggs[i]->GetState();
 		if (s) {
-			s->FlushLevel();
+			s->FlushLevel(); // flush uint8_t level into uint64_t totals
 			s->GetTotalsAsDouble(buf);
 		} else {
 			memset(buf, 0, sizeof(buf));

@@ -45,12 +45,22 @@ void RegisterPacCountFunctions(ExtensionLoader &);
 //
 // Define PAC_COUNT_NOCASCADING for a naive implementation that directly updates uint64_t[64] counters.
 // This is slower but simpler and useful for benchmarking the SWAR optimization.
+//
+// In order to keep the size of the states low, it is more important to delay the state
+// allocation until multiple values have been received (buffering). Processing a buffer
+// rather than individual values reduces cache misses and increases chances for SIMD
+//
+// While we predicate the counting and SWAR-optimize it, we  provide a naive IF..THEN baseline that is SIMD-unfriendly
+//
+// Define PAC_MINMAX_NOBUFFERING to disable the buffering optimization.
+// Define PAC_MINMAX_NOCASCADING to disable the pre-aggregation in a uint8_t level
+// Define PAC_MINMAX_NOSIMD to get the IF..THEN SIMD-unfriendly aggergate computation kernel
 
 // #define PAC_COUNT_NOBUFFERING 1
 // #define PAC_COUNT_NOCASCADING 1
 // #define PAC_COUNT_NOSIMD 1
 #if defined(PAC_SUMAVG_NOSIMD) && !defined(PAC_SUMAVG_NOCASCADING)
-PAC_COUNT_NOSIMD only makes sense in combination with PAC_COUNT_NOCASCADING
+PAC_SUMAVG_NOSIMD only makes sense in combination with PAC_SUMAVG_NOCASCADING
 #endif
 
     // SWAR-optimized state
@@ -85,38 +95,36 @@ PAC_COUNT_NOSIMD only makes sense in combination with PAC_COUNT_NOCASCADING
 	}
 };
 
-#ifndef PAC_COUNT_NOCASCADING
-AUTOVECTORIZE static inline void PacCountUpdateSWAR(PacCountState &state, uint64_t key_hash) {
-	for (int j = 0; j < 8; j++) { // just 8, not 64 iterations (SWAR: we count 8 bits every iteration)
-		state.probabilistic_total8[j] += (key_hash >> j) & PAC_COUNT_MASK;
-	}
-}
-#endif
-
 // Update one hash - direct for PacCountState (always available)
 template <typename S>
 static inline void PacCountUpdateOne(S &agg, uint64_t hash, ArenaAllocator &a);
 
-#ifndef PAC_COUNT_NOCASCADING
-template <>
-inline void PacCountUpdateOne(PacCountState &agg, uint64_t hash, ArenaAllocator &) {
-	PacCountUpdateSWAR(agg, hash);
-	if (++agg.exact_total8 == 255) {
-		agg.FlushLevel();
-	}
-}
-#else
+#ifdef PAC_COUNT_NOCASCADING
 // NOCASCADING: simple direct update to uint64_t[64]
 template <>
 inline void PacCountUpdateOne(PacCountState &agg, uint64_t hash, ArenaAllocator &) {
 	for (int i = 0; i < 64; i++) {
 #ifdef PAC_COUNT_NOSIMD
-		if ((hash >> i) & 1) {
+		if ((hash >> i) & 1) { // IF..THEN cannot be simd-ized (and is 50%:has heavy branch misprediction cost)
 			agg.probabilistic_total[i]++;
 		}
 #else
 		agg.probabilistic_total[i] += (hash >> i) & 1;
 #endif
+	}
+}
+#else
+AUTOVECTORIZE static inline void PacCountUpdateSWAR(PacCountState &state, uint64_t key_hash) {
+	for (int j = 0; j < 8; j++) { // just 8, not 64 iterations (SWAR: we count 8 bits every iteration)
+		state.probabilistic_total8[j] += (key_hash >> j) & PAC_COUNT_MASK;
+	}
+}
+
+template <>
+inline void PacCountUpdateOne(PacCountState &agg, uint64_t hash, ArenaAllocator &) {
+	PacCountUpdateSWAR(agg, hash);
+	if (++agg.exact_total8 == 255) {
+		agg.FlushLevel();
 	}
 }
 #endif

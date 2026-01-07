@@ -33,6 +33,7 @@ static void PacMinMaxUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, da
 		auto h_idx = hash_data.sel->get_index(i);
 		auto v_idx = value_data.sel->get_index(i);
 		if (hash_data.validity.RowIsValid(h_idx) && value_data.validity.RowIsValid(v_idx)) {
+			// min/max do not use buffering for global aggregates (without GROUP BY) because it was  slower
 			PacMinMaxUpdateOne<T, IS_MAX>(agg, hashes[h_idx] ^ query_hash, values[v_idx], aggr.allocator);
 		}
 	}
@@ -76,10 +77,11 @@ static void PacMinMaxCombine(Vector &src, Vector &dst, AggregateInputData &aggr,
 
 	for (idx_t i = 0; i < count; i++) {
 #ifndef PAC_MINMAX_NOBUFFERING
+		// flush the src buffer into dst (not into src: that could cause allocations there, we only want that in dst)
 		src_states[i]->FlushBuffer(*dst_states[i], aggr.allocator);
 #endif
 		auto *ss = src_states[i]->GetState();
-		if (ss && ss->initialized) {
+		if (ss && ss->initialized) { // propagate the min/max of src into dst
 			auto &ds = *dst_states[i]->EnsureState(aggr.allocator);
 			ds.CombineWith(*ss);
 		}
@@ -97,6 +99,7 @@ static void PacMinMaxFinalize(Vector &states, AggregateInputData &input, Vector 
 
 	for (idx_t i = 0; i < count; i++) {
 #ifndef PAC_MINMAX_NOBUFFERING
+		// flush the buffer into yourself, possibly allocating the state (array with 64 totals)
 		state_ptrs[i]->FlushBuffer(*state_ptrs[i], input.allocator);
 #endif
 		auto *s = state_ptrs[i]->GetState();
@@ -107,7 +110,7 @@ static void PacMinMaxFinalize(Vector &states, AggregateInputData &input, Vector 
 			memset(buf, 0, sizeof(buf));
 		}
 		for (int j = 0; j < 64; j++) {
-			buf[j] /= 2.0;
+			buf[j] /= 2.0; // if we add noise of the same scale to a min or max, it gets twice too big
 		}
 		data[offset + i] = FromDouble<T>(PacNoisySampleFrom64Counters(buf, mi, gen) + buf[41]);
 	}

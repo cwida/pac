@@ -20,9 +20,29 @@ void RegisterPacMaxFunctions(ExtensionLoader &loader);
 // Update: for each (key_hash, value), update extremes[i] if bit i of key_hash is set
 // Finalize: compute the PAC-noised min/max from the 64 counters
 //
+// we compute the minimum of all maximums for MAX (and vice versa for MIN)
+// we do this every many value updates, in order to keep costs down
+// if a new value is worse than the worst of all bounds, it can be skipped
+// this is called BOUNDOPT
+//
+// the state directly keeps TYPE probabilistic totals[64] (no cascading with smaller types)
+// we tried cascading, but it does not help much, and usually BOUNDSOP means that most
+// aggregations actually need to do an actual MIN/MAX and do not touch the array
+// hence optimizing its size does not reduce the footprint much, and for code
+// simplicity it was removed.
+//
+// In order to keep the size of the states low, it is more important to delay the state
+// allocation until multiple values have been received (buffering). Processing a buffer
+// rather than individual values reduces cache misses and increases chances for SIMD
+//
+// While we predicate the counting and SWAR-optimize it, we  provide a naive IF..THEN baseline that is SIMD-unfriendly
+//
+// Define PAC_MINMAX_NOBUFFERING to disable the buffering optimization.
 // Define PAC_MINMAX_NOBOUNDOPT to disable global bound optimization.
-
+// Define PAC_MINMAX_NOSIMD to get the IF..THEN SIMD-unfriendly aggergate computation kernel
+//#define PAC_MINMAX_NOBUFFERING 1
 //#define PAC_MINMAX_NOBOUNDOPT 1
+//#define PAC_MINMAX_NOSIMD 1
 
 static constexpr uint16_t BOUND_RECOMPUTE_INTERVAL = 2048;
 
@@ -30,10 +50,6 @@ static constexpr uint16_t BOUND_RECOMPUTE_INTERVAL = 2048;
 #define PAC_IS_BETTER(a, b) (IS_MAX ? ((a) > (b)) : ((a) < (b)))
 #define PAC_BETTER(a, b)    (PAC_IS_BETTER(a, b) ? (a) : (b))
 #define PAC_WORSE(a, b)     (PAC_IS_BETTER(a, b) ? (b) : (a))
-
-// ============================================================================
-// Update kernels - unified SWAR template for all type sizes
-// ============================================================================
 
 // SWAR update for signed types and floats (bit-select approach)
 // Works for all sizes: 8-bit (SHIFTS=8), 16-bit (SHIFTS=16), 32-bit (SHIFTS=32), 64-bit (SHIFTS=64)
@@ -96,7 +112,7 @@ AUTOVECTORIZE inline void UpdateExtremesHugeint(T *extremes, uint64_t key_hash, 
 template <typename T, bool IS_MAX>
 inline void UpdateExtremesScalar(T *extremes, uint64_t key_hash, T value) {
 	for (int i = 0; i < 64; i++) {
-		if ((key_hash >> i) & 1) {
+		if ((key_hash >> i) & 1) { // IF..THEN cannot be simd-ized (and is 50%:has heavy branch misprediction cost)
 			extremes[i] = PAC_BETTER(value, extremes[i]);
 		}
 	}
@@ -421,7 +437,6 @@ AUTOVECTORIZE inline void PacMinMaxBufferOrUpdateOne(PacMinMaxStateWrapper<T, IS
 		return;
 	}
 #endif
-
 	uint64_t cnt = agg.n_buffered & Wrapper::BUF_MASK;
 	if (DUCKDB_UNLIKELY(cnt == Wrapper::BUF_SIZE)) {
 		State &dst = *agg.EnsureState(a);
