@@ -13,6 +13,8 @@
 #define AUTOVECTORIZE
 #endif
 
+#define PAC_MAGIC_HASH 2983746509182734091ULL
+
 namespace duckdb {
 
 // Header for PAC aggregate helpers and public declarations used across pac_* files.
@@ -44,18 +46,22 @@ double PacNoisySampleFrom64Counters(const double counters[64], double mi, std::m
 struct PacBindData : public FunctionData {
 	double mi;
 	uint64_t seed;                // deterministic RNG seed for PAC aggregates
+	uint64_t query_hash;          // XOR'd with key_hash to randomize and avoid hash(0)==0 issue
 	double scale_divisor;         // for DECIMAL pac_avg: divide result by 10^scale (default 1.0)
 	bool use_deterministic_noise; // if true, use platform-agnostic Box-Muller noise generation
 	explicit PacBindData(double mi_val, uint64_t seed_val = std::random_device {}(), double scale_div = 1.0,
 	                     bool use_det_noise = false)
-	    : mi(mi_val), seed(seed_val), scale_divisor(scale_div), use_deterministic_noise(use_det_noise) {
+	    : mi(mi_val), seed(seed_val), query_hash((seed_val ^ PAC_MAGIC_HASH) * PAC_MAGIC_HASH),
+	      scale_divisor(scale_div), use_deterministic_noise(use_det_noise) {
 	}
 	unique_ptr<FunctionData> Copy() const override {
-		return make_uniq<PacBindData>(mi, seed, scale_divisor, use_deterministic_noise);
+		auto copy = make_uniq<PacBindData>(mi, seed, scale_divisor, use_deterministic_noise);
+		copy->query_hash = query_hash;
+		return copy;
 	}
 	bool Equals(const FunctionData &other) const override {
 		auto &o = other.Cast<PacBindData>();
-		return mi == o.mi && seed == o.seed && scale_divisor == o.scale_divisor &&
+		return mi == o.mi && seed == o.seed && query_hash == o.query_hash && scale_divisor == o.scale_divisor &&
 		       use_deterministic_noise == o.use_deterministic_noise;
 	}
 };
