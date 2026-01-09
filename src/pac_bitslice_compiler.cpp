@@ -17,7 +17,7 @@ namespace duckdb {
 void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtensionInput &input,
                          unique_ptr<LogicalOperator> &plan, const vector<string> &gets_missing,
                          const vector<string> &gets_present, const vector<string> &fk_path,
-                         const string &privacy_unit) {
+                         const vector<string> &privacy_units) {
 	// Note: we assume we don't use rowid
 
 	// Check if join elimination is enabled
@@ -29,36 +29,44 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 
 #ifdef DEBUG
 	Printer::Print("ModifyPlanWithoutPU: join_elimination = " + std::to_string(join_elimination));
-	Printer::Print("ModifyPlanWithoutPU: privacy_unit = " + privacy_unit);
+	Printer::Print("ModifyPlanWithoutPU: privacy_units:");
+	for (auto &pu : privacy_units) {
+		Printer::Print("  " + pu);
+	}
 #endif
 
 	// Create the necessary LogicalGets for missing tables
+	// IMPORTANT: We need to preserve the FK path ordering when creating joins
+	// Use fk_path as the canonical ordering, filter to only missing tables
+	std::unordered_set<string> missing_set(gets_missing.begin(), gets_missing.end());
+
+	// If join elimination is enabled, skip the PU tables themselves
+	if (join_elimination) {
+		for (auto &pu : privacy_units) {
+			missing_set.erase(pu);
+		}
+	}
+
 	std::unordered_map<string, unique_ptr<LogicalGet>> get_map;
-	// Preserve creation order: store ordered table names (ownership kept in get_map)
 	vector<string> ordered_table_names;
 	auto idx = GetNextTableIndex(plan);
-	for (auto &table : gets_missing) {
-		// If join elimination is enabled, skip the PU table
-		if (join_elimination && table == privacy_unit) {
-#ifdef DEBUG
-			Printer::Print("ModifyPlanWithoutPU: Skipping PU table " + table + " due to join elimination");
-#endif
-			continue;
-		}
 
-		auto it = check.table_metadata.find(table);
-		if (it == check.table_metadata.end()) {
-			throw InternalException("PAC compiler: missing table metadata for missing GET: " + table);
-		}
-		vector<string> pks = it->second.pks;
-		auto get = CreateLogicalGet(input.context, plan, table, idx);
-		// store in map (ownership) and record name to preserve order
-		get_map[table] = std::move(get);
-		ordered_table_names.push_back(table);
+	// Build ordered_table_names based on fk_path order, only including missing tables
+	for (auto &table : fk_path) {
+		if (missing_set.find(table) != missing_set.end()) {
+			auto it = check.table_metadata.find(table);
+			if (it == check.table_metadata.end()) {
+				throw InternalException("PAC compiler: missing table metadata for missing GET: " + table);
+			}
+			vector<string> pks = it->second.pks;
+			auto get = CreateLogicalGet(input.context, plan, table, idx);
+			get_map[table] = std::move(get);
+			ordered_table_names.push_back(table);
 #ifdef DEBUG
-		Printer::Print("ModifyPlanWithoutPU: Added table " + table + " to join chain");
+			Printer::Print("ModifyPlanWithoutPU: Added table " + table + " to join chain");
 #endif
-		idx++;
+			idx++;
+		}
 	}
 
 	// Find the unique_ptr reference to the existing table that connects to the missing tables
@@ -68,7 +76,6 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 	unique_ptr<LogicalOperator> *target_ref = nullptr;
 
 	// Find the last present table in the FK path (ordered)
-	// This is the table that connects to the first missing table
 	string connecting_table;
 	if (!fk_path.empty()) {
 		// Go through the FK path and find the last table that's in gets_present
@@ -152,137 +159,166 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 
 #endif
 
-	// When join elimination is enabled, we don't join to PU table
-	// Instead, we use the FK column from the last table in the chain
-	unique_ptr<Expression> hash_input_expr;
+	// Build hash expressions for each privacy unit
+	vector<unique_ptr<Expression>> hash_exprs;
 
-	if (join_elimination) {
-		// Find the last table in the FK chain (the one that would link to PU)
-		// This is the last table in ordered_table_names, or if empty, the connecting_table
-		string last_table_name;
-		if (!ordered_table_names.empty()) {
-			last_table_name = ordered_table_names.back();
-		} else {
-			last_table_name = connecting_table;
-		}
+	for (auto &privacy_unit : privacy_units) {
+		unique_ptr<Expression> hash_input_expr;
 
-		// Find the LogicalGet for this table
-		unique_ptr<LogicalOperator> *last_table_ref = FindNodeRefByTable(&plan, last_table_name);
-		if (!last_table_ref || !last_table_ref->get()) {
-			throw InternalException("PAC compiler: could not find LogicalGet for last table " + last_table_name);
-		}
-		auto last_get = &last_table_ref->get()->Cast<LogicalGet>();
-
-		// Find the FK column(s) that reference the PU
-		auto it = check.table_metadata.find(last_table_name);
-		if (it == check.table_metadata.end()) {
-			throw InternalException("PAC compiler: missing metadata for table " + last_table_name);
-		}
-
-		vector<string> fk_cols;
-		for (auto &fk : it->second.fks) {
-			if (fk.first == privacy_unit) {
-				fk_cols = fk.second;
-				break;
+		if (join_elimination) {
+			// Find the last table in the FK chain for this PU
+			string last_table_name;
+			if (!ordered_table_names.empty()) {
+				last_table_name = ordered_table_names.back();
+			} else {
+				last_table_name = connecting_table;
 			}
+
+			unique_ptr<LogicalOperator> *last_table_ref = FindNodeRefByTable(&plan, last_table_name);
+			if (!last_table_ref || !last_table_ref->get()) {
+				throw InternalException("PAC compiler: could not find LogicalGet for last table " + last_table_name);
+			}
+			auto last_get = &last_table_ref->get()->Cast<LogicalGet>();
+
+			// Find the FK column(s) that reference the PU
+			auto it = check.table_metadata.find(last_table_name);
+			if (it == check.table_metadata.end()) {
+				throw InternalException("PAC compiler: missing metadata for table " + last_table_name);
+			}
+
+			vector<string> fk_cols;
+			for (auto &fk : it->second.fks) {
+				if (fk.first == privacy_unit) {
+					fk_cols = fk.second;
+					break;
+				}
+			}
+
+			if (fk_cols.empty()) {
+				throw InternalException("PAC compiler: no FK found from " + last_table_name + " to " + privacy_unit);
+			}
+
+			hash_input_expr = BuildXorHashFromPKs(input, *last_get, fk_cols);
+		} else {
+			// Original behavior: locate the privacy-unit LogicalGet
+			unique_ptr<LogicalOperator> *pu_ref = nullptr;
+			if (!privacy_unit.empty()) {
+				pu_ref = FindNodeRefByTable(&plan, privacy_unit);
+			}
+			if (!pu_ref || !pu_ref->get()) {
+				throw InternalException("PAC compiler: could not find LogicalGet for privacy unit " + privacy_unit);
+			}
+			auto pu_get = &pu_ref->get()->Cast<LogicalGet>();
+
+			vector<string> pu_pks;
+			for (auto &pk : check.table_metadata.at(privacy_unit).pks) {
+				pu_pks.push_back(pk);
+			}
+
+			hash_input_expr = BuildXorHashFromPKs(input, *pu_get, pu_pks);
 		}
 
-		if (fk_cols.empty()) {
-			throw InternalException("PAC compiler: no FK found from " + last_table_name + " to " + privacy_unit);
-		}
-
-		// Build hash from FK columns
-		hash_input_expr = BuildXorHashFromPKs(input, *last_get, fk_cols);
-	} else {
-		// Original behavior: locate the privacy-unit LogicalGet we just inserted
-		unique_ptr<LogicalOperator> *pu_ref = nullptr;
-		if (!privacy_unit.empty()) {
-			pu_ref = FindNodeRefByTable(&plan, privacy_unit);
-		}
-		if (!pu_ref || !pu_ref->get()) {
-			throw InternalException("PAC compiler: could not find LogicalGet for privacy unit " + privacy_unit);
-		}
-		auto pu_get = &pu_ref->get()->Cast<LogicalGet>();
-
-		vector<string> pu_pks;
-		for (auto &pk : check.table_metadata.at(privacy_unit).pks) {
-			pu_pks.push_back(pk);
-		}
-
-		// Build the hash expression from PU PKs
-		hash_input_expr = BuildXorHashFromPKs(input, *pu_get, pu_pks);
+		hash_exprs.push_back(std::move(hash_input_expr));
 	}
+
+	// Combine all hash expressions with AND
+	auto combined_hash_expr = BuildAndFromHashes(input, hash_exprs);
 
 	// Now we need to edit the aggregate node to use pac functions
 	auto *agg = FindTopAggregate(plan);
 
 	// Use the helper function to modify aggregates with PAC functions
-	ModifyAggregatesWithPacFunctions(input, agg, hash_input_expr);
+	ModifyAggregatesWithPacFunctions(input, agg, combined_hash_expr);
 }
 
-void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan, const vector<string> &pks,
-                      bool use_rowid, const string &pu_table_name) {
+void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
+                      const vector<string> &pu_table_names, const PACCompatibilityResult &check) {
 
-	auto pu_scan_ptr = FindPrivacyUnitGetNode(plan, pu_table_name);
-	auto &get = pu_scan_ptr->get()->Cast<LogicalGet>();
-	if (use_rowid) {
-		AddRowIDColumn(get);
-	} else {
-		// Ensure primary key columns are present in the LogicalGet (add them if necessary)
-		AddPKColumns(get, pks);
+	// Build hash expressions for each privacy unit
+	vector<unique_ptr<Expression>> hash_exprs;
+
+	for (auto &pu_table_name : pu_table_names) {
+		auto pu_scan_ptr = FindPrivacyUnitGetNode(plan, pu_table_name);
+		auto &get = pu_scan_ptr->get()->Cast<LogicalGet>();
+
+		// Determine if we should use rowid or PKs
+		bool use_rowid = false;
+		vector<string> pks;
+
+		auto it = check.table_metadata.find(pu_table_name);
+		if (it != check.table_metadata.end() && !it->second.pks.empty()) {
+			pks = it->second.pks;
+		} else {
+			use_rowid = true;
+		}
+
+		if (use_rowid) {
+			AddRowIDColumn(get);
+		} else {
+			// Ensure primary key columns are present in the LogicalGet (add them if necessary)
+			AddPKColumns(get, pks);
+		}
+
+		// Build the hash expression for this PU
+		unique_ptr<Expression> hash_input_expr;
+		if (use_rowid) {
+			// rowid is the last column added
+			auto rowid_binding = ColumnBinding(get.table_index, get.GetColumnIds().size() - 1);
+			auto rowid_col = make_uniq<BoundColumnRefExpression>(LogicalType::BIGINT, rowid_binding);
+			auto bound_hash = input.optimizer.BindScalarFunction("hash", std::move(rowid_col));
+			hash_input_expr = std::move(bound_hash);
+		} else {
+			hash_input_expr = BuildXorHashFromPKs(input, get, pks);
+		}
+
+		hash_exprs.push_back(std::move(hash_input_expr));
 	}
+
+	// Combine all hash expressions with AND
+	auto combined_hash_expr = BuildAndFromHashes(input, hash_exprs);
 
 	// Now we need to edit the aggregate node to use pac functions
 	auto *agg = FindTopAggregate(plan);
 
-	// We create a hash expression over either the row id or the XOR of PK columns
-	// Build the hash expression once (will be copied/reused for each aggregate)
-	unique_ptr<Expression> hash_input_expr;
-	if (use_rowid) {
-		// rowid is the last column added
-		auto rowid_binding = ColumnBinding(get.table_index, get.GetColumnIds().size() - 1);
-		auto rowid_col = make_uniq<BoundColumnRefExpression>(LogicalType::BIGINT, rowid_binding);
-		auto bound_hash = input.optimizer.BindScalarFunction("hash", std::move(rowid_col));
-		hash_input_expr = std::move(bound_hash);
-	} else {
-		// Replaced duplicated inline logic with helper
-		hash_input_expr = BuildXorHashFromPKs(input, get, pks);
-	}
-
 	// Use the helper function to modify aggregates with PAC functions
-	ModifyAggregatesWithPacFunctions(input, agg, hash_input_expr);
+	ModifyAggregatesWithPacFunctions(input, agg, combined_hash_expr);
 }
 
 void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExtensionInput &input,
-                             unique_ptr<LogicalOperator> &plan, const string &privacy_unit, const string &query,
+                             unique_ptr<LogicalOperator> &plan, const vector<string> &privacy_units, const string &query,
                              const string &query_hash) {
 
 #ifdef DEBUG
-	Printer::Print("CompilePacBitsliceQuery called for PU=" + privacy_unit + " hash=" + query_hash);
+	Printer::Print("CompilePacBitsliceQuery called for " + std::to_string(privacy_units.size()) + " PUs, hash=" + query_hash);
+	for (auto &pu : privacy_units) {
+		Printer::Print("  PU: " + pu);
+	}
 #endif
 
+	// Generate filename with all PU names concatenated
 	string path = GetPacCompiledPath(input.context, ".");
 	if (!path.empty() && path.back() != '/') {
 		path.push_back('/');
 	}
-	string filename = path + privacy_unit + "_" + query_hash + "_bitslice.sql";
+	string pu_names_joined;
+	for (size_t i = 0; i < privacy_units.size(); ++i) {
+		if (i > 0) pu_names_joined += "_";
+		pu_names_joined += privacy_units[i];
+	}
+	string filename = path + pu_names_joined + "_" + query_hash + "_bitslice.sql";
 
 	// The bitslice compiler works in the following way:
-	// a) the query scans PU table:
-	// a.1) the PU table has 1 PK: we hash it
-	// a.2) the PU table has multiple PKs: we XOR them and hash the result
-	// a.3) the PU table has no PK: we hash rowid
-	// b) the query does not scan PU table:
-	// b.1) we follow the FK path to find the PK(s) of the PU table
-	// b.2) we join the chain of tables from the scanned table to the PU table
-	// b.3) we hash the PK(s) as in a)
-
-	// Example: SELECT group_key, SUM(val) AS sum_val FROM t_single GROUP BY group_key;
-	// Becomes: SELECT group_key, pac_sum(HASH(rowid), val) AS sum_val FROM t_single GROUP BY group_key;
-	// todo- what is MI? what is k?
+	// a) the query scans PU table(s):
+	// a.1) each PU table has 1 PK: we hash it
+	// a.2) each PU table has multiple PKs: we XOR them and hash the result
+	// a.3) each PU table has no PK: we hash rowid
+	// a.4) we AND all the hashes together for multiple PUs
+	// b) the query does not scan PU table(s):
+	// b.1) we follow the FK path to find the PK(s) of each PU table
+	// b.2) we join the chain of tables from the scanned table to each PU table (deduplicating)
+	// b.3) we hash the PK(s) as in a) and AND them together
 
 	bool pu_present_in_tree = false;
-	bool use_rowid = false;
 
 	if (!check.scanned_pu_tables.empty()) {
 		pu_present_in_tree = true;
@@ -291,47 +327,46 @@ void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExten
 	// Replan with selected optimizers disabled
 	ReplanWithoutOptimizers(input.context, input.context.GetCurrentQuery(), plan);
 
-	// Case a) query scans PU table (we assume only 1 PAC table for now)
-	vector<string> pks;
 	// Build two vectors: present (GETs already in the plan) and missing (GETs to create)
 	vector<string> gets_present;
 	vector<string> gets_missing;
-	vector<LogicalGet *> new_gets;
 
-	// fk_path_to_use will be populated when we detect an FK path (used for multi-hop joins)
-	vector<string> fk_path_to_use;
+	// For multi-PU support, we need to gather FK paths and missing tables for all PUs
+	// and deduplicate the tables that need to be joined
+	std::unordered_set<string> all_missing_tables;
+	vector<string> fk_path_to_use; // We'll use the first FK path as the base path
 
 	if (pu_present_in_tree) {
-		// Look up PKs for the scanned PAC table via table_metadata (filled by the compatibility check)
-		if (!check.scanned_pu_tables.empty()) {
-			auto tbl = check.scanned_pu_tables[0];
-			auto it = check.table_metadata.find(tbl);
-			if (it != check.table_metadata.end() && !it->second.pks.empty()) {
-				pks = it->second.pks;
-			} else {
-				// no PKs found -> use rowid
-				use_rowid = true;
-			}
-		} else {
-			use_rowid = true;
-		}
+		// Case a) query scans PU table(s) - all PUs are in scanned_pu_tables
+		ModifyPlanWithPU(input, plan, check.scanned_pu_tables, check);
 	} else if (!check.fk_paths.empty()) {
-		// The query does not scan the PU table: we need to follow the FK path
+		// Case b) query does not scan PU table(s): follow FK paths
 		string start_table;
-		string target_pu;
-		PopulateGetsFromFKPath(check, gets_present, gets_missing, start_table, target_pu);
+		vector<string> target_pus;
+		PopulateGetsFromFKPath(check, gets_present, gets_missing, start_table, target_pus);
 
-		// extract the ordered fk_path from the compatibility result
+		// Collect all missing tables across all FK paths (deduplicate)
+		for (auto &table : gets_missing) {
+			all_missing_tables.insert(table);
+		}
+
+		// Extract the ordered fk_path from the compatibility result (use first path as base)
 		auto it = check.fk_paths.find(start_table);
 		if (it == check.fk_paths.end() || it->second.empty()) {
 			throw InternalException("PAC compiler: expected fk_path for start table " + start_table);
 		}
 		fk_path_to_use = it->second;
 
+		// Convert set back to vector for ModifyPlanWithoutPU
+		vector<string> unique_gets_missing(all_missing_tables.begin(), all_missing_tables.end());
+
 #ifdef DEBUG
-		Printer::Print("PAC bitslice: FK path detection");
+		Printer::Print("PAC bitslice: FK path detection for multi-PU");
 		Printer::Print("start_table: " + start_table);
-		Printer::Print("target_pu: " + target_pu);
+		Printer::Print("target_pus:");
+		for (auto &pu : target_pus) {
+			Printer::Print("  " + pu);
+		}
 		Printer::Print("fk_path:");
 		for (auto &p : fk_path_to_use) {
 			Printer::Print("  " + p);
@@ -340,18 +375,13 @@ void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExten
 		for (auto &g : gets_present) {
 			Printer::Print("  " + g);
 		}
-		Printer::Print("gets_missing:");
-		for (auto &g : gets_missing) {
+		Printer::Print("unique_gets_missing:");
+		for (auto &g : unique_gets_missing) {
 			Printer::Print("  " + g);
 		}
 #endif
-		// fk_path_to_use is populated and will be passed into ModifyPlanWithoutPU below
-	}
 
-	if (pu_present_in_tree) {
-		ModifyPlanWithPU(input, plan, pks, use_rowid, check.scanned_pu_tables[0]);
-	} else {
-		ModifyPlanWithoutPU(check, input, plan, gets_missing, gets_present, fk_path_to_use, privacy_unit);
+		ModifyPlanWithoutPU(check, input, plan, unique_gets_missing, gets_present, fk_path_to_use, privacy_units);
 	}
 
 	plan->ResolveOperatorTypes();

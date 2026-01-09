@@ -25,6 +25,9 @@ void AddRowIDColumn(LogicalGet &get);
 // Build XOR(pk1, pk2, ...) then hash(...) bound expression for the given LogicalGet's PKs
 unique_ptr<Expression> BuildXorHashFromPKs(OptimizerExtensionInput &input, LogicalGet &get, const vector<string> &pks);
 
+// Build AND expression from multiple hash expressions (for multiple PUs)
+unique_ptr<Expression> BuildAndFromHashes(OptimizerExtensionInput &input, vector<unique_ptr<Expression>> &hash_exprs);
+
 // Modify aggregate expressions to use PAC functions (replaces the aggregate loop logic)
 void ModifyAggregatesWithPacFunctions(OptimizerExtensionInput &input, LogicalAggregate *agg,
                                       unique_ptr<Expression> &hash_input_expr);

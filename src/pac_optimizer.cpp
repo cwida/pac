@@ -57,7 +57,7 @@ void PACRewriteRule::PACRewriteRuleFunction(OptimizerExtensionInput &input, uniq
 	// Determine the set of discovered privacy units (could come from fk_paths targets or scanned PAC tables)
 	vector<string> discovered_pus;
 	// Consider fk_paths targets
-	for (auto &kv : check.fk_paths) {
+for (auto &kv : check.fk_paths) {
 		if (!kv.second.empty()) {
 			discovered_pus.push_back(kv.second.back());
 		}
@@ -77,11 +77,6 @@ void PACRewriteRule::PACRewriteRuleFunction(OptimizerExtensionInput &input, uniq
 	// compute normalized query hash once for file naming
 	string normalized = NormalizeQueryForHash(input.context.GetCurrentQuery());
 	string query_hash = HashStringToHex(normalized);
-
-	if (discovered_pus.size() > 1) {
-		throw InvalidInputException(
-		    "PAC rewrite: multiple privacy units discovered (%s); multi-privacy-unit queries are not supported");
-	}
 
 	vector<string> privacy_units = std::move(discovered_pus);
 
@@ -105,15 +100,17 @@ void PACRewriteRule::PACRewriteRuleFunction(OptimizerExtensionInput &input, uniq
 
 	bool apply_noise = IsPacNoiseEnabled(input.context, true);
 	if (apply_noise) {
-		for (auto &pu : privacy_units) {
 #ifdef DEBUG
-			Printer::Print("Query requires PAC Compilation for privacy unit: " + pu);
+		Printer::Print("Query requires PAC Compilation for privacy units:");
+		for (auto &pu : privacy_units) {
+			Printer::Print("  " + pu);
+		}
 #endif
 
-			// set replan flag for duration of compilation
-			ReplanGuard scoped2(pac_info);
-			CompilePacBitsliceQuery(check, input, plan, pu, normalized, query_hash);
-		}
+		// set replan flag for duration of compilation
+		ReplanGuard scoped2(pac_info);
+		// Call the compiler once with all privacy units
+		CompilePacBitsliceQuery(check, input, plan, privacy_units, normalized, query_hash);
 	}
 }
 

@@ -200,21 +200,41 @@ unique_ptr<LogicalGet> CreateLogicalGet(ClientContext &context, unique_ptr<Logic
 
 // Examine PACCompatibilityResult.fk_paths and populate gets_present / gets_missing
 void PopulateGetsFromFKPath(const PACCompatibilityResult &check, vector<string> &gets_present,
-                            vector<string> &gets_missing, string &start_table_out, string &target_pu_out) {
+                            vector<string> &gets_missing, string &start_table_out, vector<string> &target_pus_out) {
 	// Expect at least one FK path when this is called
 	if (check.fk_paths.empty()) {
 		throw InternalException("PAC compiler: no fk_paths available");
 	}
-	auto it = check.fk_paths.begin();
-	start_table_out = it->first; // scanned table name
-	auto fk_path = it->second;   // vector from start -> ... -> privacy_unit
-	if (fk_path.empty()) {
-		throw InternalException("PAC compiler: FK path is empty");
+
+	// Collect all target PUs from all FK paths
+	std::unordered_set<string> unique_target_pus;
+	std::unordered_set<string> all_tables_in_paths;
+
+	// Use the first FK path's start table as the start_table_out
+	auto first_it = check.fk_paths.begin();
+	start_table_out = first_it->first;
+
+	// Iterate through all FK paths to collect all tables and target PUs
+	for (auto &kv : check.fk_paths) {
+		auto &fk_path = kv.second;
+		if (fk_path.empty()) {
+			continue;
+		}
+
+		// Last element in each path is a target PU
+		unique_target_pus.insert(fk_path.back());
+
+		// Collect all tables in the path
+		for (auto &table_in_path : fk_path) {
+			all_tables_in_paths.insert(table_in_path);
+		}
 	}
-	// canonical target privacy unit (last element)
-	target_pu_out = fk_path.back();
-	// For each table in the FK path, check whether a GET is already present
-	for (auto &table_in_path : fk_path) {
+
+	// Convert target PUs set to vector
+	target_pus_out.assign(unique_target_pus.begin(), unique_target_pus.end());
+
+	// For each table in all paths, check whether a GET is already present
+	for (auto &table_in_path : all_tables_in_paths) {
 		bool found_get = false;
 		for (auto &t : check.scanned_pu_tables) {
 			if (t == table_in_path) {
