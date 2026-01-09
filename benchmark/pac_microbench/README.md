@@ -3,8 +3,14 @@
 Comprehensive performance benchmarks for PAC aggregate functions (pac_count, pac_sum, pac_avg, pac_min, pac_max) with various optimization configurations.
 
 ## Quick Start
-
+Install the required dependencies (assuming a Debian-based system):
 ```bash
+sudo apt install make ninja-build cmake clang
+```
+Then, run the scripts:
+```bash
+./create_test_db.sh
+
 # Build all variants and run all benchmarks
 ./run_all.sh
 
