@@ -19,26 +19,6 @@
 
 namespace duckdb {
 
-static bool ContainsCrossJoinWithGenerateSeries(const LogicalOperator &op) {
-	if (op.type == LogicalOperatorType::LOGICAL_CROSS_PRODUCT) {
-		auto &cross = op.Cast<LogicalJoin>();
-		for (auto &child : cross.children) {
-			if (child->type == LogicalOperatorType::LOGICAL_GET) {
-				auto child_get = dynamic_cast<LogicalGet *>(child.get());
-				if (child_get->function.name == "generate_series") {
-					return true;
-				}
-			}
-		}
-	}
-	for (auto &child : op.children) {
-		if (ContainsCrossJoinWithGenerateSeries(*child)) {
-			return true;
-		}
-	}
-	return false;
-}
-
 static bool IsAllowedAggregate(const string &func) {
 	static const std::unordered_set<string> allowed = {"sum", "sum_no_overflow", "count", "count_star", "avg", "min",
 	                                                   "max"};
@@ -203,7 +183,7 @@ static bool ContainsSubquery(const LogicalOperator &op) {
 		for (auto &expr : aggr.expressions) {
 			if (expr) {
 				bool has_subquery = false;
-				ExpressionIterator::EnumerateExpression(const_cast<unique_ptr<Expression>&>(expr), [&](Expression &e) {
+				ExpressionIterator::EnumerateExpression(const_cast<unique_ptr<Expression> &>(expr), [&](Expression &e) {
 					if (e.GetExpressionClass() == ExpressionClass::BOUND_SUBQUERY) {
 						has_subquery = true;
 					}
@@ -217,7 +197,7 @@ static bool ContainsSubquery(const LogicalOperator &op) {
 		for (auto &expr : aggr.groups) {
 			if (expr) {
 				bool has_subquery = false;
-				ExpressionIterator::EnumerateExpression(const_cast<unique_ptr<Expression>&>(expr), [&](Expression &e) {
+				ExpressionIterator::EnumerateExpression(const_cast<unique_ptr<Expression> &>(expr), [&](Expression &e) {
 					if (e.GetExpressionClass() == ExpressionClass::BOUND_SUBQUERY) {
 						has_subquery = true;
 					}
@@ -233,7 +213,7 @@ static bool ContainsSubquery(const LogicalOperator &op) {
 		for (auto &expr : filter.expressions) {
 			if (expr) {
 				bool has_subquery = false;
-				ExpressionIterator::EnumerateExpression(const_cast<unique_ptr<Expression>&>(expr), [&](Expression &e) {
+				ExpressionIterator::EnumerateExpression(const_cast<unique_ptr<Expression> &>(expr), [&](Expression &e) {
 					if (e.GetExpressionClass() == ExpressionClass::BOUND_SUBQUERY) {
 						has_subquery = true;
 					}
@@ -249,7 +229,7 @@ static bool ContainsSubquery(const LogicalOperator &op) {
 		for (auto &expr : proj.expressions) {
 			if (expr) {
 				bool has_subquery = false;
-				ExpressionIterator::EnumerateExpression(const_cast<unique_ptr<Expression>&>(expr), [&](Expression &e) {
+				ExpressionIterator::EnumerateExpression(const_cast<unique_ptr<Expression> &>(expr), [&](Expression &e) {
 					if (e.GetExpressionClass() == ExpressionClass::BOUND_SUBQUERY) {
 						has_subquery = true;
 					}
@@ -279,13 +259,6 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 	if (optimizer_info && optimizer_info->replan_in_progress.load(std::memory_order_acquire)) {
 		return result;
 	}
-
-	// Case 1: contains PAC tables?
-	// Then, we check further conditions (aggregation, joins, etc.)
-	// If there are as many sample-CTE scans as PAC table scans, then nothing to do (return empty result)
-	// If there are only PAC table scans, check the other conditions and return info accordingly
-	// If some conditions fail, throw an error in the caller
-	// Case 2: no PAC tables? (return empty result, nothing to do)
 
 	// count all scanned tables/CTEs in the plan
 	std::unordered_map<string, idx_t> scan_counts;
@@ -333,15 +306,6 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 	if (all_matched && !result.scanned_pu_tables.empty()) {
 		// All PAC tables already have corresponding sample CTE scans the same number of times.
 		// Nothing for the PAC rewriter to do.
-		return result;
-	}
-
-	// If we reach here, there is at least one PAC table that has PAC scans without matching sample-CTE scans.
-	// Now validate plan structure: ensure there is an aggregation using allowed aggregates; disallow window, distinct,
-	// non-inner joins.
-
-	// Only allow CROSS JOIN with GENERATE_SERIES (for random sample expansion)
-	if (ContainsCrossJoinWithGenerateSeries(*plan)) {
 		return result;
 	}
 
@@ -448,23 +412,49 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 	// Structural checks BEFORE deciding eligibility (throw when invalid)
 	// These checks must run for ALL queries that scan privacy unit tables OR FK-linked tables
 	if (!result.scanned_pu_tables.empty() || has_fk_linked_tables) {
+		// Get conservative mode setting
+		Value conservative_val;
+		bool is_conservative = true; // default to conservative mode
+		if (context.TryGetCurrentSetting("pac_conservative_mode", conservative_val) && !conservative_val.IsNull()) {
+			is_conservative = conservative_val.GetValue<bool>();
+		}
+
 		if (ContainsWindowFunction(*plan)) {
-			throw InvalidInputException("PAC rewrite: window functions are not supported for PAC compilation");
+			if (is_conservative) {
+				throw InvalidInputException("PAC rewrite: window functions are not supported for PAC compilation");
+			}
+			return result; // Skip PAC compilation, execute query normally
 		}
 		if (!ContainsAggregation(*plan)) {
-			throw InvalidInputException("Query does not contain any allowed aggregation (sum, count, avg, min, max)!");
+			if (is_conservative) {
+				throw InvalidInputException(
+				    "Query does not contain any allowed aggregation (sum, count, avg, min, max)!");
+			}
+			return result; // Skip PAC compilation, execute query normally
 		}
 		if (ContainsLogicalDistinct(*plan)) {
-			throw InvalidInputException("PAC rewrite: DISTINCT is not supported for PAC compilation");
+			if (is_conservative) {
+				throw InvalidInputException("PAC rewrite: DISTINCT is not supported for PAC compilation");
+			}
+			return result; // Skip PAC compilation, execute query normally
 		}
 		if (ContainsSelfJoin(*plan)) {
-			throw InvalidInputException("PAC rewrite: self-joins are not supported for PAC compilation");
+			if (is_conservative) {
+				throw InvalidInputException("PAC rewrite: self-joins are not supported for PAC compilation");
+			}
+			return result; // Skip PAC compilation, execute query normally
 		}
 		if (ContainsDisallowedJoin(*plan)) {
-			throw InvalidInputException("PAC rewrite: subqueries are not supported for PAC compilation");
+			if (is_conservative) {
+				throw InvalidInputException("PAC rewrite: subqueries are not supported for PAC compilation");
+			}
+			return result; // Skip PAC compilation, execute query normally
 		}
 		if (ContainsSubquery(*plan)) {
-			throw InvalidInputException("PAC rewrite: subqueries are not supported for PAC compilation");
+			if (is_conservative) {
+				throw InvalidInputException("PAC rewrite: subqueries are not supported for PAC compilation");
+			}
+			return result; // Skip PAC compilation, execute query normally
 		}
 
 		// Check that GROUP BY columns don't come from PU tables

@@ -33,8 +33,8 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 
 // Bitslice-style PAC compiler entrypoint
 void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExtensionInput &input,
-                             unique_ptr<LogicalOperator> &plan, const vector<string> &privacy_units, const string &query,
-                             const string &query_hash);
+                             unique_ptr<LogicalOperator> &plan, const vector<string> &privacy_units,
+                             const string &query, const string &query_hash);
 
 } // namespace duckdb
 

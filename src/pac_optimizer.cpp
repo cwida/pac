@@ -57,7 +57,7 @@ void PACRewriteRule::PACRewriteRuleFunction(OptimizerExtensionInput &input, uniq
 	// Determine the set of discovered privacy units (could come from fk_paths targets or scanned PAC tables)
 	vector<string> discovered_pus;
 	// Consider fk_paths targets
-for (auto &kv : check.fk_paths) {
+	for (auto &kv : check.fk_paths) {
 		if (!kv.second.empty()) {
 			discovered_pus.push_back(kv.second.back());
 		}

@@ -790,8 +790,7 @@ static void CollectJoinKeyEquivalences(LogicalOperator &op,
 			}
 
 			// Check if both sides are column references
-			if (cond.left && cond.right &&
-			    cond.left->type == ExpressionType::BOUND_COLUMN_REF &&
+			if (cond.left && cond.right && cond.left->type == ExpressionType::BOUND_COLUMN_REF &&
 			    cond.right->type == ExpressionType::BOUND_COLUMN_REF) {
 				auto &left_ref = cond.left->Cast<BoundColumnRefExpression>();
 				auto &right_ref = cond.right->Cast<BoundColumnRefExpression>();
@@ -811,8 +810,7 @@ static void CollectJoinKeyEquivalences(LogicalOperator &op,
 // Helper to find all bindings equivalent to the given binding via join key equivalences
 static void FindEquivalentBindings(const ColumnBinding &binding,
                                    const vector<std::pair<ColumnBinding, ColumnBinding>> &equivalences,
-                                   std::unordered_set<uint64_t> &visited,
-                                   vector<ColumnBinding> &result) {
+                                   std::unordered_set<uint64_t> &visited, vector<ColumnBinding> &result) {
 	// Create a unique key for the binding
 	uint64_t key = (static_cast<uint64_t>(binding.table_index) << 32) | binding.column_index;
 	if (visited.find(key) != visited.end()) {
@@ -861,6 +859,5 @@ bool ColumnBelongsToTable(LogicalOperator &plan, const string &table_name, const
 
 	return false;
 }
-
 
 } // namespace duckdb

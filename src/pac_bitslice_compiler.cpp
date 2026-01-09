@@ -285,11 +285,12 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 }
 
 void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExtensionInput &input,
-                             unique_ptr<LogicalOperator> &plan, const vector<string> &privacy_units, const string &query,
-                             const string &query_hash) {
+                             unique_ptr<LogicalOperator> &plan, const vector<string> &privacy_units,
+                             const string &query, const string &query_hash) {
 
 #ifdef DEBUG
-	Printer::Print("CompilePacBitsliceQuery called for " + std::to_string(privacy_units.size()) + " PUs, hash=" + query_hash);
+	Printer::Print("CompilePacBitsliceQuery called for " + std::to_string(privacy_units.size()) +
+	               " PUs, hash=" + query_hash);
 	for (auto &pu : privacy_units) {
 		Printer::Print("  PU: " + pu);
 	}
@@ -302,7 +303,8 @@ void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExten
 	}
 	string pu_names_joined;
 	for (size_t i = 0; i < privacy_units.size(); ++i) {
-		if (i > 0) pu_names_joined += "_";
+		if (i > 0)
+			pu_names_joined += "_";
 		pu_names_joined += privacy_units[i];
 	}
 	string filename = path + pu_names_joined + "_" + query_hash + "_bitslice.sql";

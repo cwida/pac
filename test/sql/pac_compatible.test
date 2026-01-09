@@ -236,6 +236,44 @@ SELECT SUM(CASE WHEN a > (SELECT AVG(x) FROM t2) THEN b ELSE 0 END) FROM t1;
 ----
 PAC rewrite: subqueries are not supported for PAC compilation
 
+# Test conservative mode OFF: subquery should execute normally (no error)
+statement ok
+SET pac_conservative_mode = false;
+
+# This should succeed when conservative mode is off (query executes without PAC compilation)
+query I
+SELECT SUM(b) FROM t1 WHERE a IN (SELECT x FROM t2);
+----
+30
+
+# EXISTS should also succeed when conservative mode is off
+query I
+SELECT SUM(b) FROM t1 WHERE EXISTS (SELECT 1 FROM t2 WHERE t2.x = t1.a);
+----
+30
+
+# Window function should succeed when conservative mode is off
+query I
+SELECT SUM(window_sum) FROM (SELECT a, SUM(b) OVER (PARTITION BY a) as window_sum FROM t1);
+----
+170
+
+# Self-join should succeed when conservative mode is off
+query I
+SELECT SUM(t1a.b) FROM t1 t1a JOIN t1 t1b ON t1a.a = t1b.a;
+----
+170
+
+# Turn conservative mode back on
+statement ok
+SET pac_conservative_mode = true;
+
+# Verify subquery fails again with conservative mode on
+statement error
+SELECT SUM(b) FROM t1 WHERE a IN (SELECT x FROM t2);
+----
+PAC rewrite: subqueries are not supported for PAC compilation
+
 # Remove table from privacy file via PRAGMA
 statement ok
 PRAGMA remove_pac_privacy_unit('t1');
