@@ -2,14 +2,29 @@
 // Created by ila on 12/19/25.
 //
 
-#include "duckdb.hpp"
-#include "pac_aggregate.hpp"
-
 #ifndef PAC_SUM_HPP
 #define PAC_SUM_HPP
 
-namespace duckdb {
+// benchmarking defines that disable certain optimizations
+//#define PAC_NOBUFFERING 1
+//#define PAC_NOCASCADING 1
+//#define PAC_NOSIMD 1
 
+// PAC_GODBOLT mode: cpp -DPAC_GODBOLT -P -E -w src/include/pac_sum_avg.hpp
+// Isolates the SIMD kernel for Godbolt analysis (-P removes line markers)
+#ifdef PAC_GODBOLT
+using uint8_t = unsigned char;
+using int8_t = signed char;
+using uint16_t = unsigned short;
+using int16_t = signed short;
+using uint32_t = unsigned int;
+using int32_t = signed int;
+using uint64_t = unsigned long long;
+using int64_t = signed long long;
+#else
+#include "duckdb.hpp"
+#include "pac_aggregate.hpp"
+namespace duckdb {
 void RegisterPacSumFunctions(ExtensionLoader &loader);
 void RegisterPacAvgFunctions(ExtensionLoader &loader);
 
@@ -58,23 +73,25 @@ void RegisterPacAvgFunctions(ExtensionLoader &loader);
 //
 // While we predicate the counting and SWAR-optimize it, we provide a naive IF..THEN baseline that is SIMD-unfriendly
 //
-// Define PAC_MINMAX_NOBUFFERING to disable the buffering optimization.
-// Define PAC_MINMAX_NOCASCADING to disable multi-level ccascading from small into wider types (aggregate in final type)
-// Define PAC_MINMAX_NOSIMD to get the IF..THEN SIMD-unfriendly aggergate computation kernel
-//#define PAC_MINMAX_NOBUFFERING 1
-//#define PAC_MINMAX_NOBCASCADING 1
-//#define PAC_MINMAX_NOSIMD 1
-#if defined(PAC_SUMAVG_NOSIMD) && !defined(PAC_SUMAVG_NOCASCADING)
-PAC_SUMAVG_NOSIMD only makes sense in combination with PAC_SUMAVG_NOCASCADING
+// Define PAC_NOBUFFERING to disable the buffering optimization.
+// Define PAC_NOCASCADING to disable multi-level cascading from small into wider types (aggregate in final type)
+// Define PAC_NOSIMD to get the IF..THEN SIMD-unfriendly aggregate computation kernel
+#endif
+#if defined(PAC_NOSIMD) && !defined(PAC_NOCASCADING)
+PAC_NOSIMD only makes sense in combination with PAC_NOCASCADING
 #endif
 
     // Simple version for double/[u]int64_t/hugeint (uses multiplication for conditional add)
     // This auto-vectorizes well for 64-bits data-types because key_hash is also 64-bits
     template <typename ACCUM_T, typename VALUE_T>
-    AUTOVECTORIZE static inline void AddToTotalsSimple(ACCUM_T *__restrict__ total, VALUE_T value, uint64_t key_hash) {
+#ifndef PAC_GODBOLT
+    AUTOVECTORIZE static inline
+#endif
+    void
+    AddToTotalsSimple(ACCUM_T *__restrict__ total, VALUE_T value, uint64_t key_hash) {
 	ACCUM_T v = static_cast<ACCUM_T>(value);
 	for (int j = 0; j < 64; j++) {
-#ifdef PAC_SUMAVG_NOSIMD
+#ifdef PAC_NOSIMD
 		if ((key_hash >> j) & 1ULL) { // IF..THEN cannot be simd-ized (and is 50%:has heavy branch misprediction cost)
 			total[j] += v;
 		}
@@ -97,25 +114,36 @@ PAC_SUMAVG_NOSIMD only makes sense in combination with PAC_SUMAVG_NOCASCADING
 // - BITS=8:  8 values packed per uint64_t, total[8],  8 iterations
 // - BITS=16: 4 values packed per uint64_t, total[16], 16 iterations
 // - BITS=32: 2 values packed per uint64_t, total[32], 32 iterations
-//
-// prototyped here: https://godbolt.org/z/jr7aKocTW
 
 // SWAR accumulation: pack multiple counters into uint64_t registers (for 8/16/32-bit elements)
 // SIGNED_T/UNSIGNED_T: types for the packed elements (e.g., int8_t/uint8_t)
 // MASK: broadcast mask (one bit per element, e.g., 0x0101010101010101 for 8-bit)
 // VALUE_T: input value type
 template <typename SIGNED_T, typename UNSIGNED_T, uint64_t MASK, typename VALUE_T>
-AUTOVECTORIZE static inline void AddToTotalsSWAR(uint64_t *__restrict__ total, VALUE_T value, uint64_t key_hash) {
+#ifndef PAC_GODBOLT
+AUTOVECTORIZE static inline
+#endif
+    void
+    AddToTotalsSWAR(uint64_t *__restrict__ total, VALUE_T value, uint64_t key_hash) {
 	constexpr int BITS = sizeof(SIGNED_T) * 8;
 	// Cast to unsigned type to avoid sign extension, then broadcast to all lanes
 	uint64_t val_packed = static_cast<UNSIGNED_T>(static_cast<SIGNED_T>(value)) * MASK;
 	for (int i = 0; i < BITS; i++) {
 		uint64_t bits = (key_hash >> i) & MASK;
-		uint64_t expanded = (bits << BITS) - bits; // 0x01 -> 0xFF, 0x0001 -> 0xFFFF, etc.
+		int64_t expanded = -static_cast<int64_t>(bits); // 0x01 -> 0xFFFFFFFFFFFFFFFF, then mask
+		expanded &= (MASK * ((1ULL << BITS) - 1));      // mask to get 0xFF per lane
 		total[i] += val_packed & expanded;
 	}
 }
 
+#ifdef PAC_GODBOLT
+// Explicit instantiations for Godbolt analysis
+template void AddToTotalsSWAR<int8_t, uint8_t, 0x0101010101010101ULL, int64_t>(uint64_t *, int64_t, uint64_t);
+template void AddToTotalsSWAR<int16_t, uint16_t, 0x0001000100010001ULL, int64_t>(uint64_t *, int64_t, uint64_t);
+template void AddToTotalsSWAR<int32_t, uint32_t, 0x0000000100000001ULL, int64_t>(uint64_t *, int64_t, uint64_t);
+template void AddToTotalsSimple<int64_t, int64_t>(int64_t *, int64_t, uint64_t);
+template void AddToTotalsSimple<double, double>(double *, double, uint64_t);
+#else
 // =========================
 // Integer pac_sum (cascaded multi-level accumulation for SIMD efficiency)
 // =========================
@@ -139,10 +167,10 @@ struct PacSumIntState {
 	typedef typename std::conditional<SIGNED, int32_t, uint32_t>::type T32;
 	typedef typename std::conditional<SIGNED, int64_t, uint64_t>::type T64;
 
-#ifdef PAC_SUMAVG_NOCASCADING
+#ifdef PAC_NOCASCADING
 	uint64_t exact_count;                 // total count of values added (for pac_avg)
 	hugeint_t probabilistic_total128[64]; // final total (non-cascading mode only)
-#ifdef PAC_SUMAVG_UNSAFENULL
+#ifdef PAC_UNSAFENULL
 	bool seen_null;
 #endif
 #else
@@ -152,7 +180,7 @@ struct PacSumIntState {
 	// 3. exact_count
 	// 4. allocator pointer
 	// 5. probabilistic pointers (lazily allocated)
-#ifdef PAC_SUMAVG_UNSAFENULL
+#ifdef PAC_UNSAFENULL
 	bool seen_null;
 #endif
 	// Exact subtotals for each level - sized to fit level's representable range.
@@ -174,7 +202,7 @@ struct PacSumIntState {
 	uint64_t *probabilistic_total64;   // 64 x uint64_t (512 bytes) when allocated, each holds 1 T64
 	hugeint_t *probabilistic_total128; // 64 x hugeint_t (1024 bytes) when allocated
 #endif
-#ifdef PAC_SUMAVG_NOCASCADING
+#ifdef PAC_NOCASCADING
 	// NOCASCADING: dummy methods for uniform interface
 	void Flush(ArenaAllocator &) {
 	} // no-op
@@ -352,7 +380,7 @@ struct PacSumIntState {
 
 // Double pac_sum state is noncascading: directly aggregates float/double into double
 struct PacSumDoubleState {
-#ifdef PAC_SUMAVG_UNSAFENULL
+#ifdef PAC_UNSAFENULL
 	bool seen_null;
 #endif
 	uint64_t exact_count; // total count of values added (for pac_avg)
@@ -376,7 +404,7 @@ struct PacSumDoubleState {
 	}
 };
 
-#ifndef PAC_SUMAVG_NOBUFFERING
+#ifndef PAC_NOBUFFERING
 // ============================================================================
 // PacSumStateWrapper: unified buffering wrapper for both int and double states
 // Buffers (hash, value) pairs before allocating the inner state from arena
@@ -415,8 +443,9 @@ struct PacSumStateWrapper {
 template <bool SIGNED>
 using PacSumIntStateWrapper = PacSumStateWrapper<PacSumIntState<SIGNED>, typename PacSumIntState<SIGNED>::T64>;
 using PacSumDoubleStateWrapper = PacSumStateWrapper<PacSumDoubleState, double>;
-#endif // PAC_SUMAVG_NOBUFFERING
+#endif // PAC_NOBUFFERING
 
 } // namespace duckdb
+#endif // PAC_GODBOLT
 
 #endif // PAC_SUM_HPP

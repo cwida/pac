@@ -5,11 +5,20 @@
 #ifndef PAC_COUNT_HPP
 #define PAC_COUNT_HPP
 
+// benchmarking defines that disable certain optimizations
+// #define PAC_NOBUFFERING 1
+// #define PAC_NOCASCADING 1
+// #define PAC_NOSIMD 1
+
+// PAC_GODBOLT mode: cpp -DPAC_GODBOLT -P -E -w  src/include/pac_count.hpp
+// Isolates the SIMD kernel for Godbolt analysis (-P removes line markers)
+#ifdef PAC_GODBOLT
+using uint8_t = unsigned char;
+using uint64_t = unsigned long long;
+#else
 #include "duckdb.hpp"
 #include "pac_aggregate.hpp"
-
 namespace duckdb {
-
 void RegisterPacCountFunctions(ExtensionLoader &);
 
 // PAC_COUNT(key_hash) implements a COUNT aggregate that for each privacy-unit (identified by a key_hash)
@@ -30,8 +39,10 @@ void RegisterPacCountFunctions(ExtensionLoader &);
 
 // PAC_COUNT uses SWAR (SIMD Within A Register) for fast probabilistic counting.
 // 8 uint64_t hold 64 packed uint8_t counters. On overflow (255), flush to uint64_t[64].
+#endif
 #define PAC_COUNT_MASK                                                                                                 \
 	(1ULL | (1ULL << 8) | (1ULL << 16) | (1ULL << 24) | (1ULL << 32) | (1ULL << 40) | (1ULL << 48) | (1ULL << 56))
+#ifndef PAC_GODBOLT
 // For each of the 8 iterations i, we then do (hash_key>>i) & PAC_COUNT_MASK which selects 8 bits, and then add these
 // with a single uint64_t ADD to a uint64 subtotal.
 //
@@ -43,7 +54,7 @@ void RegisterPacCountFunctions(ExtensionLoader &);
 // The idea is that we get very fast performance 255 times and slower performance once every 256 only.
 // This SIMD-friendly implementation can make PAC counting almost as fast as normal counting.
 //
-// Define PAC_COUNT_NOCASCADING for a naive implementation that directly updates uint64_t[64] counters.
+// Define PAC_NOCASCADING for a naive implementation that directly updates uint64_t[64] counters.
 // This is slower but simpler and useful for benchmarking the SWAR optimization.
 //
 // In order to keep the size of the states low, it is more important to delay the state
@@ -55,27 +66,28 @@ void RegisterPacCountFunctions(ExtensionLoader &);
 // Define PAC_MINMAX_NOBUFFERING to disable the buffering optimization.
 // Define PAC_MINMAX_NOCASCADING to disable the pre-aggregation in a uint8_t level
 // Define PAC_MINMAX_NOSIMD to get the IF..THEN SIMD-unfriendly aggergate computation kernel
+#endif
 
-// #define PAC_COUNT_NOBUFFERING 1
-// #define PAC_COUNT_NOCASCADING 1
-// #define PAC_COUNT_NOSIMD 1
 #if defined(PAC_SUMAVG_NOSIMD) && !defined(PAC_SUMAVG_NOCASCADING)
 PAC_SUMAVG_NOSIMD only makes sense in combination with PAC_SUMAVG_NOCASCADING
 #endif
 
+#ifndef PAC_GODBOLT
     template <typename S> // forward template declaration
     static inline void PacCountUpdateOne(S &agg, uint64_t hash, ArenaAllocator &a);
+#endif
 
 // SWAR-optimized state
 struct PacCountState {
-#ifndef PAC_COUNT_NOCASCADING
+#ifndef PAC_NOCASCADING
 	uint64_t probabilistic_total8[8]; // SWAR packed uint8_t counters
 	uint8_t exact_total8;             // counts updates, flush at 255
 #endif
 	uint64_t probabilistic_total[64]; // final totals
 
+#ifndef PAC_GODBOLT
 	void FlushLevel() {
-#ifndef PAC_COUNT_NOCASCADING
+#ifndef PAC_NOCASCADING
 		if (exact_total8 == 0) {
 			return;
 		}
@@ -96,14 +108,16 @@ struct PacCountState {
 	PacCountState *EnsureState(ArenaAllocator &) {
 		return this;
 	}
+#endif
 };
 
-#ifdef PAC_COUNT_NOCASCADING
+#ifndef PAC_GODBOLT
+#ifdef PAC_NOCASCADING
 // NOCASCADING: simple direct update to uint64_t[64]
 template <>
 inline void PacCountUpdateOne(PacCountState &agg, uint64_t hash, ArenaAllocator &) {
 	for (int i = 0; i < 64; i++) {
-#ifdef PAC_COUNT_NOSIMD
+#ifdef PAC_NOSIMD
 		if ((hash >> i) & 1) { // IF..THEN cannot be simd-ized (and is 50%:has heavy branch misprediction cost)
 			agg.probabilistic_total[i]++;
 		}
@@ -112,13 +126,22 @@ inline void PacCountUpdateOne(PacCountState &agg, uint64_t hash, ArenaAllocator 
 #endif
 	}
 }
+#endif // PAC_NOCASCADING
+#endif // PAC_GODBOLT
+
+#ifndef PAC_NOCASCADING
+#ifdef PAC_GODBOLT
+__attribute__((used, noinline))
 #else
-AUTOVECTORIZE static inline void PacCountUpdateSWAR(PacCountState &state, uint64_t key_hash) {
+AUTOVECTORIZE static inline
+#endif
+void PacCountUpdateSWAR(PacCountState &state, uint64_t key_hash) {
 	for (int j = 0; j < 8; j++) { // just 8, not 64 iterations (SWAR: we count 8 bits every iteration)
 		state.probabilistic_total8[j] += (key_hash >> j) & PAC_COUNT_MASK;
 	}
 }
 
+#ifndef PAC_GODBOLT
 template <>
 inline void PacCountUpdateOne(PacCountState &agg, uint64_t hash, ArenaAllocator &) {
 	PacCountUpdateSWAR(agg, hash);
@@ -126,9 +149,11 @@ inline void PacCountUpdateOne(PacCountState &agg, uint64_t hash, ArenaAllocator 
 		agg.FlushLevel();
 	}
 }
-#endif
+#endif // PAC_GODBOLT
+#endif // PAC_NOCASCADING
 
-#if !defined(PAC_COUNT_NOBUFFERING) && !defined(PAC_COUNT_NOCASCADING)
+#ifndef PAC_GODBOLT
+#if !defined(PAC_NOBUFFERING) && !defined(PAC_NOCASCADING)
 // Wrapped aggregation state: buffers 3 hashes before allocating PacCountState.
 // Uses pointer tagging: lower 3 bits store n_buffered (0-3), upper 61 bits store PacCountState*.
 // This is intended for situations where DuckDB is abandoning hash tables when it struggles to
@@ -192,8 +217,9 @@ AUTOVECTORIZE inline void PacCountUpdateOne(PacCountStateWrapper &agg, uint64_t 
 		agg.n_buffered++; // increments cnt
 	}
 }
-#endif
+#endif // PAC_NOBUFFERING && PAC_NOCASCADING
 
 } // namespace duckdb
+#endif // PAC_GODBOLT
 
 #endif // PAC_COUNT_HPP

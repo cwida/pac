@@ -118,12 +118,12 @@ done
 
 echo ""
 echo "=== Value Distribution Impact on Bound Optimization ==="
-echo "Comparing random (rand_8) vs monotonic increasing (inc_8) vs monotonic decreasing (dec_8)"
+echo "Comparing random (rand_32) vs monotonic increasing (inc_32) vs monotonic decreasing (dec_32)"
 echo "All columns are UTINYINT (0-255). Bound optimization should help most with monotonic sequences."
 echo ""
 
 # Distribution columns: random vs monotonic (all UTINYINT 0-255)
-DIST_COLS=(rand_8 inc_8 dec_8)
+DIST_COLS=(rand_32 inc_32 dec_32)
 DIST_NAMES=(random monotonic_inc monotonic_dec)
 
 for idx in "${!DATA_VIEWS[@]}"; do

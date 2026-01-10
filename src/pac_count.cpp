@@ -29,7 +29,7 @@ static unique_ptr<FunctionData> PacCountBind(ClientContext &ctx, AggregateFuncti
 
 // State types: simple (non-scatter) always uses PacCountState directly
 // Scatter uses PacCountStateWrapper for buffering (unless NOBUFFERING or NOCASCADING)
-#if defined(PAC_COUNT_NOBUFFERING) || defined(PAC_COUNT_NOCASCADING)
+#if defined(PAC_NOBUFFERING) || defined(PAC_NOCASCADING)
 using ScatterState = PacCountState;
 #else
 using ScatterState = PacCountStateWrapper;
@@ -112,7 +112,7 @@ void PacCountCombine(Vector &src, Vector &dst, AggregateInputData &aggr, idx_t c
 	auto sa = FlatVector::GetData<ScatterState *>(src);
 	auto da = FlatVector::GetData<ScatterState *>(dst);
 	for (idx_t i = 0; i < count; i++) {
-#if !defined(PAC_COUNT_NOBUFFERING) && !defined(PAC_COUNT_NOCASCADING)
+#if !defined(PAC_NOBUFFERING) && !defined(PAC_NOCASCADING)
 		// flush buffered values into dst (not into src -- it would trigger allocations)
 		sa[i]->FlushBuffer(*da[i], aggr.allocator);
 #endif
@@ -135,7 +135,7 @@ void PacCountFinalize(Vector &states, AggregateInputData &input, Vector &result,
 	double mi = input.bind_data->Cast<PacBindData>().mi;
 	double buf[64];
 	for (idx_t i = 0; i < count; i++) {
-#if !defined(PAC_COUNT_NOBUFFERING) && !defined(PAC_COUNT_NOCASCADING)
+#if !defined(PAC_NOBUFFERING) && !defined(PAC_NOCASCADING)
 		aggs[i]->FlushBuffer(*aggs[i], input.allocator); // flush values into yourself
 #endif
 		PacCountState *s = aggs[i]->GetState();

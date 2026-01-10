@@ -56,9 +56,9 @@ echo "Creating views: data (base), data1 (10M), data10 (100M), data100 (1B)..."
         (abs(hash(i + 4)) % 1000000000)::BIGINT as large_64,
 
         -- Distribution test columns (UBIGINT, domain 0-255)
-        (hash(i) & 255)::UBIGINT as rand_8,
-        ((i >> 16) & 255)::UBIGINT as inc_8,
-        (255 - ((i >> 16) & 255))::UBIGINT as dec_8
+        (hash(i) % 10000000)::UBIGINT as rand_32,
+        (i)::UBIGINT as inc_32,
+        (9999999 - i)::UBIGINT as dec_32,
 
     FROM range(10000000) t(i);
 
@@ -94,9 +94,9 @@ echo "Creating views: data (base), data1 (10M), data10 (100M), data100 (1B)..."
         (abs(hash(i + 2)) % 1000)::BIGINT as small_64,
         (abs(hash(i + 3)) % 1000000)::BIGINT as medium_64,
         (abs(hash(i + 4)) % 1000000000)::BIGINT as large_64,
-        (hash(i) & 255)::UBIGINT as rand_8,
-        ((i >> 19) & 255)::UBIGINT as inc_8,
-        (255 - ((i >> 19) & 255))::UBIGINT as dec_8,
+        (hash(i) % 100000000)::UBIGINT as rand_32,
+        (i)::UBIGINT as inc_32,
+        (99999999 - i)::UBIGINT as dec_32,
         (i // 10000000)::INTEGER as grp_10,
         (i // 100000)::INTEGER as grp_1000,
         (i // 1000)::INTEGER as grp_100000,
@@ -123,9 +123,9 @@ echo "Creating views: data (base), data1 (10M), data10 (100M), data100 (1B)..."
         (abs(hash(i + 2)) % 1000)::BIGINT as small_64,
         (abs(hash(i + 3)) % 1000000)::BIGINT as medium_64,
         (abs(hash(i + 4)) % 1000000000)::BIGINT as large_64,
-        (hash(i) & 255)::UBIGINT as rand_8,
-        ((i >> 22) & 255)::UBIGINT as inc_8,
-        (255 - ((i >> 22) & 255))::UBIGINT as dec_8,
+        (hash(i) % 1000000000)::UBIGINT as rand_32,
+        (i)::UBIGINT as inc_32,
+        (999999999 - i)::UBIGINT as dec_32,
         (i // 100000000)::INTEGER as grp_10,
         (i // 1000000)::INTEGER as grp_1000,
         (i // 10000)::INTEGER as grp_100000,

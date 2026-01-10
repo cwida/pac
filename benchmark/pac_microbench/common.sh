@@ -154,8 +154,6 @@ print_header() {
     echo "========================================"
     echo "Date: $(date)"
     echo "Host: $(hostname)"
-    echo "CPUs: $(sysctl -n hw.ncpu 2>/dev/null || nproc)"
-    echo "Memory: $(sysctl -n hw.memsize 2>/dev/null | awk '{print $1/1024/1024/1024 " GB"}' || free -h | awk '/Mem:/{print $2}')"
     echo "========================================"
 }
 

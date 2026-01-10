@@ -8,7 +8,7 @@ namespace duckdb {
 // ============================================================================
 // State type selection for scatter updates
 // ============================================================================
-#ifdef PAC_SUMAVG_NOBUFFERING
+#ifdef PAC_NOBUFFERING
 template <bool SIGNED>
 using ScatterIntState = PacSumIntState<SIGNED>;
 using ScatterDoubleState = PacSumDoubleState;
@@ -31,7 +31,7 @@ template <bool SIGNED>
 AUTOVECTORIZE inline void // main worker function for probabilistically adding one INTEGER to the 64 (sub)total
 PacSumUpdateOneInternal(PacSumIntState<SIGNED> &state, uint64_t key_hash, typename PacSumIntState<SIGNED>::T64 value,
                         ArenaAllocator &allocator) {
-#ifdef PAC_SUMAVG_NOCASCADING
+#ifdef PAC_NOCASCADING
 	AddToTotalsSimple(state.probabilistic_total128, value, key_hash); // directly add the value to the final total
 #else
 	// decide based on the (integer) value, in which level to aggregate (ensure the level is allocated)
@@ -70,7 +70,7 @@ PacSumUpdateOneInternal(PacSumDoubleState &state, uint64_t key_hash, double valu
 template <bool SIGNED>
 AUTOVECTORIZE inline void PacSumUpdateOneInternal(PacSumIntState<SIGNED> &state, uint64_t key_hash, hugeint_t value,
                                                   ArenaAllocator &allocator) {
-#ifndef PAC_SUMAVG_NOCASCADING
+#ifndef PAC_NOCASCADING
 	PacSumIntState<SIGNED>::EnsureLevelAllocated(allocator, state.probabilistic_total128, idx_t(64));
 #endif
 	for (int j = 0; j < 64; j++) {
@@ -84,7 +84,7 @@ AUTOVECTORIZE inline void PacSumUpdateOneInternal(PacSumIntState<SIGNED> &state,
 // Unified PacSumUpdateOne - uses ifdefs to choose between buffering or direct update
 // ============================================================================
 
-#ifdef PAC_SUMAVG_NOBUFFERING
+#ifdef PAC_NOBUFFERING
 // No buffering: ScatterState IS the inner state, just delegate to inner update
 template <bool SIGNED>
 AUTOVECTORIZE inline void PacSumUpdateOne(ScatterIntState<SIGNED> &state, uint64_t key_hash,
@@ -144,13 +144,13 @@ inline void PacSumUpdateOne(PacSumIntStateWrapper<SIGNED> &agg, uint64_t key_has
 	PacSumUpdateOneInternal<SIGNED>(*agg.EnsureState(a), key_hash, value, a);
 }
 
-#endif // PAC_SUMAVG_NOBUFFERING
+#endif // PAC_NOBUFFERING
 
 template <class State, bool SIGNED, class VALUE_TYPE, class INPUT_TYPE>
 static void PacSumUpdate(Vector inputs[], data_ptr_t state_p, idx_t count, ArenaAllocator &allocator,
                          uint64_t query_hash) {
 	auto &state = *reinterpret_cast<State *>(state_p);
-#ifdef PAC_SUMAVG_UNSAFENULL
+#ifdef PAC_UNSAFENULL
 	if (state.seen_null) {
 		return;
 	}
@@ -178,7 +178,7 @@ static void PacSumUpdate(Vector inputs[], data_ptr_t state_p, idx_t count, Arena
 			auto h_idx = hash_data.sel->get_index(i);
 			auto v_idx = value_data.sel->get_index(i);
 			if (!hash_data.validity.RowIsValid(h_idx) || !value_data.validity.RowIsValid(v_idx)) {
-#ifdef PAC_SUMAVG_UNSAFENULL
+#ifdef PAC_UNSAFENULL
 				inner.seen_null = true;
 				return;
 #else
@@ -208,7 +208,7 @@ static void PacSumScatterUpdate(Vector inputs[], Vector &states, idx_t count, Ar
 		auto h_idx = hash_data.sel->get_index(i);
 		auto v_idx = value_data.sel->get_index(i);
 		auto state = state_ptrs[sdata.sel->get_index(i)];
-#ifdef PAC_SUMAVG_UNSAFENULL
+#ifdef PAC_UNSAFENULL
 		auto *inner = state->GetState();
 		if (inner && inner->seen_null) {
 			continue; // result will be NULL anyway
@@ -254,13 +254,13 @@ AUTOVECTORIZE static void PacSumCombineInt(Vector &src, Vector &dst, idx_t count
 	auto dst_wrapper = FlatVector::GetData<ScatterIntState<SIGNED> *>(dst);
 
 	for (idx_t i = 0; i < count; i++) {
-#ifndef PAC_SUMAVG_NOBUFFERING
+#ifndef PAC_NOBUFFERING
 		// Flush src's buffer into dst's inner state (avoids allocating src inner)
 		PacSumFlushBuffer<SIGNED>(*src_wrapper[i], *dst_wrapper[i], allocator);
 #endif
 		auto *s = src_wrapper[i]->GetState();
 		auto *d_wrapper = dst_wrapper[i];
-#ifdef PAC_SUMAVG_UNSAFENULL
+#ifdef PAC_UNSAFENULL
 		if (s && s->seen_null) {
 			auto *d = d_wrapper->EnsureState(allocator);
 			d->seen_null = true;
@@ -271,14 +271,14 @@ AUTOVECTORIZE static void PacSumCombineInt(Vector &src, Vector &dst, idx_t count
 		}
 #endif
 		// Merge exact_count from wrapper
-#ifndef PAC_SUMAVG_NOBUFFERING
+#ifndef PAC_NOBUFFERING
 		d_wrapper->exact_count += src_wrapper[i]->exact_count;
 #endif
 		if (!s) {
 			continue; // src has no state allocated, nothing to combine
 		}
 		auto *d = d_wrapper->EnsureState(allocator);
-#ifdef PAC_SUMAVG_NOCASCADING
+#ifdef PAC_NOCASCADING
 		for (int j = 0; j < 64; j++) {
 			d->probabilistic_total128[j] += s->probabilistic_total128[j];
 		}
@@ -323,13 +323,13 @@ AUTOVECTORIZE static void PacSumCombineDouble(Vector &src, Vector &dst, idx_t co
 	auto src_wrapper = FlatVector::GetData<ScatterDoubleState *>(src);
 	auto dst_wrapper = FlatVector::GetData<ScatterDoubleState *>(dst);
 	for (idx_t i = 0; i < count; i++) {
-#ifndef PAC_SUMAVG_NOBUFFERING
+#ifndef PAC_NOBUFFERING
 		// Flush src's buffer into dst's inner state (avoids allocating src inner)
 		PacSumFlushBuffer<true>(*src_wrapper[i], *dst_wrapper[i], allocator);
 #endif
 		auto *s = src_wrapper[i]->GetState();
 		auto *d_wrapper = dst_wrapper[i];
-#ifdef PAC_SUMAVG_UNSAFENULL
+#ifdef PAC_UNSAFENULL
 		if (s && s->seen_null) {
 			auto *d = d_wrapper->EnsureState(allocator);
 			d->seen_null = true;
@@ -340,7 +340,7 @@ AUTOVECTORIZE static void PacSumCombineDouble(Vector &src, Vector &dst, idx_t co
 		}
 #endif
 		// Merge exact_count from wrapper
-#ifndef PAC_SUMAVG_NOBUFFERING
+#ifndef PAC_NOBUFFERING
 		d_wrapper->exact_count += src_wrapper[i]->exact_count;
 #endif
 		if (!s) {
@@ -367,11 +367,11 @@ static void PacSumFinalize(Vector &states, AggregateInputData &input, Vector &re
 	double scale_divisor = input.bind_data ? input.bind_data->Cast<PacBindData>().scale_divisor : 1.0;
 
 	for (idx_t i = 0; i < count; i++) {
-#ifndef PAC_SUMAVG_NOBUFFERING
+#ifndef PAC_NOBUFFERING
 		PacSumFlushBuffer<SIGNED>(*state_ptrs[i], *state_ptrs[i], input.allocator);
 #endif
 		auto *s = state_ptrs[i]->GetState();
-#ifdef PAC_SUMAVG_UNSAFENULL
+#ifdef PAC_UNSAFENULL
 		if (s && s->seen_null) {
 			result_mask.SetInvalid(offset + i);
 			continue;
@@ -387,7 +387,7 @@ static void PacSumFinalize(Vector &states, AggregateInputData &input, Vector &re
 		if (DIVIDE_BY_COUNT) {
 			// Total count = wrapper's count + inner state's count
 			uint64_t total_count = state_ptrs[i]->exact_count;
-#ifndef PAC_SUMAVG_NOBUFFERING
+#ifndef PAC_NOBUFFERING
 			if (s) {
 				total_count += s->exact_count;
 			}

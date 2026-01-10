@@ -5,7 +5,7 @@ namespace duckdb {
 // ============================================================================
 // State type selection
 // ============================================================================
-#ifdef PAC_MINMAX_NOBUFFERING
+#ifdef PAC_NOBUFFERING
 template <typename T, bool IS_MAX>
 using MinMaxState = PacMinMaxState<T, IS_MAX>;
 #else
@@ -57,7 +57,7 @@ static void PacMinMaxScatterUpdate(Vector inputs[], AggregateInputData &aggr, id
 		auto v_idx = value_data.sel->get_index(i);
 		if (hash_data.validity.RowIsValid(h_idx) && value_data.validity.RowIsValid(v_idx)) {
 			auto state = state_ptrs[sdata.sel->get_index(i)];
-#ifdef PAC_MINMAX_NOBUFFERING
+#ifdef PAC_NOBUFFERING
 			PacMinMaxUpdateOne<T, IS_MAX>(*state, hashes[h_idx] ^ query_hash, values[v_idx], aggr.allocator);
 #else
 			PacMinMaxBufferOrUpdateOne<T, IS_MAX>(*state, hashes[h_idx] ^ query_hash, values[v_idx], aggr.allocator);
@@ -76,7 +76,7 @@ static void PacMinMaxCombine(Vector &src, Vector &dst, AggregateInputData &aggr,
 	auto dst_states = FlatVector::GetData<MinMaxState<T, IS_MAX> *>(dst);
 
 	for (idx_t i = 0; i < count; i++) {
-#ifndef PAC_MINMAX_NOBUFFERING
+#ifndef PAC_NOBUFFERING
 		// flush the src buffer into dst (not into src: that could cause allocations there, we only want that in dst)
 		src_states[i]->FlushBuffer(*dst_states[i], aggr.allocator);
 #endif
@@ -98,7 +98,7 @@ static void PacMinMaxFinalize(Vector &states, AggregateInputData &input, Vector 
 	double mi = input.bind_data ? input.bind_data->Cast<PacBindData>().mi : 128.0;
 
 	for (idx_t i = 0; i < count; i++) {
-#ifndef PAC_MINMAX_NOBUFFERING
+#ifndef PAC_NOBUFFERING
 		// flush the buffer into yourself, possibly allocating the state (array with 64 totals)
 		state_ptrs[i]->FlushBuffer(*state_ptrs[i], input.allocator);
 #endif

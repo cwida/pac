@@ -23,10 +23,10 @@ mkdir -p "$BINARIES_DIR"
 # Format: "name:flags" (empty flags = default build)
 CONFIGS=(
     "default:"
-    "noboundopt:-DPAC_MINMAX_NOBOUNDOPT"
-    "nobuffering:-DPAC_COUNT_NOBUFFERING -DPAC_MINMAX_NOBUFFERING -DPAC_SUMAVG_NOBUFFERING"
-    "nocascading:-DPAC_COUNT_NOCASCADING -DPAC_SUMAVG_NOCASCADING"
-    "nosimd:-DPAC_COUNT_NOCASCADING -DPAC_SUMAVG_NOCASCADING -DPAC_COUNT_NOSIMD -DPAC_SUMAVG_NOSIMD -DPAC_MINMAX_NOSIMD -fno-vectorize -fno-slp-vectorize"
+    "noboundopt:-DPAC_NOBOUNDOPT"
+    "nobuffering:-DPAC_NOBUFFERING"
+    "nocascading:-DPAC_NOCASCADING"
+    "nosimd:-DPAC_NOCASCADING -DPAC_NOSIMD -fno-vectorize -fno-slp-vectorize"
 )
 
 # Get config name from "name:flags" string
