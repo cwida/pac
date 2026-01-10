@@ -46,13 +46,7 @@ void PACRewriteRule::PACRewriteRuleFunction(OptimizerExtensionInput &input, uniq
 
 	// Delegate compatibility checks (including detecting PAC table presence and internal sample scans)
 	// to PACRewriteQueryCheck. It now returns a PACCompatibilityResult with fk_paths and PKs.
-	// Pass the replan_in_progress flag from the optimizer extension so the compatibility check
-	// can immediately return when a replan is already in progress (avoids infinite recursion).
-	bool replan_flag = false;
-	if (pac_info) {
-		replan_flag = pac_info->replan_in_progress.load(std::memory_order_acquire);
-	}
-	PACCompatibilityResult check = PACRewriteQueryCheck(*plan, input.context, pac_table_list, replan_flag);
+	PACCompatibilityResult check = PACRewriteQueryCheck(plan, input.context, pac_table_list, pac_info);
 	// If no FK paths were found and no configured PAC tables were scanned, nothing to do.
 	// However, if the plan directly scans configured PAC tables (privacy units) we should still
 	// proceed with compilation even when no FK paths (or PKs) were discovered.
@@ -84,11 +78,6 @@ void PACRewriteRule::PACRewriteRuleFunction(OptimizerExtensionInput &input, uniq
 	string normalized = NormalizeQueryForHash(input.context.GetCurrentQuery());
 	string query_hash = HashStringToHex(normalized);
 
-	if (discovered_pus.size() > 1) {
-		throw InvalidInputException(
-		    "PAC rewrite: multiple privacy units discovered (%s); multi-privacy-unit queries are not supported");
-	}
-
 	vector<string> privacy_units = std::move(discovered_pus);
 
 	// Print discovered PKs for diagnostics (if available) for each privacy unit
@@ -111,15 +100,17 @@ void PACRewriteRule::PACRewriteRuleFunction(OptimizerExtensionInput &input, uniq
 
 	bool apply_noise = IsPacNoiseEnabled(input.context, true);
 	if (apply_noise) {
-		for (auto &pu : privacy_units) {
 #ifdef DEBUG
-			Printer::Print("Query requires PAC Compilation for privacy unit: " + pu);
+		Printer::Print("Query requires PAC Compilation for privacy units:");
+		for (auto &pu : privacy_units) {
+			Printer::Print("  " + pu);
+		}
 #endif
 
-			// set replan flag for duration of compilation
-			ReplanGuard scoped2(pac_info);
-			CompilePacBitsliceQuery(check, input, plan, pu, normalized, query_hash);
-		}
+		// set replan flag for duration of compilation
+		ReplanGuard scoped2(pac_info);
+		// Call the compiler once with all privacy units
+		CompilePacBitsliceQuery(check, input, plan, privacy_units, normalized, query_hash);
 	}
 }
 

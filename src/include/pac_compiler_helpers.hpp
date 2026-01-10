@@ -13,8 +13,7 @@
 
 namespace duckdb {
 
-// Replan the provided SQL query into `plan` after disabling several optimizers. The function
-// performs the SET transaction, reparses and replans, and prints the resulting plan if present.
+// Replan the provided SQL query into `plan` after disabling several optimizers.
 void ReplanWithoutOptimizers(ClientContext &context, const string &query, unique_ptr<LogicalOperator> &plan);
 
 // Build join conditions from FK columns to PK columns

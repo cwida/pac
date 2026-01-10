@@ -83,6 +83,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// Add option to enable/disable join elimination (stop FK chain before reaching PU)
 	db.config.AddExtensionOption("pac_join_elimination", "eliminate final join to PU table", LogicalType::BOOLEAN,
 	                             Value::BOOLEAN(true));
+	// Add option to enable/disable conservative mode (when false, unsupported operators skip PAC compilation)
+	db.config.AddExtensionOption("pac_conservative_mode",
+	                             "throw errors for unsupported operators (when false, skip PAC compilation)",
+	                             LogicalType::BOOLEAN, Value::BOOLEAN(true));
 
 	// Register pac_aggregate function(s)
 	RegisterPacAggregateFunctions(loader);

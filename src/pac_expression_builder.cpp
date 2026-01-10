@@ -109,6 +109,27 @@ unique_ptr<Expression> BuildXorHashFromPKs(OptimizerExtensionInput &input, Logic
 	return input.optimizer.BindScalarFunction("hash", std::move(xor_expr));
 }
 
+// Build AND expression from multiple hash expressions (for multiple PUs)
+unique_ptr<Expression> BuildAndFromHashes(OptimizerExtensionInput &input, vector<unique_ptr<Expression>> &hash_exprs) {
+	if (hash_exprs.empty()) {
+		throw InternalException("PAC compiler: cannot build AND expression from empty hash list");
+	}
+
+	// If there is only one hash, return it directly
+	if (hash_exprs.size() == 1) {
+		return std::move(hash_exprs[0]);
+	}
+
+	// Build chain using optimizer.BindScalarFunction with operator "&" (bitwise AND)
+	auto left = std::move(hash_exprs[0]);
+	for (size_t i = 1; i < hash_exprs.size(); ++i) {
+		auto right = std::move(hash_exprs[i]);
+		left = input.optimizer.BindScalarFunction("&", std::move(left), std::move(right));
+	}
+
+	return left;
+}
+
 // Map aggregate function name to PAC function name
 static string GetPacAggregateFunctionName(const string &function_name) {
 	string pac_function_name;
