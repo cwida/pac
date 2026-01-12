@@ -1,14 +1,16 @@
 #!/usr/bin/env Rscript
 # plot_microbench_results.R
-# Scans results/* subfolders and generates simple COUNT plots (ungrouped, grouped_seq, grouped_scat)
+#
+# Scans results/* subfolders and generates simple COUNT plots
+# (ungrouped, grouped_seq, grouped_scat)
 
 suppressPackageStartupMessages({
-  # core plotting/data packages only
   if (!requireNamespace("ggplot2", quietly = TRUE)) install.packages("ggplot2")
   if (!requireNamespace("dplyr", quietly = TRUE)) install.packages("dplyr")
   if (!requireNamespace("readr", quietly = TRUE)) install.packages("readr")
   if (!requireNamespace("stringr", quietly = TRUE)) install.packages("stringr")
   if (!requireNamespace("scales", quietly = TRUE)) install.packages("scales")
+
   library(ggplot2)
   library(dplyr)
   library(readr)
@@ -17,217 +19,418 @@ suppressPackageStartupMessages({
 })
 
 results_root <- "results"
-if (!dir.exists(results_root)) stop("results directory not found: ", results_root)
-# discover architecture directories (subfolders of results)
-candidates <- list.files(results_root, full.names = FALSE)
-arch_dirs <- file.path(results_root, candidates[file.info(file.path(results_root, candidates))$isdir])
-# if no subdirectories, include results_root itself
-if (length(arch_dirs) == 0) arch_dirs <- results_root
+if (!dir.exists(results_root)) {
+  stop("results directory not found: ", results_root)
+}
 
-# Find latest file matching prefix with timestamp YYYYMMDD_HHMMSS
+# ------------------------------------------------------------------------------
+# Discover architecture directories
+# ------------------------------------------------------------------------------
+
+candidates <- list.files(results_root, full.names = FALSE)
+arch_dirs <- file.path(
+  results_root,
+  candidates[file.info(file.path(results_root, candidates))$isdir]
+)
+
+if (length(arch_dirs) == 0) {
+  arch_dirs <- results_root
+}
+
+# ------------------------------------------------------------------------------
+# Utilities
+# ------------------------------------------------------------------------------
+
 find_latest_file <- function(dirpath, prefix) {
-  files <- list.files(dirpath, pattern = paste0("^", prefix, "_\\d{8}_\\d{6}.*\\.csv$"), full.names = TRUE)
+  files <- list.files(
+    dirpath,
+    pattern = paste0("^", prefix, "_\\d{8}_\\d{6}.*\\.csv$"),
+    full.names = TRUE
+  )
+
   if (length(files) == 0) return(NULL)
-  stamps <- stringr::str_extract(basename(files), "\\d{8}_\\d{6}")
-  valid <- !is.na(stamps)
+
+  stamps <- str_extract(basename(files), "\\d{8}_\\d{6}")
+  valid  <- !is.na(stamps)
   if (!any(valid)) return(NULL)
-  files <- files[valid]
+
+  files  <- files[valid]
   stamps <- stamps[valid]
-  nums <- as.numeric(gsub("_", "", stamps))
+  nums   <- as.numeric(gsub("_", "", stamps))
+
   files[which.max(nums)]
 }
 
-# Normalize common column names so downstream code can rely on wall_sec, rows_m, groups, variant, test
 normalize_df <- function(df) {
   nm <- names(df)
-  if ("wall_sec" %in% nm && !("time_sec" %in% nm)) df$time_sec <- df$wall_sec
-  if ("time_sec" %in% nm && !("wall_sec" %in% nm)) df$wall_sec <- df$time_sec
-  if ("rows_m" %in% nm && !("data_size_m" %in% nm)) df$data_size_m <- df$rows_m
-  if ("data_size_m" %in% nm && !("rows_m" %in% nm)) df$rows_m <- df$data_size_m
-  # ensure these exist to avoid errors
+
+  if ("wall_sec" %in% nm && !"time_sec" %in% nm) df$time_sec <- df$wall_sec
+  if ("time_sec" %in% nm && !"wall_sec" %in% nm) df$wall_sec <- df$time_sec
+
+  if ("rows_m" %in% nm && !"data_size_m" %in% nm) df$data_size_m <- df$rows_m
+  if ("data_size_m" %in% nm && !"rows_m" %in% nm) df$rows_m <- df$data_size_m
+
   if (!"variant" %in% nm) df$variant <- NA_character_
-  if (!"test" %in% nm) df$test <- NA_character_
-  if (!"groups" %in% nm) df$groups <- NA
-  if (!"rows_m" %in% nm) df$rows_m <- NA
-  if (!"wall_sec" %in% nm && "time_sec" %in% nm) df$wall_sec <- df$time_sec
+  if (!"test"    %in% nm) df$test    <- NA_character_
+  if (!"groups"  %in% nm) df$groups  <- NA
+  if (!"rows_m"  %in% nm) df$rows_m  <- NA
+
   df
 }
 
-# Plot generator for a single architecture directory
+# ------------------------------------------------------------------------------
+# Main processing per architecture
+# ------------------------------------------------------------------------------
+
 process_arch <- function(arch_dir) {
   message("Processing: ", arch_dir)
+
   file <- find_latest_file(arch_dir, "count")
-  if (is.null(file)) { message("  no count file found in ", arch_dir); return(invisible(NULL)) }
+  if (is.null(file)) {
+    message("  no count file found")
+    return(invisible(NULL))
+  }
+
   message("  using: ", file)
 
-  df <- tryCatch(readr::read_csv(file, show_col_types = FALSE), error = function(e) { message("  failed to read ", file, ": ", e$message); return(NULL) })
+  df <- tryCatch(
+    read_csv(file, show_col_types = FALSE),
+    error = function(e) {
+      message("  failed to read: ", e$message)
+      NULL
+    }
+  )
   if (is.null(df)) return(invisible(NULL))
+
   df <- normalize_df(df)
 
-  # make sure wall_sec is numeric and build a cleaned timing column
-  if (!"wall_sec" %in% names(df) && !"time_sec" %in% names(df)) { message("  missing wall_sec/time_sec in ", file); return(invisible(NULL)) }
-  # raw numeric from primary column
   raw_time_col <- if ("wall_sec" %in% names(df)) "wall_sec" else "time_sec"
-  df$wall_sec_raw <- suppressWarnings(as.numeric(df[[raw_time_col]]))
-  # Map -1 (crash marker) to 0 for display; leave other negatives untouched unless you want to treat them too
+  df$wall_sec_raw   <- suppressWarnings(as.numeric(df[[raw_time_col]]))
+  # (NO OVERRIDE) use raw wall times for all rows, including ungrouped
+
+  # treat -1 as missing (NA) so single crash markers don't zero out the mean for a group/variant
   df$wall_sec_clean <- df$wall_sec_raw
-  df$wall_sec_clean[which(df$wall_sec_clean == -1)] <- 0
+  df$wall_sec_clean[!is.na(df$wall_sec_clean) & df$wall_sec_clean == -1] <- NA_real_
 
-  # If wall_times exists (space-separated), prefer its first sample where cleaned value is NA or 0
   if ("wall_times" %in% names(df)) {
-    first_num_from_times <- function(s) {
+    first_from_times <- function(s) {
       if (is.na(s)) return(NA_real_)
-      toks <- stringr::str_extract_all(as.character(s), "-?\\d+\\.?\\d*")[[1]]
-      if (length(toks) == 0) return(NA_real_) else return(as.numeric(toks[1]))
+      toks <- str_extract_all(as.character(s), "-?\\d+\\.?\\d*")[[1]]
+      if (length(toks) == 0) NA_real_ else as.numeric(toks[1])
     }
-    wt_first <- vapply(df$wall_times, first_num_from_times, FUN.VALUE = NA_real_)
-    idx_fill <- which(is.na(df$wall_sec_clean) | df$wall_sec_clean == 0)
-    tofill <- idx_fill[!is.na(wt_first[idx_fill])]
-    if (length(tofill) > 0) df$wall_sec_clean[tofill] <- wt_first[tofill]
-  }
-  # fallback to agg_sec if still missing or zero
-  if ("agg_sec" %in% names(df)) {
-    idx_fill <- which(is.na(df$wall_sec_clean) | df$wall_sec_clean == 0)
-    if (length(idx_fill) > 0) df$wall_sec_clean[idx_fill] <- suppressWarnings(as.numeric(df$agg_sec[idx_fill]))
+
+    wt_first <- vapply(df$wall_times, first_from_times, NA_real_)
+    idx <- which(is.na(df$wall_sec_clean) | df$wall_sec_clean == 0)
+    df$wall_sec_clean[idx] <- wt_first[idx]
   }
 
-  # Report and ensure we have a plotting column. We'll display zeros (original -1) as 0, but for log plotting we must replace 0 with a tiny epsilon
-  df$wall_sec_clean <- suppressWarnings(as.numeric(df$wall_sec_clean))
-  n_before <- nrow(df)
-  n_missing <- sum(is.na(df$wall_sec_clean))
-  if (n_missing > 0) message("  note: ", n_missing, " rows have no timing after fallback (out of ", n_before, ") and will be skipped in plots")
+  df$wall_sec_plot <- as.numeric(df$wall_sec_clean)
 
-  # For linear plotting we keep zeros as zeros; prepare plotting column
-  df$wall_sec_plot <- suppressWarnings(as.numeric(df$wall_sec_clean))
-  # create a readable groups label (format large numbers with commas or suffixes)
-  format_group_label <- function(x) {
-    n <- suppressWarnings(as.numeric(as.character(x)))
-    if (is.na(n)) return(as.character(x))
-    if (n >= 1e6) return(paste0(n/1e6, "M"))
-    if (n >= 1e3) return(formatC(n, format = "d", big.mark = ","))
-    return(as.character(n))
-  }
-  df$groups_label <- vapply(df$groups, format_group_label, FUN.VALUE = "")
-  # facet titles: compute numeric value (millions) and show 'M' or 'B' suffixes; order levels by numeric size
+  df$groups_label <- vapply(
+    df$groups,
+    function(x) {
+      n <- suppressWarnings(as.numeric(as.character(x)))
+      if (is.na(n)) return(as.character(x))
+      if (n >= 1e6) return(paste0(n / 1e6, "M"))
+      if (n >= 1e3) return(formatC(n, format = "d", big.mark = ","))
+      as.character(n)
+    },
+    FUN.VALUE = ""
+  )
+
   df$rows_m_num <- suppressWarnings(as.numeric(as.character(df$rows_m)))
-  df$rows_m_label <- vapply(df$rows_m_num, function(rnum) {
-    if (is.na(rnum)) return(NA_character_)
-    if (rnum %% 1000 == 0 && rnum >= 1000) {
-      # convert 1000M -> 1B, 2000M -> 2B, etc.
-      return(paste0(rnum/1000, "B rows"))
-    } else {
-      return(paste0(rnum, "M rows"))
-    }
-  }, FUN.VALUE = "")
-  # make the rows_m_label a factor preserving the default appearance order (order of first occurrence in the data)
-  # Use unique() on the mapped labels to preserve input order rather than sorting numerically
-  labels_in_order <- unique(df$rows_m_label[!is.na(df$rows_m_label)])
-  if (length(labels_in_order) > 0) {
-    df$rows_m_label <- factor(df$rows_m_label, levels = labels_in_order)
-  } else {
-    df$rows_m_label <- factor(df$rows_m_label)
-  }
+  df$rows_m_label <- vapply(
+    df$rows_m_num,
+    function(r) {
+      if (is.na(r)) NA_character_
+      else if (r %% 1000 == 0 && r >= 1000) paste0(r / 1000, "B rows")
+      else paste0(r, "M rows")
+    },
+    FUN.VALUE = ""
+  )
 
   df$variant <- as.factor(ifelse(is.na(df$variant), "unknown", df$variant))
-  # Use rows_m as facet variable; convert to factor so each facet is one subplot
-  df$rows_m <- as.factor(df$rows_m)
-  df$groups <- as.factor(df$groups)
+  df$groups  <- as.factor(df$groups)
 
-  # Plotting helper: create file and write png
+  # --------------------------------------------------------------------------
+  # Plot helpers
+  # --------------------------------------------------------------------------
+
   make_plot <- function(sub, outname, title) {
-    if (nrow(sub) == 0) { message("  no data for ", title); return() }
-    # remove rows with no timing at all
     sub <- sub %>% filter(!is.na(wall_sec_clean))
-    if (nrow(sub) == 0) { message("  no timing rows for ", title); return() }
+    if (nrow(sub) == 0) return()
 
-    p <- ggplot(sub, aes(x = groups_label, y = wall_sec_plot, fill = variant)) +
-      geom_col(position = position_dodge2(width = 0.9, preserve = "single")) +
-      facet_wrap(~ rows_m_label, scales = "free_x", nrow = 1) +
-      scale_y_continuous(labels = scales::label_number(accuracy = 0.01, big.mark = ",", decimal.mark = ".")) +
+    p <- ggplot(sub, aes(groups_label, wall_sec_plot, fill = variant)) +
+      geom_col(position = position_dodge2(width = 0.9)) +
+      facet_wrap(~ rows_m_label, nrow = 1, scales = "free_x") +
       labs(x = "groups", y = "Wall time (s)", fill = "Variant", title = title) +
       theme_bw(base_size = 14) +
       theme(
         legend.position = "top",
-        axis.text.x = element_text(angle = 45, hjust = 1, size = 12),
-        axis.text.y = element_text(size = 12),
-        axis.title = element_text(size = 14),
-        legend.title = element_text(size = 13),
-        legend.text = element_text(size = 12),
-        strip.text = element_text(size = 13),
-        plot.title = element_text(size = 16, hjust = 0.5, face = "bold"),
-        strip.background = element_rect(fill = "#f0f0f0")
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.title = element_text(face = "bold", hjust = 0.5)
       )
-    out_path <- file.path(arch_dir, outname)
-    ggsave(out_path, p, width = 12, height = 4, dpi = 300)
-    message("  wrote ", out_path)
+
+    ggsave(file.path(arch_dir, outname), p, width = 12, height = 6, dpi = 300)
   }
 
-  # Un-grouped: test == 'ungrouped'
-  sub_ungrouped <- df %>% filter(test == 'ungrouped')
-  make_plot(sub_ungrouped, 'count_ungrouped.png', paste(basename(arch_dir), '- ungrouped'))
+  # --------------------------------------------------------------------------
+  # Subsets
+  # --------------------------------------------------------------------------
 
-  # Grouped seq: test == 'grouped_seq' or 'grouped' or contains grouped_seq
-  sub_grouped_seq <- df %>% filter(test %in% c('grouped_seq', 'grouped'))
-  make_plot(sub_grouped_seq, 'count_grouped_seq.png', paste(basename(arch_dir), '- grouped_seq'))
+  sub_ungrouped <- df %>%
+    filter(test == "ungrouped") %>%
+    mutate(variant = recode(variant,
+      standard = "No PAC",
+      default  = "PAC Optimized"
+    ))
 
-  # Grouped scat: test == 'grouped_scat' or contains 'scat'
-  sub_grouped_scat <- df %>% filter(test %in% c('grouped_scat') | grepl('scat', test))
-  make_plot(sub_grouped_scat, 'count_grouped_scat.png', paste(basename(arch_dir), '- grouped_scat'))
+  sub_grouped_seq <- df %>%
+    filter(test %in% c("grouped_seq", "grouped")) %>%
+    mutate(variant = recode(variant,
+      standard = "No PAC",
+      default  = "PAC Optimized"
+    ))
 
-  # --- NEW: Variants plot at max rows_m ---
-  # Determine the numeric rows_m to use (prefer rows_m_num computed earlier)
-  rows_nums <- df$rows_m_num
-  max_rows_num <- NA_real_
-  if (any(!is.na(rows_nums))) {
-    max_rows_num <- max(rows_nums, na.rm = TRUE)
-    df_max <- df %>% filter(rows_m_num == max_rows_num)
-  } else {
-    # fallback: pick the most frequent rows_m value
-    if (any(!is.na(df$rows_m))) {
-      mode_row <- df %>% count(rows_m) %>% arrange(desc(n)) %>% slice(1) %>% pull(rows_m)
-      df_max <- df %>% filter(rows_m == mode_row)
+  sub_grouped_scat <- df %>%
+    filter(grepl("scat", test)) %>%
+    mutate(variant = recode(variant,
+      standard = "No PAC",
+      default  = "PAC Optimized"
+    ))
+
+  make_plot(sub_ungrouped,     "count_ungrouped.png",     paste(basename(arch_dir), "ungrouped"))
+  make_plot(sub_grouped_seq,   "count_grouped_seq.png",   paste(basename(arch_dir), "grouped_seq"))
+  make_plot(sub_grouped_scat,  "count_grouped_scat.png",  paste(basename(arch_dir), "grouped_scat"))
+
+  # --------------------------------------------------------------------------
+  # Slowdown plot for ungrouped: include all variants (do not collapse)
+  # --------------------------------------------------------------------------
+  sub_ungrouped_all <- df %>%
+    filter(test == "ungrouped") %>%
+    filter(!is.na(wall_sec_plot)) %>%
+    mutate(variant = as.character(variant))
+
+  if (nrow(sub_ungrouped_all) > 0) {
+    # aggregate mean wall time per (groups_label, rows_m_label, variant)
+    agg <- sub_ungrouped_all %>%
+      group_by(groups_label, rows_m_label, variant) %>%
+      summarize(mean_sec = mean(wall_sec_plot, na.rm = TRUE), .groups = "drop")
+
+    # compute baseline per (groups_label, rows_m_label)
+    # prefer the 'standard' variant if present, otherwise fall back to the fastest variant
+    baseline <- agg %>%
+      group_by(groups_label, rows_m_label) %>%
+      do({
+        dfg <- .
+        std <- dfg %>% filter(variant == "standard")
+        if (nrow(std) == 1 && !is.na(std$mean_sec) && std$mean_sec > 0) {
+          data.frame(baseline_mean = std$mean_sec)
+        } else {
+          # choose the fastest (min mean_sec) as baseline
+          minv <- dfg %>% filter(!is.na(mean_sec)) %>% arrange(mean_sec) %>% slice(1)
+          if (nrow(minv) == 1 && !is.na(minv$mean_sec) && minv$mean_sec > 0) {
+            data.frame(baseline_mean = minv$mean_sec)
+          } else {
+            data.frame(baseline_mean = NA_real_)
+          }
+        }
+      }) %>%
+      ungroup()
+
+    # join baseline back and compute slowdown
+    agg_bs <- agg %>%
+      left_join(baseline, by = c("groups_label", "rows_m_label")) %>%
+      mutate(slowdown = ifelse(is.na(baseline_mean) | baseline_mean == 0, NA_real_, mean_sec / baseline_mean))
+
+    # prepare plotting dataframe: drop invalid slowdown values
+    plot_df <- agg_bs %>% filter(!is.na(slowdown) & is.finite(slowdown))
+
+    if (nrow(plot_df) > 0) {
+      pslow <- ggplot(plot_df, aes(x = groups_label, y = slowdown, fill = variant)) +
+        geom_col(position = position_dodge2(width = 0.9)) +
+        facet_wrap(~ rows_m_label, nrow = 1, scales = "free_x") +
+        labs(x = "groups", y = "Slowdown (x)", fill = "Variant", title = paste(basename(arch_dir), "ungrouped slowdown (all variants)")) +
+        theme_bw(base_size = 14) +
+        theme(
+          legend.position = "top",
+          axis.text.x = element_text(angle = 45, hjust = 1),
+          plot.title = element_text(face = "bold", hjust = 0.5)
+        ) +
+        scale_y_continuous(labels = scales::number_format(accuracy = 0.01))
+
+      ggsave(file.path(arch_dir, "slowdown_ungrouped_allvariants.png"), pslow, width = 12, height = 6, dpi = 300)
     } else {
-      df_max <- df
+      message("  no valid slowdown data for ungrouped (all variants)")
     }
+  } else {
+    message("  no ungrouped rows to compute slowdown")
   }
 
-  if (nrow(df_max) == 0) {
-    message("  no rows to plot variants at max rows for ", arch_dir)
-  } else {
-    # create a clean groups_label if missing
-    if (!"groups_label" %in% names(df_max)) {
-      df_max$groups_label <- as.character(df_max$groups)
-    }
-    df_max$variant <- as.factor(ifelse(is.na(df_max$variant), "unknown", df_max$variant))
-    # Facet by test type (boxes = test), keep variant as color. Order tests with common order if present.
-    desired_tests <- c('ungrouped', 'grouped_seq', 'grouped_scat')
-    present_tests <- unique(as.character(df_max$test))
-    test_levels <- c(intersect(desired_tests, present_tests), setdiff(present_tests, desired_tests))
-    df_max$test <- factor(as.character(df_max$test), levels = test_levels)
+  # --------------------------------------------------------------------------
+  # Also process sum/avg results (sum_avg_*.csv) and produce one PNG per
+  # combination of (test, aggregate, dtype). Each PNG contains two stacked
+  # panels: absolute mean per-variant and slowdown per-variant (vs baseline).
+  # Baseline preference: variant == 'standard' if present, otherwise the
+  # fastest variant per (groups, rows) is used.
+  # --------------------------------------------------------------------------
+  file_sum <- find_latest_file(arch_dir, "sum_avg")
+  if (!is.null(file_sum)) {
+    message("  using sum/avg: ", file_sum)
+    df_sum <- tryCatch(
+      read_csv(file_sum, show_col_types = FALSE),
+      error = function(e) {
+        message("  failed to read sum_avg: ", e$message)
+        NULL
+      }
+    )
 
-    pvar <- ggplot(df_max, aes(x = groups_label, y = wall_sec_plot, fill = variant)) +
-      geom_col(position = position_dodge2(width = 0.9, preserve = "single")) +
-      facet_wrap(~ test, scales = "free_y", nrow = 1) +
-      scale_y_continuous(labels = scales::label_number(accuracy = 0.01, big.mark = ",", decimal.mark = ".")) +
-      labs(x = "groups", y = "Wall time (s)", fill = "Variant", title = paste(basename(arch_dir), "- variants at max rows")) +
-      theme_bw(base_size = 14) +
-      theme(
-        legend.position = "top",
-        axis.text.x = element_text(angle = 45, hjust = 1, size = 12),
-        axis.text.y = element_text(size = 12),
-        axis.title = element_text(size = 14),
-        strip.text = element_text(size = 13),
-        plot.title = element_text(size = 16, hjust = 0.5, face = "bold")
+    if (!is.null(df_sum)) {
+      df_sum <- normalize_df(df_sum)
+
+      raw_time_col_sum <- if ("wall_sec" %in% names(df_sum)) "wall_sec" else "time_sec"
+      df_sum$wall_sec_raw   <- suppressWarnings(as.numeric(df_sum[[raw_time_col_sum]]))
+      df_sum$wall_sec_clean <- df_sum$wall_sec_raw
+      df_sum$wall_sec_clean[!is.na(df_sum$wall_sec_clean) & df_sum$wall_sec_clean == -1] <- NA_real_
+
+      if ("wall_times" %in% names(df_sum)) {
+        first_from_times <- function(s) {
+          if (is.na(s)) return(NA_real_)
+          toks <- str_extract_all(as.character(s), "-?\\d+\\.?\\d*")[[1]]
+          if (length(toks) == 0) NA_real_ else as.numeric(toks[1])
+        }
+
+        wt_first <- vapply(df_sum$wall_times, first_from_times, NA_real_)
+        idx <- which(is.na(df_sum$wall_sec_clean) | df_sum$wall_sec_clean == 0)
+        df_sum$wall_sec_clean[idx] <- wt_first[idx]
+      }
+
+      df_sum$wall_sec_plot <- as.numeric(df_sum$wall_sec_clean)
+
+      df_sum$groups_label <- vapply(
+        df_sum$groups,
+        function(x) {
+          n <- suppressWarnings(as.numeric(as.character(x)))
+          if (is.na(n)) return(as.character(x))
+          if (n >= 1e6) return(paste0(n / 1e6, "M"))
+          if (n >= 1e3) return(formatC(n, format = "d", big.mark = ","))
+          as.character(n)
+        },
+        FUN.VALUE = ""
       )
-    outp <- file.path(arch_dir, "count_variants_maxrows.png")
-    ggsave(outp, pvar, width = 14, height = 4, dpi = 300)
-    message("  wrote ", outp)
+
+      df_sum$rows_m_num <- suppressWarnings(as.numeric(as.character(df_sum$rows_m)))
+      df_sum$rows_m_label <- vapply(
+        df_sum$rows_m_num,
+        function(r) {
+          if (is.na(r)) NA_character_
+          else if (r %% 1000 == 0 && r >= 1000) paste0(r / 1000, "B rows")
+          else paste0(r, "M rows")
+        },
+        FUN.VALUE = ""
+      )
+
+      df_sum$variant <- as.factor(ifelse(is.na(df_sum$variant), "unknown", df_sum$variant))
+
+      # focus on rows with valid time
+      df_sum_valid <- df_sum %>% filter(!is.na(wall_sec_plot))
+
+      if (nrow(df_sum_valid) == 0) {
+        message("  no valid rows in sum_avg file")
+      } else {
+        # find all combinations of (test, aggregate, dtype)
+        combos <- df_sum_valid %>% distinct(test, aggregate, dtype)
+        sanitize <- function(x) gsub("[^A-Za-z0-9_-]", "_", x)
+
+        for (i in seq_len(nrow(combos))) {
+          tname <- combos$test[i]
+          aname <- combos$aggregate[i]
+          dname <- combos$dtype[i]
+
+          subset_rows <- df_sum_valid %>% filter(test == tname & aggregate == aname & dtype == dname)
+          if (nrow(subset_rows) == 0) next
+
+          # aggregate mean wall time per (groups_label, rows_m_label, variant)
+          agg_combo <- subset_rows %>%
+            group_by(groups_label, rows_m_label, variant) %>%
+            summarize(mean_sec = mean(wall_sec_plot, na.rm = TRUE), .groups = "drop")
+
+          if (nrow(agg_combo) == 0) {
+            message("  no aggregated data for combo: ", tname, ",", aname, ",", dname)
+            next
+          }
+
+          # compute baseline per (groups_label, rows_m_label)
+          baseline_combo <- agg_combo %>%
+            group_by(groups_label, rows_m_label) %>%
+            do({
+              dfg <- .
+              std <- dfg %>% filter(variant == "standard")
+              if (nrow(std) >= 1 && !is.na(std$mean_sec[1]) && std$mean_sec[1] > 0) {
+                data.frame(baseline_mean = std$mean_sec[1])
+              } else {
+                minv <- dfg %>% filter(!is.na(mean_sec)) %>% arrange(mean_sec) %>% slice(1)
+                if (nrow(minv) == 1 && !is.na(minv$mean_sec) && minv$mean_sec > 0) {
+                  data.frame(baseline_mean = minv$mean_sec)
+                } else {
+                  data.frame(baseline_mean = NA_real_)
+                }
+              }
+            }) %>% ungroup()
+
+          agg_bs_combo <- agg_combo %>% left_join(baseline_combo, by = c("groups_label", "rows_m_label")) %>%
+            mutate(slowdown = ifelse(is.na(baseline_mean) | baseline_mean == 0, NA_real_, mean_sec / baseline_mean))
+
+          # prepare absolute and slowdown plots (variants shown as different fills)
+          p_abs <- ggplot(agg_combo, aes(x = groups_label, y = mean_sec, fill = variant)) +
+            geom_col(position = position_dodge2(width = 0.9)) +
+            facet_wrap(~ rows_m_label, nrow = 1, scales = "free_x") +
+            labs(x = "groups", y = "Mean wall time (s)", fill = "Variant",
+                 title = paste(basename(arch_dir), paste(tname, aname, dname, sep = " - ")) ) +
+            theme_bw(base_size = 14) +
+            theme(legend.position = "top", axis.text.x = element_text(angle = 45, hjust = 1), plot.title = element_text(face = "bold", hjust = 0.5))
+
+          plot_slow_df <- agg_bs_combo %>% filter(!is.na(slowdown) & is.finite(slowdown))
+          if (nrow(plot_slow_df) > 0) {
+            p_slow <- ggplot(plot_slow_df, aes(x = groups_label, y = slowdown, fill = variant)) +
+              geom_col(position = position_dodge2(width = 0.9)) +
+              facet_wrap(~ rows_m_label, nrow = 1, scales = "free_x") +
+              labs(x = "groups", y = "Slowdown (x)", fill = "Variant",
+                   title = paste(basename(arch_dir), paste(tname, aname, dname, "(slowdown)", sep = " - ")) ) +
+              theme_bw(base_size = 14) +
+              theme(legend.position = "top", axis.text.x = element_text(angle = 45, hjust = 1), plot.title = element_text(face = "bold", hjust = 0.5)) +
+              scale_y_continuous(labels = scales::number_format(accuracy = 0.01))
+          } else {
+            # produce an empty placeholder plot when slowdown cannot be computed
+            p_slow <- ggplot() + theme_void() + labs(title = "No valid slowdown data")
+          }
+
+          # save two separate PNGs: absolute mean and slowdown
+          fname_abs <- paste0("sumavg_", sanitize(tname), "_", sanitize(aname), "_", sanitize(dname), "_abs.png")
+          out_abs <- file.path(arch_dir, fname_abs)
+          ggsave(out_abs, p_abs, width = 12, height = 6, dpi = 300)
+          message("  wrote: ", out_abs)
+
+          fname_slow <- paste0("sumavg_", sanitize(tname), "_", sanitize(aname), "_", sanitize(dname), "_slowdown.png")
+          out_slow <- file.path(arch_dir, fname_slow)
+          # if p_slow is a placeholder empty plot it's still safe to save
+          ggsave(out_slow, p_slow, width = 12, height = 6, dpi = 300)
+          message("  wrote: ", out_slow)
+        }
+      }
+    }
+  } else {
+    message("  no sum/avg file found for arch: ", arch_dir)
   }
 }
 
-# Run for every arch dir
+# ------------------------------------------------------------------------------
+# Run
+# ------------------------------------------------------------------------------
+
 for (d in arch_dirs) {
-  tryCatch(process_arch(d), error = function(e) message("Error processing ", d, ": ", e$message))
+  tryCatch(process_arch(d),
+           error = function(e) message("Error in ", d, ": ", e$message))
 }
 
 message("Done")
