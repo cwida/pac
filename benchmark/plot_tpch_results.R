@@ -103,7 +103,12 @@ summary_df$query <- factor(summary_df$query, levels = query_order)
 summary_df <- summary_df %>% mutate(mean_time_plot = ifelse(mean_time <= 0 | is.na(mean_time), 1e-3, mean_time))
 
 # Choose palette for common modes; if unknown modes are present they'll get default ggplot colors
-method_colors <- c("baseline" = "#1f77b4", "SIMD PAC" = "#ff7f0e", "naive PAC" = "#2ca02c")
+method_colors <- c(
+  "baseline" = "#1f77b4",
+  "SIMD PAC" = "#ff7f0e",
+  "naive PAC" = "#2ca02c",
+  "simple hash PAC" = "#9467bd"
+)
 
 # Build a plotting function so we can save two variants (with/without Q01)
 build_plot <- function(df, out_file, plot_title, width = 18, height = 8, base_size = 40, base_family = "sans") {

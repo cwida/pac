@@ -200,10 +200,11 @@ static bool InvokePlotScript(const string &abs_actual_out, const string &out_dir
     return false;
 }
 
-int RunTPCHBenchmark(const string &db_path, const string &queries_dir, double sf, const string &out_csv, bool run_naive) {
+int RunTPCHBenchmark(const string &db_path, const string &queries_dir, double sf, const string &out_csv, bool run_naive, bool run_simple_hash) {
     try {
-        // Log the run_naive flag for now (no behavior change yet)
         Log(string("run_naive flag: ") + (run_naive ? string("true") : string("false")));
+    	Log(string("run_simple_hash flag: ") + (run_simple_hash ? string("true") : string("false")));
+
         // Open (file-backed) DuckDB database
         // Decide whether the caller explicitly provided a DB path (not the default) so we can
         // decide whether to warn and/or re-create tables in an existing DB.
@@ -286,8 +287,14 @@ int RunTPCHBenchmark(const string &db_path, const string &queries_dir, double sf
     	// is treated as the root (default is "benchmark").
     	string bitslice_dir = queries_dir + string("/tpch_pac_queries");
     	string naive_dir = queries_dir + string("/tpch_pac_naive_queries");
+    	string simple_hash_dir = queries_dir + string("/tpch_pac_simple_hash_queries");
 
         for (int q = 1; q <= 22; ++q) {
+            // Skip Q2, Q10, Q11, Q16, Q18 for all variants
+            if (q == 2 || q == 10 || q == 11 || q == 16 || q == 18) {
+                Log("Skipping query Q" + std::to_string(q) + " as requested.");
+                continue;
+            }
             Log("=== Query " + std::to_string(q) + " ===");
             // Cold run (do not time) - pragma tpch(q);
             {
@@ -352,10 +359,24 @@ int RunTPCHBenchmark(const string &db_path, const string &queries_dir, double sf
                 }
             }
 
-        	// Run PAC variants: baseline + bitslice always; naive additionally when requested
+            // simple hash query file (optional depending on run_simple_hash)
+            string pac_sql_simple_hash;
+            if (run_simple_hash) {
+                string simple_hash_qfile = FindQueryFile(simple_hash_dir, q);
+                if (!FileExists(simple_hash_qfile)) {
+                    throw std::runtime_error("Simple hash PAC query file not found for query " + std::to_string(q) + ": " + simple_hash_qfile);
+                }
+                pac_sql_simple_hash = ReadFileToString(simple_hash_qfile);
+                if (pac_sql_simple_hash.empty()) {
+                    throw std::runtime_error("Simple hash PAC query file " + simple_hash_qfile + " is empty or unreadable");
+                }
+            }
+
+        	// Run PAC variants: baseline + bitslice always; naive and simple hash additionally when requested
         	vector<pair<string,string>> pac_variants;
         	pac_variants.emplace_back("bitslice", pac_sql_bits);
         	if (run_naive) { pac_variants.emplace_back("naive", pac_sql_naive); }
+        	if (run_simple_hash) { pac_variants.emplace_back("simple_hash", pac_sql_simple_hash); }
 
             for (auto &pv : pac_variants) {
                 const string &variant = pv.first;
@@ -365,6 +386,8 @@ int RunTPCHBenchmark(const string &db_path, const string &queries_dir, double sf
                     mode_str = "SIMD PAC"; // bitslice implementation
                 } else if (variant == "naive") {
                     mode_str = "naive PAC";
+                } else if (variant == "simple_hash") {
+                    mode_str = "simple hash PAC";
                 } else {
                     mode_str = variant;
                 }
@@ -423,13 +446,14 @@ int RunTPCHBenchmark(const string &db_path, const string &queries_dir, double sf
 
 // Add a small helper for printing usage (placed outside of namespace to avoid analyzer warnings)
 static void PrintUsageMain() {
-     std::cout << "Usage: pac_tpch_benchmark [sf] [db_path] [queries_dir] [out_csv] [--run-naive]\n"
+     std::cout << "Usage: pac_tpch_benchmark [sf] [db_path] [queries_dir] [out_csv] [--run-naive] [--run-simple-hash]\n"
                << "  sf: TPCH scale factor (int, default 10)\n"
                << "  db_path: DuckDB database file (default 'tpch.db')\n"
                << "  queries_dir: root directory containing PAC SQL variants (default 'benchmark').\n"
-               << "               subdirectories expected: 'tpch_pac_queries' (bitslice), 'tpch_pac_naive_queries' (naive)\n"
+               << "               subdirectories expected: 'tpch_pac_queries' (bitslice), 'tpch_pac_naive_queries' (naive), 'tpch_pac_simple_hash_queries' (simple hash)\n"
                << "  out_csv: optional output CSV path (auto-named if omitted)\n"
-               << "  --run-naive: optional flag to instruct the benchmark to run a naive PAC variant as well\n";
+               << "  --run-naive: optional flag to instruct the benchmark to run a naive PAC variant as well\n"
+               << "  --run-simple-hash: optional flag to instruct the benchmark to run a simple hash PAC variant as well\n";
 }
 
 // Add a small main so this file builds to an executable
@@ -442,14 +466,15 @@ int main(int argc, char **argv) {
             return 0;
         }
     }
-    if (argc > 6) {
+    if (argc > 7) {
         std::cout << "Error: too many arguments provided." << '\n';
         PrintUsageMain();
         return 1;
     }
 
-    // Preprocess argv to detect the optional --run-naive flag and remove it from positional parsing
+    // Preprocess argv to detect the optional --run-naive and --run-simple-hash flags and remove them from positional parsing
     bool run_naive = false;
+    bool run_simple_hash = false;
     std::vector<char*> filtered_argv;
     filtered_argv.reserve(argc);
     filtered_argv.push_back(argv[0]);
@@ -459,34 +484,23 @@ int main(int argc, char **argv) {
             run_naive = true;
             continue;
         }
+        if (a == "--run-simple-hash") {
+            run_simple_hash = true;
+            continue;
+        }
         filtered_argv.push_back(argv[i]);
     }
-    int fargc = (int)filtered_argv.size();
-    char **fargv = filtered_argv.data();
+    int filtered_argc = static_cast<int>(filtered_argv.size());
 
-    int argi = 1;
-    double sf = 10.0;
-    std::string db = "tpch.db";
-    // default queries_dir is the benchmark root; the caller may override to a different root
+    // Parse positional arguments as before
+    double sf = 10;
+    std::string db_path = "tpch.db";
     std::string queries_dir = "benchmark";
-    std::string out_csv = ""; // empty means auto-name
+    std::string out_csv;
+    if (filtered_argc > 1) sf = std::stod(filtered_argv[1]);
+    if (filtered_argc > 2) db_path = filtered_argv[2];
+    if (filtered_argc > 3) queries_dir = filtered_argv[3];
+    if (filtered_argc > 4) out_csv = filtered_argv[4];
 
-    if (fargc > argi) {
-        std::istringstream iss(fargv[argi]);
-        double val;
-        if (iss >> val) {
-            sf = val;
-            argi++;
-        }
-    }
-    if (fargc > argi) {
-        db = fargv[argi++];
-    }
-    if (fargc > argi) {
-        queries_dir = fargv[argi++];
-    }
-    if (fargc > argi) {
-        out_csv = fargv[argi++];
-    }
-    return duckdb::RunTPCHBenchmark(db, queries_dir, sf, out_csv, run_naive);
+    return duckdb::RunTPCHBenchmark(db_path, queries_dir, sf, out_csv, run_naive, run_simple_hash);
 }
