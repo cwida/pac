@@ -53,8 +53,11 @@ void PacCountUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, data_ptr_t
 	for (idx_t i = 0; i < count; i++) {
 		auto idx = idata.sel->get_index(i);
 		if (idata.validity.RowIsValid(idx)) {
-			PacCountUpdateOne(agg, input_data[idx] ^ query_hash,
-			                  aggr.allocator); // ungrouped: direct update (no buffering)
+#if defined(PAC_NOBUFFERING) || defined(PAC_NOCASCADING)
+			PacCountUpdateOne(agg, input_data[idx] ^ query_hash, aggr.allocator);
+#else
+			PacCountBufferOrUpdateOne(agg, input_data[idx] ^ query_hash, aggr.allocator);
+#endif
 		}
 	}
 }
@@ -70,8 +73,11 @@ void PacCountColumnUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, data
 		auto h_idx = hash_data.sel->get_index(i);
 		auto c_idx = col_data.sel->get_index(i);
 		if (hash_data.validity.RowIsValid(h_idx) && col_data.validity.RowIsValid(c_idx)) {
-			PacCountUpdateOne(agg, hashes[h_idx] ^ query_hash,
-			                  aggr.allocator); // ungrouped: direct update (no buffering)
+#if defined(PAC_NOBUFFERING) || defined(PAC_NOCASCADING)
+			PacCountUpdateOne(agg, hashes[h_idx] ^ query_hash, aggr.allocator);
+#else
+			PacCountBufferOrUpdateOne(agg, hashes[h_idx] ^ query_hash, aggr.allocator);
+#endif
 		}
 	}
 }
