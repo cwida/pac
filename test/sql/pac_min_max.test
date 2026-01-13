@@ -201,12 +201,12 @@ GROUP BY grp;
 query I
 SELECT pac_max(hash('single'), 42::integer, 0.0);
 ----
-42
+NULL
 
 query I
 SELECT pac_min(hash('single'), 42::integer, 0.0);
 ----
-42
+NULL
 
 # Test with large values (BIGINT)
 query I
