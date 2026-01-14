@@ -9,6 +9,7 @@
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/planner/operator/logical_filter.hpp"
 #include "duckdb/planner/operator/logical_projection.hpp"
+#include "duckdb/planner/operator/logical_order.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 
 #include <algorithm>
@@ -109,45 +110,140 @@ static bool ContainsAggregation(const LogicalOperator &op) {
 	return false;
 }
 
-// Helper: Check if any GROUP BY columns in aggregates come from PU tables
-static void CheckGroupByColumnsNotFromPU(const LogicalOperator &op, LogicalOperator &root,
-                                         const vector<string> &pu_tables) {
-	if (op.type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+// Forward declaration
+static void TraceBindingToPUTable(LogicalOperator &op, const ColumnBinding &binding,
+                                   const vector<string> &pu_tables, LogicalOperator &root);
+
+// Helper: Find the operator in the plan that produces a given table_index
+static LogicalOperator* FindOperatorByTableIndex(LogicalOperator &op, idx_t table_index) {
+	// Check if this operator produces the table_index
+	if (op.type == LogicalOperatorType::LOGICAL_GET) {
+		auto &get = op.Cast<LogicalGet>();
+		if (get.table_index == table_index) {
+			return &op;
+		}
+	} else if (op.type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
 		auto &aggr = op.Cast<LogicalAggregate>();
+		if (aggr.group_index == table_index || aggr.aggregate_index == table_index) {
+			return &op;
+		}
+	} else if (op.type == LogicalOperatorType::LOGICAL_PROJECTION) {
+		auto &proj = op.Cast<LogicalProjection>();
+		if (proj.table_index == table_index) {
+			return &op;
+		}
+	}
 
-		// Check each grouped expression
-		for (size_t group_idx = 0; group_idx < aggr.groups.size(); group_idx++) {
-			auto &group_expr = aggr.groups[group_idx];
-			if (!group_expr) {
-				continue;
+	// Recurse into children
+	for (auto &child : op.children) {
+		auto *result = FindOperatorByTableIndex(*child, table_index);
+		if (result) {
+			return result;
+		}
+	}
+	return nullptr;
+}
+
+// Trace a binding down through the plan to check if it ultimately comes from a PU table.
+// If the binding comes from an aggregate expression, it's safe (the value has been aggregated).
+// If the binding comes from a GROUP BY column, we need to trace that column's source further.
+// If we reach a PU table column directly (or via join key equivalence), we reject.
+static void TraceBindingToPUTable(LogicalOperator &op, const ColumnBinding &binding,
+                                   const vector<string> &pu_tables, LogicalOperator &root) {
+	// Find the operator that produces this binding's table_index
+	auto *source_op = FindOperatorByTableIndex(root, binding.table_index);
+	if (!source_op) {
+		return; // Can't find source, assume safe
+	}
+
+	if (source_op->type == LogicalOperatorType::LOGICAL_GET) {
+		// This binding comes directly from a table scan
+		// Use ColumnBelongsToTable which handles join key equivalences
+		for (auto &pu_table : pu_tables) {
+			if (ColumnBelongsToTable(root, pu_table, binding)) {
+				throw InvalidInputException(
+				    "PAC rewrite: columns from privacy unit tables can only be accessed inside aggregate "
+				    "functions (e.g., SUM, COUNT, AVG, MIN, MAX)");
 			}
+		}
+	} else if (source_op->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+		auto &aggr = source_op->Cast<LogicalAggregate>();
 
-			// Use ExpressionIterator to find all BoundColumnRefExpression nodes in the group expression
-			ExpressionIterator::EnumerateExpression(const_cast<unique_ptr<Expression> &>(group_expr), [&](Expression
-			                                                                                                  &expr) {
+		// Check if this binding is from the aggregate's group output or aggregate output
+		if (binding.table_index == aggr.group_index) {
+			// This is a grouped column - trace it further down
+			idx_t group_idx = binding.column_index;
+			if (group_idx < aggr.groups.size() && aggr.groups[group_idx]) {
+				// Find column refs in this group expression and trace them
+				ExpressionIterator::EnumerateExpression(
+				    const_cast<unique_ptr<Expression> &>(aggr.groups[group_idx]), [&](Expression &expr) {
+					    if (expr.type == ExpressionType::BOUND_COLUMN_REF) {
+						    auto &col_ref = expr.Cast<BoundColumnRefExpression>();
+						    TraceBindingToPUTable(*source_op, col_ref.binding, pu_tables, root);
+					    }
+				    });
+			}
+		}
+		// If binding.table_index == aggr.aggregate_index, it's an aggregate result - safe, don't trace further
+	} else if (source_op->type == LogicalOperatorType::LOGICAL_PROJECTION) {
+		auto &proj = source_op->Cast<LogicalProjection>();
+		// Trace the expression that produces this column
+		if (binding.column_index < proj.expressions.size() && proj.expressions[binding.column_index]) {
+			ExpressionIterator::EnumerateExpression(proj.expressions[binding.column_index], [&](Expression &expr) {
 				if (expr.type == ExpressionType::BOUND_COLUMN_REF) {
 					auto &col_ref = expr.Cast<BoundColumnRefExpression>();
-
-					// The GROUP BY expression references a column binding
-					// We need to trace this binding back to its source table
-					// The binding might reference the aggregate's child or any ancestor operator
-
-					// Directly trace the binding in the group expression back to its source
-					for (auto &pu_table : pu_tables) {
-						if (ColumnBelongsToTable(root, pu_table, col_ref.binding)) {
-							throw InvalidInputException(
-							    "PAC rewrite: columns from privacy unit tables can only be accessed inside aggregate "
-							    "functions (e.g., SUM, COUNT, AVG, MIN, MAX)");
-						}
-					}
+					TraceBindingToPUTable(*source_op, col_ref.binding, pu_tables, root);
 				}
 			});
 		}
 	}
+}
 
-	// Recursively check children
-	for (auto &child : op.children) {
-		CheckGroupByColumnsNotFromPU(*child, root, pu_tables);
+// Check that no PU table columns are exposed in the final query output.
+// Start from the root operator's output and trace each binding down.
+// plan_root is the full plan root (used for tracing bindings)
+// current_op is the operator we're currently checking
+static void CheckOutputColumnsNotFromPU(LogicalOperator &current_op, LogicalOperator &plan_root,
+                                         const vector<string> &pu_tables) {
+	auto trace_expressions = [&](vector<unique_ptr<Expression>> &expressions) {
+		for (auto &expr : expressions) {
+			if (!expr) {
+				continue;
+			}
+			ExpressionIterator::EnumerateExpression(expr, [&](Expression &e) {
+				if (e.type == ExpressionType::BOUND_COLUMN_REF) {
+					auto &col_ref = e.Cast<BoundColumnRefExpression>();
+					TraceBindingToPUTable(plan_root, col_ref.binding, pu_tables, plan_root);
+				}
+			});
+		}
+	};
+
+	if (current_op.type == LogicalOperatorType::LOGICAL_PROJECTION) {
+		auto &proj = current_op.Cast<LogicalProjection>();
+		trace_expressions(proj.expressions);
+	} else if (current_op.type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+		auto &aggr = current_op.Cast<LogicalAggregate>();
+		// For root aggregate: check groups (aggregate expressions are safe by definition)
+		trace_expressions(aggr.groups);
+	} else if (current_op.type == LogicalOperatorType::LOGICAL_GET) {
+		// Direct table scan as root - check if it's a PU table
+		auto &get = current_op.Cast<LogicalGet>();
+		auto table_entry = get.GetTable();
+		if (table_entry) {
+			for (auto &pu_table : pu_tables) {
+				if (table_entry->name == pu_table) {
+					throw InvalidInputException(
+					    "PAC rewrite: columns from privacy unit tables can only be accessed inside aggregate "
+					    "functions (e.g., SUM, COUNT, AVG, MIN, MAX)");
+				}
+			}
+		}
+	} else if (current_op.type == LogicalOperatorType::LOGICAL_ORDER_BY) {
+		// For ORDER BY, check the child operator's output
+		for (auto &child : current_op.children) {
+			CheckOutputColumnsNotFromPU(*child, plan_root, pu_tables);
+		}
 	}
 }
 
@@ -438,7 +534,7 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 		if (!result.scanned_pu_tables.empty()) {
 			ReplanGuard guard(optimizer_info);
 			ReplanWithoutOptimizers(context, context.GetCurrentQuery(), plan);
-			CheckGroupByColumnsNotFromPU(*plan, *plan, result.scanned_pu_tables);
+			CheckOutputColumnsNotFromPU(*plan, *plan, result.scanned_pu_tables);
 		}
 	}
 
