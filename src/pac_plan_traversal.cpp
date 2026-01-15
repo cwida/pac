@@ -149,4 +149,26 @@ unique_ptr<LogicalOperator> *FindNodeRefByTable(unique_ptr<LogicalOperator> *roo
 	return nullptr;
 }
 
+// Check if an operator has any LogicalGet nodes (base table scans) in its subtree.
+// Returns false if the subtree only contains CTE scans or no table scans at all.
+bool HasBaseTableInSubtree(LogicalOperator *op) {
+	if (!op) {
+		return false;
+	}
+
+	// Check if this is a base table scan
+	if (op->type == LogicalOperatorType::LOGICAL_GET) {
+		return true;
+	}
+
+	// Recursively check children
+	for (auto &child : op->children) {
+		if (HasBaseTableInSubtree(child.get())) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
 } // namespace duckdb

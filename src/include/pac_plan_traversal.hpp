@@ -37,6 +37,10 @@ LogicalProjection *FindParentProjection(unique_ptr<LogicalOperator> &root, Logic
 unique_ptr<LogicalOperator> *FindNodeRefByTable(unique_ptr<LogicalOperator> *root, const string &table_name,
                                                 LogicalOperator **parent_out = nullptr, idx_t *child_idx_out = nullptr);
 
+// Check if an operator has any LogicalGet nodes (base table scans) in its subtree.
+// Returns false if the subtree only contains CTE scans or no table scans at all.
+bool HasBaseTableInSubtree(LogicalOperator *op);
+
 } // namespace duckdb
 
 #endif // PAC_PLAN_TRAVERSAL_HPP

@@ -458,13 +458,25 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 		throw InternalException("PAC Compiler: no aggregate nodes found in plan");
 	}
 
-	// For nested aggregates, we only want to modify the bottommost aggregate
-	// (the one closest to the base table scan). The outer aggregates operate on
-	// already-aggregated data and should be left as-is.
-	// Since FindAllAggregates does a pre-order traversal, the last aggregate in the
-	// vector is the bottommost one.
-	auto *bottommost_agg = all_aggregates.back();
-	ModifyAggregatesWithPacFunctions(input, bottommost_agg, combined_hash_expr);
+	// For nested aggregates, we only want to modify aggregates that have base table scans
+	// in their subtree. Aggregates that only scan CTEs or already-aggregated data should
+	// be left as-is (they operate on already-protected data).
+	// Example: In Q15, the aggregate computing max(total_revenue) from the CTE should NOT
+	// be modified, only the aggregate in the CTE that computes pac_sum(...) should be.
+	LogicalAggregate *target_agg = nullptr;
+	for (auto *agg : all_aggregates) {
+		if (HasBaseTableInSubtree(agg)) {
+			target_agg = agg;
+			// Keep searching for the deepest aggregate with base tables
+			// (we want the one closest to the base table scans)
+		}
+	}
+
+	if (!target_agg) {
+		throw InternalException("PAC Compiler: no aggregate with base tables found in plan");
+	}
+
+	ModifyAggregatesWithPacFunctions(input, target_agg, combined_hash_expr);
 }
 
 void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,

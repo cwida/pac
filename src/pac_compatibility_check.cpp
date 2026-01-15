@@ -10,6 +10,7 @@
 #include "duckdb/planner/operator/logical_filter.hpp"
 #include "duckdb/planner/operator/logical_projection.hpp"
 #include "duckdb/planner/operator/logical_order.hpp"
+#include "duckdb/planner/operator/logical_materialized_cte.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 
 #include <algorithm>
@@ -256,6 +257,22 @@ void CountScans(const LogicalOperator &op, std::unordered_map<string, idx_t> &co
 			counts[table_entry->name]++;
 		}
 	}
+	// Handle CTEs: traverse into CTE definitions to find base table scans
+	if (op.type == LogicalOperatorType::LOGICAL_MATERIALIZED_CTE) {
+		auto &cte = op.Cast<LogicalMaterializedCTE>();
+		// CTE has two children:
+		// children[0] - the CTE definition (contains the table scans)
+		// children[1] - the main query that uses the CTE
+		// We need to traverse into the definition to find base table scans
+		if (!cte.children.empty() && cte.children[0]) {
+			CountScans(*cte.children[0], counts);
+		}
+		// Also traverse the main query
+		if (cte.children.size() > 1 && cte.children[1]) {
+			CountScans(*cte.children[1], counts);
+		}
+		return; // We've handled both children manually, don't use the generic loop
+	}
 	for (auto &child : op.children) {
 		CountScans(*child, counts);
 	}
@@ -279,24 +296,6 @@ static bool ContainsSelfJoinOfPU(const LogicalOperator &op, const vector<string>
 		// Only check PU tables
 		if (pu_set.find(kv.first) != pu_set.end() && kv.second > 1) {
 			return true;
-		}
-	}
-	return false;
-}
-
-// Helper: check if any expression in a vector contains subqueries
-static bool ExpressionsContainSubquery(const vector<unique_ptr<Expression>> &expressions) {
-	for (auto &expr : expressions) {
-		if (expr) {
-			bool has_subquery = false;
-			ExpressionIterator::EnumerateExpression(const_cast<unique_ptr<Expression> &>(expr), [&](Expression &e) {
-				if (e.GetExpressionClass() == ExpressionClass::BOUND_SUBQUERY) {
-					has_subquery = true;
-				}
-			});
-			if (has_subquery) {
-				return true;
-			}
 		}
 	}
 	return false;
