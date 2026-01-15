@@ -204,6 +204,116 @@ ORDER BY
 NULL	7
 1	1
 
+# Test 3: TPC-H Q8-style query with CASE expression in outer aggregate
+# Tests: Nested query with subquery projection, CASE expression, division of aggregates
+# This query computes market share for a specific nation
+query II
+SELECT
+    o_year,
+    SUM(CASE WHEN nation = 'FRANCE' THEN volume ELSE 0 END) / SUM(volume) AS mkt_share
+FROM (
+    SELECT
+        CAST(date_part('year', o_orderdate) AS INTEGER) AS o_year,
+        l_extendedprice * (1 - l_discount) AS volume,
+        n2.n_name AS nation
+    FROM
+        supplier,
+        lineitem,
+        orders,
+        customer,
+        nation n1,
+        nation n2
+    WHERE
+        s_suppkey = l_suppkey
+        AND l_orderkey = o_orderkey
+        AND o_custkey = c_custkey
+        AND c_nationkey = n1.n_nationkey
+        AND s_nationkey = n2.n_nationkey
+        AND n1.n_name IN ('FRANCE', 'GERMANY')
+        AND o_orderdate BETWEEN CAST('1995-01-01' AS DATE) AND CAST('1996-12-31' AS DATE)
+) AS all_nations
+GROUP BY
+    o_year
+ORDER BY
+    o_year;
+----
+1995	0.846154
+1996	0.555556
+
+
+# Test 8: Q8 variation with different CASE condition
+query II
+SELECT
+    o_year,
+    SUM(CASE WHEN nation = 'GERMANY' THEN volume ELSE 0 END) AS germany_volume
+FROM (
+    SELECT
+        CAST(date_part('year', o_orderdate) AS INTEGER) AS o_year,
+        l_extendedprice * (1 - l_discount) AS volume,
+        n2.n_name AS nation
+    FROM
+        supplier,
+        lineitem,
+        orders,
+        customer,
+        nation n1,
+        nation n2
+    WHERE
+        s_suppkey = l_suppkey
+        AND l_orderkey = o_orderkey
+        AND o_custkey = c_custkey
+        AND c_nationkey = n1.n_nationkey
+        AND s_nationkey = n2.n_nationkey
+        AND o_orderdate >= CAST('1995-01-01' AS DATE)
+        AND o_orderdate <= CAST('1996-12-31' AS DATE)
+) AS all_nations
+GROUP BY
+    o_year
+ORDER BY
+    o_year;
+----
+1995	2000.000000
+1996	8000.000000
+
+# Test 9: TPC-H Q9-style query with complex arithmetic in subquery
+# Tests: Subquery with multiple joins, complex arithmetic expression (subtraction of products), GROUP BY multiple columns
+# This query computes profit by nation and year
+query III
+SELECT
+    nation,
+    o_year,
+    SUM(amount) AS sum_profit
+FROM (
+    SELECT
+        n_name AS nation,
+        CAST(date_part('year', o_orderdate) AS INTEGER) AS o_year,
+        l_extendedprice * (1 - l_discount) - l_quantity * 100 AS amount
+    FROM
+        supplier,
+        lineitem,
+        orders,
+        customer,
+        nation
+    WHERE
+        s_suppkey = l_suppkey
+        AND o_orderkey = l_orderkey
+        AND o_custkey = c_custkey
+        AND s_nationkey = n_nationkey
+        AND o_orderdate BETWEEN CAST('1995-01-01' AS DATE) AND CAST('1996-12-31' AS DATE)
+) AS profit
+GROUP BY
+    nation,
+    o_year
+ORDER BY
+    nation,
+    o_year DESC;
+----
+FRANCE	1996	2550.00
+FRANCE	1995	3705.00
+GERMANY	1996	5175.00
+GERMANY	1995	4350.00
+USA	1996	2090.00
+
 # Clean up
 statement ok
 DROP TABLE lineitem;
@@ -219,4 +329,3 @@ DROP TABLE customer;
 
 statement ok
 DROP TABLE nation;
-
