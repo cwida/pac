@@ -29,7 +29,8 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 // fk_path: ordered vector of table names from start -> ... -> privacy_unit (inclusive)
 void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtensionInput &input,
                          unique_ptr<LogicalOperator> &plan, const vector<string> &gets_missing,
-                         const vector<string> &gets_present, const vector<string> &privacy_units);
+                         const vector<string> &gets_present, const vector<string> &fk_path,
+                         const vector<string> &privacy_units);
 
 // Bitslice-style PAC compiler entrypoint
 void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExtensionInput &input,

@@ -151,6 +151,9 @@ unique_ptr<LogicalOperator> *FindNodeRefByTable(unique_ptr<LogicalOperator> *roo
 
 // Check if an operator has any LogicalGet nodes (base table scans) in its subtree.
 // Returns false if the subtree only contains CTE scans or no table scans at all.
+// IMPORTANT: This function stops at aggregates, because aggregates consume base table
+// bindings and produce new output bindings. Base tables behind an aggregate are not
+// directly accessible from operators above the aggregate.
 bool HasBaseTableInSubtree(LogicalOperator *op) {
 	if (!op) {
 		return false;
@@ -161,6 +164,12 @@ bool HasBaseTableInSubtree(LogicalOperator *op) {
 		return true;
 	}
 
+	// Don't traverse through aggregates - they consume base table bindings
+	// and produce new output bindings
+	if (op->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+		return false;
+	}
+
 	// Recursively check children
 	for (auto &child : op->children) {
 		if (HasBaseTableInSubtree(child.get())) {
@@ -169,6 +178,103 @@ bool HasBaseTableInSubtree(LogicalOperator *op) {
 	}
 
 	return false;
+}
+
+// Check if an operator has a specific table (by name) in its subtree.
+// Returns true if there's a LogicalGet for the given table name in the subtree.
+bool HasTableInSubtree(LogicalOperator *op, const string &table_name) {
+	if (!op) {
+		return false;
+	}
+
+	// Check if this is a LogicalGet for the target table
+	if (op->type == LogicalOperatorType::LOGICAL_GET) {
+		auto &get = op->Cast<LogicalGet>();
+		auto tblptr = get.GetTable();
+		if (tblptr && tblptr->name == table_name) {
+			return true;
+		}
+	}
+
+	// Recursively check children
+	for (auto &child : op->children) {
+		if (HasTableInSubtree(child.get(), table_name)) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+// Find all LogicalGet nodes for a specific table name in the plan tree.
+void FindAllNodesByTable(unique_ptr<LogicalOperator> *root, const string &table_name,
+                         vector<unique_ptr<LogicalOperator> *> &results) {
+	if (!root || !root->get()) {
+		return;
+	}
+
+	auto &cur = *root;
+
+	// Check if this is a LogicalGet for the target table
+	if (cur->type == LogicalOperatorType::LOGICAL_GET) {
+		auto &get = cur->Cast<LogicalGet>();
+		auto tblptr = get.GetTable();
+		if (tblptr && tblptr->name == table_name) {
+			results.push_back(root);
+		}
+	}
+
+	// Recursively check children
+	for (auto &child : cur->children) {
+		FindAllNodesByTable(&child, table_name, results);
+	}
+}
+
+// Check if an operator has a LogicalGet with a specific table index in its subtree.
+bool HasTableIndexInSubtree(LogicalOperator *op, idx_t table_index) {
+	if (!op) {
+		return false;
+	}
+
+	// Check if this is a LogicalGet with the target table index
+	if (op->type == LogicalOperatorType::LOGICAL_GET) {
+		auto &get = op->Cast<LogicalGet>();
+		if (get.table_index == table_index) {
+			return true;
+		}
+	}
+
+	// Recursively check children
+	for (auto &child : op->children) {
+		if (HasTableIndexInSubtree(child.get(), table_index)) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+// Find all LogicalGet nodes with a specific table index in the plan tree.
+void FindAllNodesByTableIndex(unique_ptr<LogicalOperator> *root, idx_t table_index,
+                              vector<unique_ptr<LogicalOperator> *> &results) {
+	if (!root || !root->get()) {
+		return;
+	}
+
+	auto &cur = *root;
+
+	// Check if this is a LogicalGet with the target table index
+	if (cur->type == LogicalOperatorType::LOGICAL_GET) {
+		auto &get = cur->Cast<LogicalGet>();
+		if (get.table_index == table_index) {
+			results.push_back(root);
+		}
+	}
+
+	// Recursively check children
+	for (auto &child : cur->children) {
+		FindAllNodesByTableIndex(&child, table_index, results);
+	}
 }
 
 } // namespace duckdb

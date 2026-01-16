@@ -117,3 +117,56 @@ ORDER BY
 2-HIGH	4
 3-MEDIUM	NULL
 
+# Test TPC-H Q17-style correlated subquery with aggregates in both outer and inner queries
+# This tests the case where lineitem (FK-linked table) appears in both outer aggregate and inner aggregate
+# Both aggregates should be transformed to PAC functions
+
+# Create part table for Q17-style query
+statement ok
+CREATE TABLE part (
+    p_partkey INTEGER PRIMARY KEY,
+    p_name VARCHAR,
+    p_mfgr VARCHAR,
+    p_brand VARCHAR,
+    p_type VARCHAR,
+    p_size INTEGER,
+    p_container VARCHAR,
+    p_retailprice DECIMAL(15,2),
+    p_comment VARCHAR
+);
+
+statement ok
+INSERT INTO part VALUES
+    (1, 'Part#1', 'Manufacturer#1', 'Brand#23', 'PROMO BURNISHED COPPER', 7, 'MED BOX', 10.00, 'comment1'),
+    (2, 'Part#2', 'Manufacturer#2', 'Brand#13', 'SMALL PLATED BRASS', 1, 'SM CASE', 20.00, 'comment2'),
+    (3, 'Part#3', 'Manufacturer#3', 'Brand#23', 'MEDIUM POLISHED TIN', 15, 'MED BOX', 15.00, 'comment3'),
+    (4, 'Part#4', 'Manufacturer#4', 'Brand#34', 'STANDARD BURNISHED STEEL', 14, 'LG CASE', 25.00, 'comment4'),
+    (5, 'Part#5', 'Manufacturer#5', 'Brand#23', 'ECONOMY ANODIZED STEEL', 40, 'MED BOX', 30.00, 'comment5'),
+    (6, 'Part#6', 'Manufacturer#1', 'Brand#23', 'PROMO BURNISHED TIN', 3, 'MED BOX', 12.00, 'comment6');
+
+# TPC-H Q17-style query: Calculate average yearly revenue for a specific brand/container
+# where quantity is less than 20% of the average quantity for that part
+# This has:
+# - Outer aggregate: SUM(l_extendedprice) on lineitem
+# - Inner aggregate: AVG(l_quantity) on lineitem with correlation on l_partkey
+# Both aggregates operate on FK-linked table, so BOTH get PAC transformation
+query I
+SELECT
+    CAST(sum(l_extendedprice) / 7.0 AS INTEGER) AS avg_yearly
+FROM
+    lineitem,
+    part
+WHERE
+    p_partkey = l_partkey
+    AND p_brand = 'Brand#23'
+    AND p_container = 'MED BOX'
+    AND l_quantity < (
+        SELECT
+            0.2 * avg(l_quantity)
+        FROM
+            lineitem
+        WHERE
+            l_partkey = p_partkey
+    );
+----
+NULL

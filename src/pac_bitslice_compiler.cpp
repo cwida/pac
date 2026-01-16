@@ -10,6 +10,7 @@
 #include "duckdb/planner/operator/logical_aggregate.hpp"
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
+#include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/optimizer/optimizer.hpp"
 
 namespace duckdb {
@@ -23,8 +24,35 @@ static bool GetBooleanSetting(ClientContext &context, const string &setting_name
 	return default_value;
 }
 
-// Helper: Propagate PK columns through projections between table scan and aggregate
-// Returns an updated hash expression that references the correct bindings at the aggregate level
+/**
+ * PropagatePKThroughProjections: Propagates primary key columns through projection operators
+ *
+ * Purpose: When we have projections between a table scan (e.g., privacy unit table) and an aggregate,
+ * we need to ensure the PK columns used in hash expressions are available at the aggregate level.
+ * This function traces the path from the table scan to the aggregate, adds necessary columns to
+ * intermediate projections, and updates the hash expression's column bindings accordingly.
+ *
+ * Arguments:
+ * @param plan - The logical plan being modified
+ * @param pu_get - The LogicalGet node for the privacy unit (or FK-linked) table containing the source columns
+ * @param hash_expr - The hash expression built from PK columns at the table scan level
+ * @param target_agg - The target aggregate node where the hash expression will be used
+ *
+ * Returns: An updated hash expression with column bindings that reference the correct projection outputs
+ *
+ * Logic:
+ * 1. Walk from the aggregate down to the table scan, collecting all projection operators
+ * 2. Extract all column references from the hash expression (these are the PK columns we need)
+ * 3. For each projection (processing bottom-up from table scan to aggregate):
+ *    - Check if each required column is already projected
+ *    - If not, add it to the projection's expression list
+ *    - Update the binding map to track how column bindings change through this projection
+ * 4. Apply the final binding map to the hash expression, updating all column references
+ *
+ * Example: If hash(customer.c_custkey) is built at the table scan level with binding [5, 0],
+ * but there's a projection between the scan and aggregate that remaps it to [8, 3],
+ * this function ensures the projection includes c_custkey and returns hash([8, 3]).
+ */
 static unique_ptr<Expression> PropagatePKThroughProjections(LogicalOperator &plan, LogicalGet &pu_get,
                                                             unique_ptr<Expression> hash_expr,
                                                             LogicalAggregate *target_agg) {
@@ -159,6 +187,46 @@ static unique_ptr<Expression> PropagatePKThroughProjections(LogicalOperator &pla
 	return updated_hash;
 }
 
+/**
+ * ModifyPlanWithoutPU: Transforms a query plan when the privacy unit (PU) table is NOT scanned directly
+ *
+ * Purpose: When the query doesn't directly scan the PU table, we need to join tables along the FK path
+ * from the scanned tables to the PU table, then build hash expressions from the FK columns that reference the PU.
+ *
+ * Arguments:
+ * @param check - Compatibility check result containing table metadata and FK relationships
+ * @param input - Optimizer extension input containing context and optimizer
+ * @param plan - The logical plan to modify
+ * @param gets_missing - Tables in the FK path that are NOT in the original query (need to be added as joins)
+ * @param gets_present - Tables in the FK path that ARE already in the original query
+ * @param fk_path - Ordered list of tables from the scanned table to the PU (e.g., [lineitem, orders, customer])
+ * @param privacy_units - List of privacy unit table names (e.g., ["customer"])
+ *
+ * Logic:
+ * 1. Identify which tables need to be joined (those in gets_missing)
+ * 2. Find the "connecting table" - the last present table in the FK path (e.g., lineitem)
+ * 3. For each instance of the connecting table in the plan (handles correlated subqueries):
+ *    - Create a fresh join chain: connecting_table -> missing_table_1 -> ... -> missing_table_N
+ *    - Replace the connecting table with this join chain
+ *    - Track the table index of each "orders" table (or equivalent) for hash generation
+ * 4. Find all aggregates that have FK-linked tables in their subtree
+ * 5. For each aggregate:
+ *    - Determine which "orders" table instance it should use (critical for correlated subqueries)
+ *    - Build hash expression from the FK columns in "orders" that reference the PU
+ *    - Propagate the hash expression through projections
+ *    - Transform the aggregate to use PAC functions (pac_sum, pac_avg, etc.)
+ *
+ * Correlated Subquery Handling:
+ * - If a table appears in BOTH outer query and inner subquery, we find ALL instances and add joins to each
+ * - Each aggregate gets the hash from its "closest" orders table (not crossing subquery boundaries)
+ * - Example: In TPC-H Q17, lineitem appears in both outer and inner aggregate:
+ *   * Outer aggregate gets hash from outer orders table
+ *   * Inner aggregate gets hash from inner orders table (same lineitem.l_partkey correlation)
+ *
+ * Join Addition Rules:
+ * - If the table referencing the PU is in both outer and subquery: join and add pac_aggregate in BOTH
+ * - If inner query has no aggregate: still join if it references a table in the FK path to PU
+ */
 void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtensionInput &input,
                          unique_ptr<LogicalOperator> &plan, const vector<string> &gets_missing,
                          const vector<string> &gets_present, const vector<string> &fk_path,
@@ -235,9 +303,6 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 
 	// Find the unique_ptr reference to the existing table that connects to the missing tables
 	// We need to find the last present table in the FK path, which is the connection point
-	LogicalOperator *parent_join = nullptr;
-	idx_t child_idx_in_parent = 0;
-	unique_ptr<LogicalOperator> *target_ref = nullptr;
 
 	// Find the last present table in the FK path (ordered)
 	string connecting_table;
@@ -264,193 +329,140 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 		connecting_table = gets_present[0];
 	}
 
-	target_ref = FindNodeRefByTable(&plan, connecting_table, &parent_join, &child_idx_in_parent);
-	if (!target_ref) {
-		throw InternalException("PAC compiler: could not find existing LogicalGet for table " +
-		                        (connecting_table.empty() ? string("<none>") : connecting_table));
+	// If STILL no connecting table, it means we're querying a leaf table that's not in the FK path
+	// In this case, we should use the scanned table itself as the connection point
+	if (connecting_table.empty()) {
+		// Find any scanned non-PU table
+		if (!check.scanned_non_pu_tables.empty()) {
+			connecting_table = check.scanned_non_pu_tables[0];
+		}
 	}
 
-	// Check if the target node is part of a LEFT JOIN
-	bool is_left_join = false;
-	JoinType original_join_type = JoinType::INNER;
-	if (parent_join && parent_join->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
-		auto &parent_join_op = parent_join->Cast<LogicalComparisonJoin>();
-		original_join_type = parent_join_op.join_type;
-		is_left_join = (original_join_type == JoinType::LEFT);
+	// Find ALL instances of the connecting table (for correlated subqueries, there may be multiple)
+	vector<unique_ptr<LogicalOperator> *> all_connecting_nodes;
+	if (!connecting_table.empty()) {
+		FindAllNodesByTable(&plan, connecting_table, all_connecting_nodes);
 	}
 
-	// We create the joins in this order:
-	// the existing node joins with ordered_table_names[0], then this join node joins with ordered_table_names[1], ...
-	// All intermediate joins are INNER joins to reach the privacy unit
-	unique_ptr<LogicalOperator> final_join;
-
-	// Only create joins if there are tables to join
-	if (!ordered_table_names.empty()) {
-		unique_ptr<LogicalOperator> existing_node = (*target_ref)->Copy(input.context);
-
-		for (size_t i = 0; i < ordered_table_names.size(); ++i) {
-			auto &tbl_name = ordered_table_names[i];
-			// move the LogicalGet from get_map into a unique_ptr<LogicalGet>
-			unique_ptr<LogicalGet> right_op = std::move(get_map[tbl_name]);
-			if (!right_op) {
-				throw InternalException("PAC compiler: failed to transfer ownership of LogicalGet for " + tbl_name);
-			}
-
-			if (i == 0) {
-				auto join = CreateLogicalJoin(check, input.context, std::move(existing_node), std::move(right_op));
-				final_join = std::move(join);
-			} else {
-				auto join = CreateLogicalJoin(check, input.context, std::move(final_join), std::move(right_op));
-				final_join = std::move(join);
+	// If no connecting nodes found, we may be in a case where the query scans a leaf table
+	// that's not directly in gets_present but is in the FK chain
+	if (all_connecting_nodes.empty() && !gets_present.empty()) {
+		// Try to find any present table in the plan
+		for (auto &present : gets_present) {
+			FindAllNodesByTable(&plan, present, all_connecting_nodes);
+			if (!all_connecting_nodes.empty()) {
+				connecting_table = present;
+				break;
 			}
 		}
+	}
 
-		// Use ReplaceNode to insert the join and handle column binding remapping
-		ReplaceNode(plan, *target_ref, final_join);
+	if (all_connecting_nodes.empty() && !connecting_table.empty()) {
+		throw InternalException("PAC compiler: could not find any LogicalGet for table " + connecting_table);
+	}
 
-		// If the original was a LEFT JOIN, we need to restore it at the top level
-		// The INNER joins to reach the PU are now inside the LEFT JOIN structure
-		if (is_left_join && parent_join && parent_join->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
-			auto &parent_join_op = parent_join->Cast<LogicalComparisonJoin>();
-			// The join type should already be LEFT, but make sure the structure is correct
-			// The INNER join chain is now in place of the original child
-			parent_join_op.join_type = original_join_type;
+	if (all_connecting_nodes.empty()) {
+		throw InternalException("PAC compiler: could not find any connecting table in the plan");
+	}
+
+	// For each instance of the connecting table, add the join chain
+	// Store the mapping from each instance to its corresponding orders table for hash generation
+	std::unordered_map<idx_t, idx_t> connecting_table_to_orders_table;
+
+	for (auto *target_ref : all_connecting_nodes) {
+		// Get the table index of this instance
+		auto &target_op = (*target_ref)->Cast<LogicalGet>();
+		idx_t connecting_table_idx = target_op.table_index;
+
+		// Only create joins if there are tables to join
+		if (!ordered_table_names.empty()) {
+			unique_ptr<LogicalOperator> existing_node = (*target_ref)->Copy(input.context);
+
+			// Create fresh LogicalGet nodes for this instance
+			auto local_idx = GetNextTableIndex(plan);
+			std::unordered_map<string, unique_ptr<LogicalGet>> local_get_map;
+
+			for (auto &table : ordered_table_names) {
+				auto it = check.table_metadata.find(table);
+				if (it == check.table_metadata.end()) {
+					throw InternalException("PAC compiler: missing table metadata for table: " + table);
+				}
+				vector<string> pks = it->second.pks;
+				auto get = CreateLogicalGet(input.context, plan, table, local_idx);
+
+				// Remember the table index of the orders table for this instance
+				if (table == "orders") {
+					connecting_table_to_orders_table[connecting_table_idx] = local_idx;
+				}
+
+				local_get_map[table] = std::move(get);
+				local_idx++;
+			}
+
+			unique_ptr<LogicalOperator> final_join;
+			for (size_t i = 0; i < ordered_table_names.size(); ++i) {
+				auto &tbl_name = ordered_table_names[i];
+				unique_ptr<LogicalGet> right_op = std::move(local_get_map[tbl_name]);
+				if (!right_op) {
+					throw InternalException("PAC compiler: failed to transfer ownership of LogicalGet for " + tbl_name);
+				}
+
+				if (i == 0) {
+					auto join = CreateLogicalJoin(check, input.context, std::move(existing_node), std::move(right_op));
+					final_join = std::move(join);
+				} else {
+					auto join = CreateLogicalJoin(check, input.context, std::move(final_join), std::move(right_op));
+					final_join = std::move(join);
+				}
+			}
+
+			// Replace this instance with the join chain
+			ReplaceNode(plan, *target_ref, final_join);
+		} else {
+			// No tables to join - the FK-linked table (e.g., orders) must already be in the plan
+			// Find it and map the connecting table to it
+			for (auto &present_table : gets_present) {
+				// Check if this present table has an FK to the PU
+				auto it = check.table_metadata.find(present_table);
+				if (it != check.table_metadata.end()) {
+					bool has_fk_to_pu = false;
+					for (auto &fk : it->second.fks) {
+						for (auto &pu : privacy_units) {
+							if (fk.first == pu) {
+								has_fk_to_pu = true;
+								break;
+							}
+						}
+						if (has_fk_to_pu)
+							break;
+					}
+
+					if (has_fk_to_pu) {
+						// This is the table we need for hashing - find its table index
+						vector<unique_ptr<LogicalOperator> *> fk_table_nodes;
+						FindAllNodesByTable(&plan, present_table, fk_table_nodes);
+						if (!fk_table_nodes.empty()) {
+							auto &fk_table_get = fk_table_nodes[0]->get()->Cast<LogicalGet>();
+							connecting_table_to_orders_table[connecting_table_idx] = fk_table_get.table_index;
+#ifdef DEBUG
+							Printer::Print("ModifyPlanWithoutPU: Mapped connecting table #" +
+							               std::to_string(connecting_table_idx) + " to existing FK table " +
+							               present_table + " #" + std::to_string(fk_table_get.table_index));
+#endif
+							break;
+						}
+					}
+				}
+			}
 		}
 	}
 
 #if DEBUG
 	plan->Print();
-
 #endif
 
-	// Build hash expressions for each privacy unit
-	vector<unique_ptr<Expression>> hash_exprs;
-
-	for (auto &privacy_unit : privacy_units) {
-		unique_ptr<Expression> hash_input_expr;
-
-		if (join_elimination) {
-			// Find the last table in the FK chain for this PU
-			string last_table_name;
-			if (!ordered_table_names.empty()) {
-				last_table_name = ordered_table_names.back();
-			} else if (!actually_present_in_fk_order.empty()) {
-				// No new joins were added, but we have tables that were already present in the FK path
-				// Use the last one as it's closest to the PU
-				last_table_name = actually_present_in_fk_order.back();
-			} else {
-				last_table_name = connecting_table;
-			}
-
-			// Check if the PU table itself is in the query
-			// If it is, it's simpler and more reliable to use it directly
-			unique_ptr<LogicalOperator> *pu_table_ref = FindNodeRefByTable(&plan, privacy_unit);
-
-			if (pu_table_ref && pu_table_ref->get()) {
-				// PU table is in the query - use it directly (simpler path)
-				auto pu_get = &pu_table_ref->get()->Cast<LogicalGet>();
-
-				vector<string> pu_pks;
-				for (auto &pk : check.table_metadata.at(privacy_unit).pks) {
-					pu_pks.push_back(pk);
-				}
-
-				// Ensure PK columns are projected
-				for (auto &pk : pu_pks) {
-					idx_t proj_idx = EnsureProjectedColumn(*pu_get, pk);
-					if (proj_idx == DConstants::INVALID_INDEX) {
-						throw InternalException("PAC compiler: failed to project PK column " + pk);
-					}
-				}
-
-				// Build hash from PU's PK columns
-				auto base_hash_expr = BuildXorHashFromPKs(input, *pu_get, pu_pks);
-
-				// Find the aggregate to propagate through
-				auto *agg = FindTopAggregate(plan);
-				if (!agg) {
-					throw InternalException("PAC compiler: could not find aggregate");
-				}
-
-				// Propagate through projections
-				hash_input_expr = PropagatePKThroughProjections(*plan, *pu_get, std::move(base_hash_expr), agg);
-			} else {
-				// PU table is NOT in the query - use FK column from connecting table
-				// Find the FK column(s) that reference the PU
-				auto it = check.table_metadata.find(last_table_name);
-				if (it == check.table_metadata.end()) {
-					throw InternalException("PAC compiler: missing metadata for table " + last_table_name);
-				}
-
-				vector<string> fk_cols;
-				for (auto &fk : it->second.fks) {
-					if (fk.first == privacy_unit) {
-						fk_cols = fk.second;
-						break;
-					}
-				}
-
-				if (fk_cols.empty()) {
-					throw InternalException("PAC compiler: no FK found from " + last_table_name + " to " +
-					                        privacy_unit);
-				}
-
-				// Find the LogicalGet for the last table and ensure FK columns are projected
-				unique_ptr<LogicalOperator> *last_table_ref = FindNodeRefByTable(&plan, last_table_name);
-				if (!last_table_ref || !last_table_ref->get()) {
-					throw InternalException("PAC compiler: could not find LogicalGet for last table " +
-					                        last_table_name);
-				}
-				auto last_get = &last_table_ref->get()->Cast<LogicalGet>();
-
-				// Ensure FK columns are projected in the table scan
-				for (auto &fk_col : fk_cols) {
-					idx_t proj_idx = EnsureProjectedColumn(*last_get, fk_col);
-					if (proj_idx == DConstants::INVALID_INDEX) {
-						throw InternalException("PAC compiler: failed to project FK column " + fk_col);
-					}
-				}
-
-				// Build hash expression from FK columns at the table scan level
-				auto base_hash_expr = BuildXorHashFromPKs(input, *last_get, fk_cols);
-
-				// Find the aggregate to propagate through
-				auto *agg = FindTopAggregate(plan);
-				if (!agg) {
-					throw InternalException("PAC compiler: could not find aggregate");
-				}
-
-				// Use PropagatePKThroughProjections to propagate the hash expression through all projections
-				hash_input_expr = PropagatePKThroughProjections(*plan, *last_get, std::move(base_hash_expr), agg);
-			}
-		} else {
-			// Original behavior: locate the privacy-unit LogicalGet
-			unique_ptr<LogicalOperator> *pu_ref = nullptr;
-			if (!privacy_unit.empty()) {
-				pu_ref = FindNodeRefByTable(&plan, privacy_unit);
-			}
-			if (!pu_ref || !pu_ref->get()) {
-				throw InternalException("PAC compiler: could not find LogicalGet for privacy unit " + privacy_unit);
-			}
-			auto pu_get = &pu_ref->get()->Cast<LogicalGet>();
-
-			vector<string> pu_pks;
-			for (auto &pk : check.table_metadata.at(privacy_unit).pks) {
-				pu_pks.push_back(pk);
-			}
-
-			hash_input_expr = BuildXorHashFromPKs(input, *pu_get, pu_pks);
-		}
-
-		hash_exprs.push_back(std::move(hash_input_expr));
-	}
-
-	// Combine all hash expressions with AND
-	auto combined_hash_expr = BuildAndFromHashes(input, hash_exprs);
-
-	// Find ALL aggregate nodes in the plan (not just the topmost one)
-	// For queries with nested aggregates like TPC-H Q13, we need to find all of them
-	// but only modify the BOTTOMMOST one (closest to the PU table)
+	// Now find all aggregates and modify them with PAC functions
+	// Each aggregate needs a hash expression based on the orders table in its subtree
 	vector<LogicalAggregate *> all_aggregates;
 	FindAllAggregates(plan, all_aggregates);
 
@@ -458,32 +470,339 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 		throw InternalException("PAC Compiler: no aggregate nodes found in plan");
 	}
 
-	// For nested aggregates, we only want to modify aggregates that have base table scans
-	// in their subtree. Aggregates that only scan CTEs or already-aggregated data should
-	// be left as-is (they operate on already-protected data).
-	// Example: In Q15, the aggregate computing max(total_revenue) from the CTE should NOT
-	// be modified, only the aggregate in the CTE that computes pac_sum(...) should be.
-	LogicalAggregate *target_agg = nullptr;
+	// For correlated subqueries, the FK-linked table (e.g., lineitem) may appear in multiple contexts
+	// Filter aggregates to only those that have FK-linked tables in their subtree
+	std::unordered_set<string> fk_linked_tables(gets_present.begin(), gets_present.end());
+
+	vector<LogicalAggregate *> target_aggregates;
 	for (auto *agg : all_aggregates) {
-		if (HasBaseTableInSubtree(agg)) {
-			target_agg = agg;
-			// Keep searching for the deepest aggregate with base tables
-			// (we want the one closest to the base table scans)
+		bool has_fk_table = false;
+		for (auto &table : fk_linked_tables) {
+			if (HasTableInSubtree(agg, table)) {
+				has_fk_table = true;
+				break;
+			}
+		}
+
+		// Check if this aggregate has base tables in its DIRECT children (not nested aggregates)
+		// If it only depends on another aggregate's output, skip it
+		bool has_direct_base_table = false;
+		for (auto &child : agg->children) {
+			// Skip if the child is another aggregate
+			if (child->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+				continue;
+			}
+			if (HasBaseTableInSubtree(child.get())) {
+				has_direct_base_table = true;
+				break;
+			}
+		}
+
+		if (has_fk_table && has_direct_base_table) {
+			target_aggregates.push_back(agg);
 		}
 	}
 
-	if (!target_agg) {
-		throw InternalException("PAC Compiler: no aggregate with base tables found in plan");
+	if (target_aggregates.empty()) {
+		throw InternalException("PAC Compiler: no aggregate nodes with FK-linked tables found in plan");
 	}
 
-	ModifyAggregatesWithPacFunctions(input, target_agg, combined_hash_expr);
+#ifdef DEBUG
+	Printer::Print("ModifyPlanWithoutPU: Found " + std::to_string(target_aggregates.size()) +
+	               " aggregates with FK-linked tables");
+#endif
+
+	// For each target aggregate, find which orders table it has access to and build hash expression
+	for (auto *target_agg : target_aggregates) {
+		// Find which connecting table (lineitem) this aggregate has in its DIRECT path
+		// (not in a nested subquery), and use the corresponding orders table
+		idx_t orders_table_idx = DConstants::INVALID_INDEX;
+
+		// We need to find the "closest" connecting table to this aggregate
+		// For nested queries, the outer aggregate might contain both inner and outer tables
+		// So we need to find which connecting table is in the aggregate's direct path
+		// Strategy: check which connecting table indices exist, and use the one that's NOT in a DELIM_GET
+
+		// First, collect all connecting table indices that appear in the aggregate's subtree
+		vector<idx_t> candidate_conn_tables;
+		for (auto &kv : connecting_table_to_orders_table) {
+			idx_t conn_table_idx = kv.first;
+			if (HasTableIndexInSubtree(target_agg, conn_table_idx)) {
+				candidate_conn_tables.push_back(conn_table_idx);
+			}
+		}
+
+#ifdef DEBUG
+		Printer::Print("ModifyPlanWithoutPU: Aggregate has " + std::to_string(candidate_conn_tables.size()) +
+		               " candidate connecting tables");
+#endif
+
+		// If no candidate connecting tables found, the scanned table itself must have an FK to PU
+		// This happens when we query a leaf table that's far from the PU via FK chain
+		bool handled_via_direct_fk = false;
+		if (candidate_conn_tables.empty()) {
+			// Find the scanned table in this aggregate's subtree that has FK to any table in the FK path
+			// This handles deep FK chains where the leaf table doesn't directly reference the PU
+			for (auto &present_table : gets_present) {
+				if (HasTableInSubtree(target_agg, present_table)) {
+					auto it = check.table_metadata.find(present_table);
+					if (it != check.table_metadata.end()) {
+						// Look for FK to any table in the FK path, not just PUs
+						bool has_fk_in_path = false;
+						vector<string> fk_cols;
+						string fk_target;
+
+						for (auto &fk : it->second.fks) {
+							// Check if this FK references any table in the FK path
+							for (auto &path_table : fk_path) {
+								if (fk.first == path_table) {
+									has_fk_in_path = true;
+									fk_cols = fk.second;
+									fk_target = fk.first;
+									break;
+								}
+							}
+							if (has_fk_in_path) {
+								break;
+							}
+						}
+
+						if (has_fk_in_path) {
+							// This table is in the FK chain - we need to join the rest of the path
+							// and use the final table (with FK to PU) for hashing
+
+							// Find where fk_target is in the FK path
+							size_t target_pos = 0;
+							for (size_t i = 0; i < fk_path.size(); i++) {
+								if (fk_path[i] == fk_target) {
+									target_pos = i;
+									break;
+								}
+							}
+
+							// The tables from fk_target onwards should have been added to the plan
+							// Find the last table in the FK path that has an FK to a PU
+							string hash_source_table;
+							vector<string> hash_source_fk_cols;
+
+							for (size_t i = fk_path.size(); i > 0; i--) {
+								auto &path_table = fk_path[i - 1];
+								auto path_it = check.table_metadata.find(path_table);
+								if (path_it != check.table_metadata.end()) {
+									bool found_pu_fk = false;
+									for (auto &path_fk : path_it->second.fks) {
+										for (auto &pu : privacy_units) {
+											if (path_fk.first == pu) {
+												hash_source_table = path_table;
+												hash_source_fk_cols = path_fk.second;
+												found_pu_fk = true;
+												break;
+											}
+										}
+										if (found_pu_fk)
+											break;
+									}
+									if (found_pu_fk)
+										break;
+								}
+							}
+
+							if (!hash_source_table.empty()) {
+								// Find this table in the plan (it should have been joined)
+								vector<unique_ptr<LogicalOperator> *> hash_source_nodes;
+								FindAllNodesByTable(&plan, hash_source_table, hash_source_nodes);
+								if (!hash_source_nodes.empty()) {
+									auto &hash_source_get = hash_source_nodes[0]->get()->Cast<LogicalGet>();
+
+									// Ensure FK columns are projected
+									for (auto &hash_fk_col : hash_source_fk_cols) {
+										idx_t proj_idx = EnsureProjectedColumn(hash_source_get, hash_fk_col);
+										if (proj_idx == DConstants::INVALID_INDEX) {
+											throw InternalException("PAC compiler: failed to project FK column " +
+											                        hash_fk_col);
+										}
+									}
+
+									// Build hash expression
+									auto base_hash_expr =
+									    BuildXorHashFromPKs(input, hash_source_get, hash_source_fk_cols);
+									auto hash_input_expr = PropagatePKThroughProjections(
+									    *plan, hash_source_get, std::move(base_hash_expr), target_agg);
+
+									// Modify this aggregate with PAC functions
+									ModifyAggregatesWithPacFunctions(input, target_agg, hash_input_expr);
+
+									// Mark as handled and break
+									handled_via_direct_fk = true;
+									break;
+								}
+							}
+						}
+					}
+				}
+			}
+
+			if (!handled_via_direct_fk) {
+				throw InternalException("PAC Compiler: could not find any connecting table for aggregate");
+			}
+		}
+
+		// Skip to next aggregate if we already handled this one via direct FK
+		if (handled_via_direct_fk) {
+			continue;
+		}
+
+		// If there's only one candidate, use it
+		if (candidate_conn_tables.size() == 1) {
+			orders_table_idx = connecting_table_to_orders_table[candidate_conn_tables[0]];
+		} else {
+			// Multiple candidates - we need to find which one is in the aggregate's direct path
+			// The heuristic: try each candidate's orders table and see which one can be propagated
+			// The correct one will be accessible without going through DELIM_GET
+			for (auto conn_table_idx : candidate_conn_tables) {
+				idx_t ord_table_idx = connecting_table_to_orders_table[conn_table_idx];
+
+				// Try to find the orders table - if it's directly accessible (not through DELIM_GET),
+				// we can use it
+				// Simple heuristic: the orders table with the SMALLER index is likely the outer one
+				// For correlated subqueries, outer tables have smaller indices than inner tables
+				if (orders_table_idx == DConstants::INVALID_INDEX || ord_table_idx < orders_table_idx) {
+					orders_table_idx = ord_table_idx;
+				}
+			}
+		}
+
+		if (orders_table_idx == DConstants::INVALID_INDEX) {
+			throw InternalException("PAC Compiler: could not find orders table for aggregate");
+		}
+
+#ifdef DEBUG
+		Printer::Print("ModifyPlanWithoutPU: Selected orders table #" + std::to_string(orders_table_idx) +
+		               " for aggregate");
+#endif
+
+		// Find the orders table LogicalGet with this index
+		vector<unique_ptr<LogicalOperator> *> orders_nodes;
+		FindAllNodesByTableIndex(&plan, orders_table_idx, orders_nodes);
+
+		if (orders_nodes.empty()) {
+			throw InternalException("PAC Compiler: could not find orders LogicalGet with index " +
+			                        std::to_string(orders_table_idx));
+		}
+
+		auto &orders_get = orders_nodes[0]->get()->Cast<LogicalGet>();
+
+		// Build hash expression from the FK-linked table's FK to the PU
+		// Find which table this is and get its FK columns
+		vector<string> fk_cols;
+		string fk_table_name;
+
+		// Get the table name from the LogicalGet
+		auto orders_table_ptr = orders_get.GetTable();
+		if (orders_table_ptr) {
+			fk_table_name = orders_table_ptr->name;
+		}
+
+		if (!fk_table_name.empty()) {
+			auto it = check.table_metadata.find(fk_table_name);
+			if (it != check.table_metadata.end()) {
+				for (auto &fk : it->second.fks) {
+					// Find FK to any of the privacy units
+					for (auto &pu : privacy_units) {
+						if (fk.first == pu) {
+							fk_cols = fk.second;
+							break;
+						}
+					}
+					if (!fk_cols.empty()) {
+						break;
+					}
+				}
+			}
+		}
+
+		if (fk_cols.empty()) {
+			throw InternalException("PAC Compiler: no FK found from " + fk_table_name + " to any PU");
+		}
+
+		// Ensure FK columns are projected
+		for (auto &fk_col : fk_cols) {
+			idx_t proj_idx = EnsureProjectedColumn(orders_get, fk_col);
+			if (proj_idx == DConstants::INVALID_INDEX) {
+				throw InternalException("PAC compiler: failed to project FK column " + fk_col);
+			}
+		}
+
+		// Build hash expression
+		auto base_hash_expr = BuildXorHashFromPKs(input, orders_get, fk_cols);
+		auto hash_input_expr = PropagatePKThroughProjections(*plan, orders_get, std::move(base_hash_expr), target_agg);
+
+#ifdef DEBUG
+		Printer::Print("ModifyPlanWithoutPU: Built hash expression for aggregate using orders table #" +
+		               std::to_string(orders_table_idx));
+#endif
+
+		// Modify this aggregate with PAC functions
+		ModifyAggregatesWithPacFunctions(input, target_agg, hash_input_expr);
+	}
 }
 
+/**
+ * ModifyPlanWithPU: Transforms a query plan when the privacy unit (PU) table IS scanned directly
+ *
+ * Purpose: When the query directly scans the PU table, we build hash expressions from the PU's
+ * primary key columns and transform aggregates to use PAC functions.
+ *
+ * Arguments:
+ * @param input - Optimizer extension input containing context and optimizer
+ * @param plan - The logical plan to modify
+ * @param pu_table_names - List of privacy unit table names that are scanned in the query
+ * @param check - Compatibility check result containing table metadata
+ *
+ * Logic:
+ * 1. Find ALL aggregate nodes in the plan
+ * 2. Filter to aggregates that have at least one PU table in their subtree
+ * 3. For each target aggregate:
+ *    - For each PU table in the aggregate's subtree:
+ *      * Determine whether to use rowid or primary key columns for hashing
+ *      * Build hash expression: hash(pk) or hash(xor(pk1, pk2, ...)) for composite PKs
+ *      * Propagate the hash expression through projections to the aggregate level
+ *    - Combine all PU hash expressions with AND (for multi-PU queries)
+ *    - Transform the aggregate to use PAC functions
+ *
+ * Correlated Subquery Handling:
+ * - If the PU table appears in BOTH outer query and subquery, we transform aggregates in BOTH
+ * - Each aggregate gets its own hash expression from the PU instance in its subtree
+ * - Example: Query with outer aggregate on customer and subquery aggregate on customer:
+ *   * Both aggregates are transformed with pac_sum(hash(c_custkey), value)
+ *   * Each uses its respective customer table instance
+ *
+ * Nested Aggregate Rules (IMPORTANT):
+ * - If we have 2 aggregates stacked on top of each other:
+ *   * ONLY transform the inner aggregate if it directly operates on PU tables
+ *   * The outer aggregate is NOT transformed if it only depends on the inner result
+ *   * EXCEPTION: Transform the outer aggregate ONLY if it also has PU tables in its subtree
+ *     (meaning it has its own FK path that needs joins and PAC transformation)
+ *
+ * Example from user's TPC-H Q17-style query:
+ *   SELECT sum(l_extendedprice) / 7.0 AS avg_yearly
+ *   FROM lineitem, part
+ *   WHERE p_partkey = l_partkey AND ... AND l_quantity < (SELECT 0.2 * avg(l_quantity) FROM lineitem WHERE ...)
+ *
+ * Transformation:
+ *   - Inner aggregate (avg in subquery): Has lineitem (PU table) -> pac_avg(hash(rowid), l_quantity)
+ *   - Outer aggregate (sum): Also has lineitem (PU table) -> pac_sum(hash(rowid), l_extendedprice)
+ *   - Division by 7.0 happens AFTER PAC aggregation, not transformed
+ *
+ * Counter-example where outer is NOT transformed:
+ *   SELECT sum(inner_sum) FROM (SELECT sum(customer_col) FROM customer) AS subq
+ *   - Inner: Has customer (PU) -> pac_sum(hash(c_custkey), customer_col)
+ *   - Outer: No PU tables, only depends on subquery result -> Regular sum(), NOT transformed
+ */
 void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
                       const vector<string> &pu_table_names, const PACCompatibilityResult &check) {
 
 	// Find ALL aggregate nodes in the plan first
-	// For nested aggregates (like Q13), we need to use the bottommost one
 	vector<LogicalAggregate *> all_aggregates;
 	FindAllAggregates(plan, all_aggregates);
 
@@ -491,57 +810,111 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 		throw InternalException("PAC Compiler: no aggregate nodes found in plan");
 	}
 
-	// Use the bottommost aggregate (closest to table scans) for both propagation and modification
-	auto *target_agg = all_aggregates.back();
-
-	// Build hash expressions for each privacy unit
-	vector<unique_ptr<Expression>> hash_exprs;
-
-	for (auto &pu_table_name : pu_table_names) {
-		auto pu_scan_ptr = FindPrivacyUnitGetNode(plan, pu_table_name);
-		auto &get = pu_scan_ptr->get()->Cast<LogicalGet>();
-
-		// Determine if we should use rowid or PKs
-		bool use_rowid = false;
-		vector<string> pks;
-
-		auto it = check.table_metadata.find(pu_table_name);
-		if (it != check.table_metadata.end() && !it->second.pks.empty()) {
-			pks = it->second.pks;
-		} else {
-			use_rowid = true;
+	// For correlated subqueries, the privacy unit table may appear in multiple contexts
+	// (e.g., both outer query and inner subquery). We need to transform ALL aggregates
+	// that have the privacy unit table in their subtree.
+	// Filter aggregates to only those that have at least one privacy unit table in their subtree.
+	// IMPORTANT: Also skip aggregates whose direct child is another aggregate (nested aggregates
+	// where the outer only depends on inner's result).
+	vector<LogicalAggregate *> target_aggregates;
+	for (auto *agg : all_aggregates) {
+		bool has_pu_table = false;
+		for (auto &pu_table_name : pu_table_names) {
+			if (HasTableInSubtree(agg, pu_table_name)) {
+				has_pu_table = true;
+				break;
+			}
 		}
 
-		if (use_rowid) {
-			AddRowIDColumn(get);
-		} else {
-			// Ensure primary key columns are present in the LogicalGet (add them if necessary)
-			AddPKColumns(get, pks);
+		// Check if this aggregate has base tables in its DIRECT children (not nested aggregates)
+		// If it only depends on another aggregate's output, skip it
+		bool has_direct_base_table = false;
+		for (auto &child : agg->children) {
+			// Skip if the child is another aggregate
+			if (child->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+				continue;
+			}
+			if (HasBaseTableInSubtree(child.get())) {
+				has_direct_base_table = true;
+				break;
+			}
 		}
 
-		// Build the hash expression for this PU
-		unique_ptr<Expression> hash_input_expr;
-		if (use_rowid) {
-			// rowid is the last column added
-			auto rowid_binding = ColumnBinding(get.table_index, get.GetColumnIds().size() - 1);
-			auto rowid_col = make_uniq<BoundColumnRefExpression>(LogicalType::BIGINT, rowid_binding);
-			auto bound_hash = input.optimizer.BindScalarFunction("hash", std::move(rowid_col));
-			hash_input_expr = std::move(bound_hash);
-		} else {
-			hash_input_expr = BuildXorHashFromPKs(input, get, pks);
+		if (has_pu_table && has_direct_base_table) {
+			target_aggregates.push_back(agg);
 		}
-
-		// Propagate the hash expression through all projections between table scan and the target aggregate
-		hash_input_expr = PropagatePKThroughProjections(*plan, get, std::move(hash_input_expr), target_agg);
-
-		hash_exprs.push_back(std::move(hash_input_expr));
 	}
 
-	// Combine all hash expressions with AND
-	auto combined_hash_expr = BuildAndFromHashes(input, hash_exprs);
+	if (target_aggregates.empty()) {
+		throw InternalException("PAC Compiler: no aggregate nodes with privacy unit tables found in plan");
+	}
 
-	// Modify the bottommost aggregate with PAC functions
-	ModifyAggregatesWithPacFunctions(input, target_agg, combined_hash_expr);
+#ifdef DEBUG
+	Printer::Print("ModifyPlanWithPU: Found " + std::to_string(target_aggregates.size()) +
+	               " aggregates with privacy unit tables");
+#endif
+
+	// For each target aggregate, build hash expressions and modify it
+	for (auto *target_agg : target_aggregates) {
+		// Build hash expressions for each privacy unit
+		vector<unique_ptr<Expression>> hash_exprs;
+
+		for (auto &pu_table_name : pu_table_names) {
+			// Only process this PU if it's in the aggregate's subtree
+			if (!HasTableInSubtree(target_agg, pu_table_name)) {
+				continue;
+			}
+
+			auto pu_scan_ptr = FindPrivacyUnitGetNode(plan, pu_table_name);
+			auto &get = pu_scan_ptr->get()->Cast<LogicalGet>();
+
+			// Determine if we should use rowid or PKs
+			bool use_rowid = false;
+			vector<string> pks;
+
+			auto it = check.table_metadata.find(pu_table_name);
+			if (it != check.table_metadata.end() && !it->second.pks.empty()) {
+				pks = it->second.pks;
+			} else {
+				use_rowid = true;
+			}
+
+			if (use_rowid) {
+				AddRowIDColumn(get);
+			} else {
+				// Ensure primary key columns are present in the LogicalGet (add them if necessary)
+				AddPKColumns(get, pks);
+			}
+
+			// Build the hash expression for this PU
+			unique_ptr<Expression> hash_input_expr;
+			if (use_rowid) {
+				// rowid is the last column added
+				auto rowid_binding = ColumnBinding(get.table_index, get.GetColumnIds().size() - 1);
+				auto rowid_col = make_uniq<BoundColumnRefExpression>(LogicalType::BIGINT, rowid_binding);
+				auto bound_hash = input.optimizer.BindScalarFunction("hash", std::move(rowid_col));
+				hash_input_expr = std::move(bound_hash);
+			} else {
+				hash_input_expr = BuildXorHashFromPKs(input, get, pks);
+			}
+
+			// Propagate the hash expression through all projections between table scan and this aggregate
+			hash_input_expr = PropagatePKThroughProjections(*plan, get, std::move(hash_input_expr), target_agg);
+
+			hash_exprs.push_back(std::move(hash_input_expr));
+		}
+
+		// Skip if no hash expressions were built for this aggregate
+		if (hash_exprs.empty()) {
+			continue;
+		}
+
+		// Combine all hash expressions with AND
+		auto combined_hash_expr = BuildAndFromHashes(input, hash_exprs);
+
+		// Modify this aggregate with PAC functions
+		ModifyAggregatesWithPacFunctions(input, target_agg, combined_hash_expr);
+	}
 }
 
 void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExtensionInput &input,

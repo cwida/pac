@@ -149,7 +149,57 @@ static string GetPacAggregateFunctionName(const string &function_name) {
 	return pac_function_name;
 }
 
-// Modify aggregate expressions to use PAC functions (extracted from duplicate code)
+/**
+ * ModifyAggregatesWithPacFunctions: Transforms regular aggregate expressions to PAC aggregate expressions
+ *
+ * Purpose: This is the core transformation function that replaces standard aggregates (SUM, AVG, COUNT, MIN, MAX)
+ * with their PAC equivalents (pac_sum, pac_avg, pac_count, pac_min, pac_max) by adding the hash expression
+ * as the first argument.
+ *
+ * Arguments:
+ * @param input - Optimizer extension input containing context and function binder
+ * @param agg - The LogicalAggregate node whose expressions will be transformed
+ * @param hash_input_expr - The hash expression identifying privacy units (e.g., hash(c_custkey) or hash(xor(pk1, pk2)))
+ *
+ * Logic:
+ * 1. For each aggregate expression in the node:
+ *    - Extract the original aggregate function name (sum, avg, count, etc.)
+ *    - Extract the value expression (the data being aggregated)
+ *      * For COUNT(*), create a constant 1 expression
+ *      * For others (SUM(val), AVG(val)), use the existing child expression
+ *    - Map to the PAC function name (sum -> pac_sum, avg -> pac_avg, etc.)
+ *    - Bind the PAC aggregate function with two arguments:
+ *      * First argument: hash expression (identifies which PU each row belongs to)
+ *      * Second argument: value expression (the data to aggregate per PU)
+ *    - Preserve the DISTINCT flag from the original aggregate
+ *    - Replace the old aggregate expression with the new PAC aggregate
+ * 2. Resolve operator types to ensure the plan is valid
+ *
+ * Transformation Examples:
+ * - SUM(l_extendedprice) -> pac_sum(hash(c_custkey), l_extendedprice)
+ * - AVG(l_quantity) -> pac_avg(hash(c_custkey), l_quantity)
+ * - COUNT(*) -> pac_count(hash(c_custkey), 1)
+ * - COUNT(DISTINCT l_orderkey) -> pac_count(hash(c_custkey), l_orderkey) with DISTINCT flag
+ *
+ * Nested Aggregate Handling (IMPORTANT):
+ * This function is only called on aggregates that were filtered by the calling code to have
+ * PU or FK-linked tables in their subtree. The filtering logic determines which aggregates get transformed:
+ *
+ * - If we have 2 aggregates stacked on top of each other:
+ *   * Inner aggregate WITH PU/FK-linked tables -> Gets transformed (this function is called)
+ *   * Outer aggregate WITHOUT PU/FK-linked tables -> NOT transformed (this function not called)
+ *   * Outer aggregate WITH PU/FK-linked tables -> Also gets transformed (this function called separately)
+ *
+ * Example 1 - Both aggregates have PU tables (user's TPC-H Q17 example):
+ *   SELECT sum(l_extendedprice) / 7.0 FROM lineitem WHERE l_quantity < (SELECT avg(l_quantity) FROM lineitem WHERE ...)
+ *   - Inner: Has lineitem -> pac_avg(hash(rowid), l_quantity)
+ *   - Outer: Also has lineitem -> pac_sum(hash(rowid), l_extendedprice)
+ *
+ * Example 2 - Only inner has PU tables:
+ *   SELECT sum(inner_result) FROM (SELECT sum(customer_col) FROM customer) AS subq
+ *   - Inner: Has customer -> pac_sum(hash(c_custkey), customer_col)
+ *   - Outer: No PU tables -> Regular sum(inner_result), NOT transformed
+ */
 void ModifyAggregatesWithPacFunctions(OptimizerExtensionInput &input, LogicalAggregate *agg,
                                       unique_ptr<Expression> &hash_input_expr) {
 	FunctionBinder function_binder(input.context);

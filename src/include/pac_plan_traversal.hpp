@@ -41,6 +41,22 @@ unique_ptr<LogicalOperator> *FindNodeRefByTable(unique_ptr<LogicalOperator> *roo
 // Returns false if the subtree only contains CTE scans or no table scans at all.
 bool HasBaseTableInSubtree(LogicalOperator *op);
 
+// Check if an operator has a specific table (by name) in its subtree.
+// Returns true if there's a LogicalGet for the given table name in the subtree.
+bool HasTableInSubtree(LogicalOperator *op, const string &table_name);
+
+// Find all LogicalGet nodes for a specific table name in the plan tree.
+// Returns a vector of pointers to the unique_ptrs holding the LogicalGet nodes.
+void FindAllNodesByTable(unique_ptr<LogicalOperator> *root, const string &table_name,
+                         vector<unique_ptr<LogicalOperator> *> &results);
+
+// Check if an operator has a LogicalGet with a specific table index in its subtree.
+bool HasTableIndexInSubtree(LogicalOperator *op, idx_t table_index);
+
+// Find all LogicalGet nodes with a specific table index in the plan tree.
+void FindAllNodesByTableIndex(unique_ptr<LogicalOperator> *root, idx_t table_index,
+                              vector<unique_ptr<LogicalOperator> *> &results);
+
 } // namespace duckdb
 
 #endif // PAC_PLAN_TRAVERSAL_HPP
