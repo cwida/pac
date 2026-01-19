@@ -24,6 +24,10 @@ idx_t EnsureProjectedColumn(LogicalGet &g, const string &col_name) {
 		if (!col_idx.IsVirtualColumn()) {
 			idx_t primary = col_idx.GetPrimaryIndex();
 			if (primary < g.names.size() && g.names[primary] == col_name) {
+#ifdef DEBUG
+				Printer::Print("EnsureProjectedColumn: Column " + col_name + " already exists at index " +
+				               std::to_string(cid) + " in table #" + std::to_string(g.table_index));
+#endif
 				return cid;
 			}
 		}
@@ -45,10 +49,40 @@ idx_t EnsureProjectedColumn(LogicalGet &g, const string &col_name) {
 	if (logical_idx == DConstants::INVALID_INDEX) {
 		return DConstants::INVALID_INDEX;
 	}
+
+	// IMPORTANT: If projection_ids is empty, DuckDB generates bindings from column_ids.size().
+	// Before we add a new column, we need to populate projection_ids with all existing indices
+	// to maintain the correct binding generation.
+	if (g.projection_ids.empty()) {
+		for (idx_t i = 0; i < g.GetColumnIds().size(); i++) {
+			g.projection_ids.push_back(i);
+		}
+#ifdef DEBUG
+		Printer::Print("EnsureProjectedColumn: Populated projection_ids with " +
+		               std::to_string(g.projection_ids.size()) + " existing indices for table #" +
+		               std::to_string(g.table_index));
+#endif
+	}
+
+	// Add the column to the LogicalGet
 	g.AddColumnId(logical_idx);
-	g.projection_ids.push_back(g.GetColumnIds().size() - 1);
-	g.GenerateColumnBindings(g.table_index, g.GetColumnIds().size());
-	return g.GetColumnIds().size() - 1;
+
+	// The projection index is the position in the output, which equals the new size - 1
+	idx_t new_proj_idx = g.GetColumnIds().size() - 1;
+	g.projection_ids.push_back(new_proj_idx);
+
+#ifdef DEBUG
+	Printer::Print("EnsureProjectedColumn: Added column " + col_name + " at index " + std::to_string(new_proj_idx) +
+	               " to table #" + std::to_string(g.table_index) +
+	               " (column_ids.size=" + std::to_string(g.GetColumnIds().size()) +
+	               ", projection_ids.size=" + std::to_string(g.projection_ids.size()) + ")");
+#endif
+
+	// ResolveOperatorTypes() calls the protected ResolveTypes() which rebuilds
+	// the types vector from column_ids/projection_ids
+	g.ResolveOperatorTypes();
+
+	return new_proj_idx;
 }
 
 // Ensure PK columns are present in a LogicalGet's column_ids and projection_ids
@@ -70,11 +104,22 @@ void AddRowIDColumn(LogicalGet &get) {
 	if (get.virtual_columns.find(COLUMN_IDENTIFIER_ROW_ID) != get.virtual_columns.end()) {
 		get.virtual_columns[COLUMN_IDENTIFIER_ROW_ID] = TableColumn("rowid", LogicalTypeId::BIGINT);
 	}
+
+	// IMPORTANT: If projection_ids is empty, DuckDB generates bindings from column_ids.size().
+	// Before we add a new column, we need to populate projection_ids with all existing indices
+	// to maintain the correct binding generation.
+	if (get.projection_ids.empty()) {
+		for (idx_t i = 0; i < get.GetColumnIds().size(); i++) {
+			get.projection_ids.push_back(i);
+		}
+	}
+
 	get.AddColumnId(COLUMN_IDENTIFIER_ROW_ID);
 	get.projection_ids.push_back(get.GetColumnIds().size() - 1);
-	get.returned_types.push_back(LogicalTypeId::BIGINT);
-	// We also need to add a column binding for rowid
-	get.GenerateColumnBindings(get.table_index, get.GetColumnIds().size());
+
+	// ResolveOperatorTypes() calls the protected ResolveTypes() which rebuilds
+	// the types vector from column_ids/projection_ids
+	get.ResolveOperatorTypes();
 }
 
 // Build XOR(pk1, pk2, ...) then hash(...) bound expression for the given LogicalGet's PKs

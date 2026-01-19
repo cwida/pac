@@ -60,6 +60,29 @@ unique_ptr<LogicalOperator> *FindPrivacyUnitGetNode(unique_ptr<LogicalOperator> 
 	return found_ptr;
 }
 
+// Find a LogicalGet node for a specific table within a given subtree
+LogicalGet *FindTableScanInSubtree(LogicalOperator *subtree, const string &table_name) {
+	if (!subtree) {
+		return nullptr;
+	}
+
+	if (subtree->type == LogicalOperatorType::LOGICAL_GET) {
+		auto &get = subtree->Cast<LogicalGet>();
+		auto tblptr = get.GetTable();
+		if (tblptr && tblptr->name == table_name) {
+			return &get;
+		}
+	}
+
+	for (auto &child : subtree->children) {
+		if (auto *found = FindTableScanInSubtree(child.get(), table_name)) {
+			return found;
+		}
+	}
+
+	return nullptr;
+}
+
 LogicalAggregate *FindTopAggregate(unique_ptr<LogicalOperator> &op) {
 	if (!op) {
 		throw InternalException("PAC Compiler: could not find LogicalAggregate node in plan");

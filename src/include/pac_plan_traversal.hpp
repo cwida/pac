@@ -27,6 +27,12 @@ LogicalAggregate *FindTopAggregate(unique_ptr<LogicalOperator> &op);
 // Returns a vector of pointers to all aggregates found.
 void FindAllAggregates(unique_ptr<LogicalOperator> &op, vector<LogicalAggregate *> &aggregates);
 
+// Find a LogicalGet node for a specific table within a given subtree.
+// Unlike FindPrivacyUnitGetNode which searches the entire plan, this searches only within
+// the specified subtree (useful for finding the correct table scan when the same table
+// is scanned multiple times in different subqueries).
+LogicalGet *FindTableScanInSubtree(LogicalOperator *subtree, const string &table_name);
+
 // Find the parent LogicalProjection of a given child node.
 // Returns nullptr if not found.
 LogicalProjection *FindParentProjection(unique_ptr<LogicalOperator> &root, LogicalOperator *target_child);

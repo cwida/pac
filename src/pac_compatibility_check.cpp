@@ -306,8 +306,7 @@ static bool IsScalarSubquerySubtree(const LogicalOperator &op) {
 		}
 	}
 	// Projections and filters don't change scalar-ness
-	if (op.type == LogicalOperatorType::LOGICAL_PROJECTION ||
-	    op.type == LogicalOperatorType::LOGICAL_FILTER) {
+	if (op.type == LogicalOperatorType::LOGICAL_PROJECTION || op.type == LogicalOperatorType::LOGICAL_FILTER) {
 		for (auto &child : op.children) {
 			if (IsScalarSubquerySubtree(*child)) {
 				return true;
@@ -348,8 +347,7 @@ static void CountScansInScope(const LogicalOperator &op, std::unordered_map<stri
 		}
 		return;
 	}
-	if (op.type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN ||
-	    op.type == LogicalOperatorType::LOGICAL_ANY_JOIN) {
+	if (op.type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN || op.type == LogicalOperatorType::LOGICAL_ANY_JOIN) {
 		auto &join = op.Cast<LogicalJoin>();
 		// SINGLE joins are used for scalar subqueries (SELECT ... WHERE col > (SELECT ...))
 		// MARK joins are used for EXISTS/IN subqueries
@@ -421,8 +419,7 @@ static bool ContainsSelfJoinInSubqueries(const LogicalOperator &op, const std::u
 		return false;
 	}
 
-	if (op.type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN ||
-	    op.type == LogicalOperatorType::LOGICAL_ANY_JOIN) {
+	if (op.type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN || op.type == LogicalOperatorType::LOGICAL_ANY_JOIN) {
 		auto &join = op.Cast<LogicalJoin>();
 		// SINGLE/MARK joins: right child is the subquery
 		if (join.join_type == JoinType::SINGLE || join.join_type == JoinType::MARK) {
@@ -633,7 +630,7 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 		if (!ContainsAggregation(*plan)) {
 			if (is_conservative) {
 				throw InvalidInputException(
-					"Query does not contain any allowed aggregation (sum, count, avg, min, max)!");
+				    "Query does not contain any allowed aggregation (sum, count, avg, min, max)!");
 			}
 			return result; // Skip PAC compilation, execute query normally
 		}

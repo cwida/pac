@@ -1016,8 +1016,21 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 			// Check if this aggregate has the PU table in its subtree
 			if (HasTableInSubtree(target_agg, pu_table_name)) {
 				// Direct PU scan case: use PU's primary key
-				auto pu_scan_ptr = FindPrivacyUnitGetNode(plan, pu_table_name);
-				auto &get = pu_scan_ptr->get()->Cast<LogicalGet>();
+				// Find the table scan WITHIN THIS AGGREGATE'S SUBTREE (not globally)
+				// This is important when the same table is scanned multiple times in different subqueries
+				auto *get_ptr = FindTableScanInSubtree(target_agg, pu_table_name);
+				if (!get_ptr) {
+					throw InternalException("PAC Compiler: could not find table scan for " + pu_table_name +
+					                        " in aggregate's subtree");
+				}
+				auto &get = *get_ptr;
+
+#ifdef DEBUG
+				Printer::Print("ModifyPlanWithPU: Processing table " + pu_table_name + " #" +
+				               std::to_string(get.table_index) +
+				               " for aggregate, column_ids.size=" + std::to_string(get.GetColumnIds().size()) +
+				               ", projection_ids.size=" + std::to_string(get.projection_ids.size()));
+#endif
 
 				// Determine if we should use rowid or PKs
 				bool use_rowid = false;
