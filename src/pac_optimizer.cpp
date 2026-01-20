@@ -31,10 +31,11 @@ void PACRewriteRule::PACRewriteRuleFunction(OptimizerExtensionInput &input, uniq
 		}
 	}
 
-	// Run the PAC compatibility checks only if the plan is a projection or order by (i.e., a SELECT query)
+	// Run the PAC compatibility checks only if the plan is a projection, order by, or aggregate (i.e., a SELECT query)
 	if (!plan ||
 	    (plan->type != LogicalOperatorType::LOGICAL_PROJECTION && plan->type != LogicalOperatorType::LOGICAL_ORDER_BY &&
 	     plan->type != LogicalOperatorType::LOGICAL_TOP_N &&
+	     plan->type != LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY &&
 	     plan->type != LogicalOperatorType::LOGICAL_MATERIALIZED_CTE)) {
 		return;
 	}
@@ -51,11 +52,14 @@ void PACRewriteRule::PACRewriteRuleFunction(OptimizerExtensionInput &input, uniq
 	// If no FK paths were found and no configured PAC tables were scanned, nothing to do.
 	// However, if the plan directly scans configured PAC tables (privacy units) we should still
 	// proceed with compilation even when no FK paths (or PKs) were discovered.
+	// Note: Tables with protected columns are now treated as implicit privacy units and included
+	// in fk_paths automatically.
 	if (check.fk_paths.empty() && check.scanned_pu_tables.empty()) {
 		return;
 	}
 
-	// Determine the set of discovered privacy units (could come from fk_paths targets or scanned PAC tables)
+	// Determine the set of discovered privacy units (could come from fk_paths targets, scanned PAC tables,
+	// or tables with protected columns which are now treated as implicit privacy units)
 	vector<string> discovered_pus;
 	// Consider fk_paths targets
 	for (auto &kv : check.fk_paths) {

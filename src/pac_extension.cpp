@@ -55,11 +55,45 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                                               LogicalType::VARCHAR, DeletePrivacyUnitFileFun);
 	loader.RegisterFunction(delete_privacy_unit_file);
 
+	// Try to automatically load PAC metadata from database directory if it exists
+	auto &db = loader.GetDatabaseInstance();
+	try {
+		// Clear any existing metadata first (in case extension is reloaded)
+		PACMetadataManager::Get().Clear();
+
+		// Get all attached database paths and try to load metadata from the first one's directory
+		auto paths = db.GetDatabaseManager().GetAttachedDatabasePaths();
+		if (!paths.empty()) {
+			string db_path = paths[0];
+			string metadata_path;
+			size_t last_slash = db_path.find_last_of("/\\");
+			if (last_slash != string::npos) {
+				metadata_path = db_path.substr(0, last_slash + 1) + "pac_metadata.json";
+			} else {
+				metadata_path = "pac_metadata.json";
+			}
+
+			std::ifstream metadata_file(metadata_path);
+			if (metadata_file.good()) {
+				metadata_file.close();
+				PACMetadataManager::Get().LoadFromFile(metadata_path);
+			}
+		} else {
+#ifdef DEBUG
+			std::cerr << "[PAC DEBUG] LoadInternal: No database paths available (in-memory DB?)" << std::endl;
+#endif
+		}
+	} catch (...) {
+		// Silently ignore if file doesn't exist or can't be loaded
+#ifdef DEBUG
+		std::cerr << "[PAC DEBUG] LoadInternal: Failed to load metadata (exception)" << std::endl;
+#endif
+	}
+
 	auto pac_rewrite_rule = PACRewriteRule();
 	// attach PAC-specific optimizer info so the extension can coordinate replan state
 	auto pac_info = make_shared_ptr<PACOptimizerInfo>();
 	pac_rewrite_rule.optimizer_info = pac_info;
-	auto &db = loader.GetDatabaseInstance();
 	db.config.optimizer_extensions.push_back(pac_rewrite_rule);
 
 	db.config.AddExtensionOption("pac_privacy_file", "path for privacy units", LogicalType::VARCHAR);

@@ -154,24 +154,24 @@ static string FindSchemaFile(const string &filename) {
 static void CreateTPCHDatabase(Connection &con, double scale_factor) {
     std::cout << "[" << Timestamp() << "] Creating TPC-H database with SF=" << scale_factor << std::endl;
 
-    // Execute schema file to create tables with PK/FK constraints
-    std::cout << "[" << Timestamp() << "] Creating TPC-H schema with constraints..." << std::endl;
+    // Generate TPC-H data
+    std::cout << "[" << Timestamp() << "] Generating TPC-H data with dbgen..." << std::endl;
+    con.Query("CALL dbgen(sf=" + FormatNumber(scale_factor) + ")");
+
+    std::cout << "[" << Timestamp() << "] TPC-H database created successfully" << std::endl;
+
+	// Execute schema file to create tables with PK/FK constraints
+	std::cout << "[" << Timestamp() << "] Adding PAC links..." << std::endl;
 	string schema_file = FindSchemaFile("pac_tpch_schema.sql");
 	if (schema_file.empty()) {
 		throw std::runtime_error("Cannot find pac_tpch_schema.sql");
 	}
 
-    string schema_sql = ReadFileToString(schema_file);
-    auto schema_result = con.Query(schema_sql);
-    if (schema_result->HasError()) {
-        throw std::runtime_error("Failed to create schema: " + schema_result->GetError());
-    }
-
-    // Generate TPC-H data
-    std::cout << "[" << Timestamp() << "] Generating TPC-H data..." << std::endl;
-    con.Query("CALL dbgen(sf=" + FormatNumber(scale_factor) + ")");
-
-    std::cout << "[" << Timestamp() << "] TPC-H database created successfully" << std::endl;
+	string schema_sql = ReadFileToString(schema_file);
+	auto schema_result = con.Query(schema_sql);
+	if (schema_result->HasError()) {
+		throw std::runtime_error("Failed to add links: " + schema_result->GetError());
+	}
 }
 
 static unique_ptr<MaterializedQueryResult> ExecuteQueryWithTiming(
@@ -246,11 +246,6 @@ void RunTPCHCompilerBenchmark(double scale_factor, const string &scale_factor_st
     std::cout << "Scale Factor: " << scale_factor << std::endl;
     std::cout << "========================================" << std::endl;
 
-	// Scale factor must be at most 1
-	if (scale_factor > 1.0) {
-		throw std::runtime_error("Scale factor must be lower or equal than 1.0");
-	}
-
     // Database setup
     string db_path = "tpch_sf" + scale_factor_str + ".db";
     bool db_exists = FileExists(db_path);
@@ -269,6 +264,12 @@ void RunTPCHCompilerBenchmark(double scale_factor, const string &scale_factor_st
 	// Load TPC-H extension
 	con.Query("INSTALL tpch");
 	con.Query("LOAD tpch");
+
+	// Load PAC extension (needed for ALTER PAC TABLE syntax)
+	auto r = con.Query("LOAD pac");
+	if (r->HasError()) {
+		throw std::runtime_error("Failed to load PAC extension: " + r->GetError());
+	}
 
     // Create database if needed
     if (!db_exists) {
@@ -329,7 +330,7 @@ void RunTPCHCompilerBenchmark(double scale_factor, const string &scale_factor_st
             // ===== PHASE 1: Run automatically compiled query (PRAGMA) =====
 
             // Cold run of automatically compiled query (not timed)
-            std::cout << "[" << Timestamp() << "] Running cold TPCH query (no PAC)..." << std::endl;
+            std::cout << "[" << Timestamp() << "] Running cold automatic PAC query..." << std::endl;
             try {
                 auto cold_result = con.Query(pragma_query);
                 if (cold_result->HasError()) {
@@ -339,16 +340,7 @@ void RunTPCHCompilerBenchmark(double scale_factor, const string &scale_factor_st
                 std::cout << "[WARNING] Cold run exception: " << e.what() << std::endl;
             }
 
-        	// ===== PHASE 2: Add privacy unit =====
-
-        	std::cout << "[" << Timestamp() << "] Adding customer as privacy unit" << std::endl;
-        	auto add_result = con.Query("pragma add_pac_privacy_unit('customer')");
-        	if (add_result->HasError()) {
-        		std::cerr << "[ERROR] Adding privacy unit: " << add_result->GetError() << std::endl;
-        		continue;
-        	}
-
-        	// ===== PHASE 3: Run automatically compiled query (PRAGMA) =====
+        	// ===== PHASE 2: Run automatically compiled query (PRAGMA) =====
             std::cout << "[" << Timestamp() << "] Running timed PAC automatic query..." << std::endl;
 
             // Reset seed for deterministic noise
@@ -375,15 +367,7 @@ void RunTPCHCompilerBenchmark(double scale_factor, const string &scale_factor_st
                 std::cout << "        Error: " << automatic_error << std::endl;
             }
 
-            // ===== PHASE 4: Remove privacy unit =====
-
-            std::cout << "[" << Timestamp() << "] Removing customer privacy unit" << std::endl;
-            auto remove_result = con.Query("pragma remove_pac_privacy_unit('customer')");
-            if (remove_result->HasError()) {
-                std::cerr << "[ERROR] Removing privacy unit: " << remove_result->GetError() << std::endl;
-            }
-
-            // ===== PHASE 5: Run manually compiled query (from file) =====
+            // ===== PHASE 3: Run manually compiled query (from file) =====
 
             std::cout << "[" << Timestamp() << "] Running timed PAC manual query..." << std::endl;
 

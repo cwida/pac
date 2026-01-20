@@ -74,6 +74,12 @@ vector<LogicalAggregate *> FilterTargetAggregates(const vector<LogicalAggregate 
 // cannot directly access tables from the outer query.
 bool IsInDelimJoinSubqueryBranch(unique_ptr<LogicalOperator> *root, LogicalOperator *target_node);
 
+// Check if a table's columns are accessible from the given starting operator.
+// Returns false if the table is in the right child of a MARK/SEMI/ANTI join,
+// because those join types don't output right-side columns (only the boolean mark).
+// This is important for IN/EXISTS subqueries where the subquery's columns aren't accessible.
+bool AreTableColumnsAccessible(LogicalOperator *from_op, idx_t table_index);
+
 } // namespace duckdb
 
 #endif // PAC_PLAN_TRAVERSAL_HPP

@@ -5,6 +5,8 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/parser/statement/create_statement.hpp"
 #include "duckdb/main/connection.hpp"
+#include "duckdb/main/database_manager.hpp"
+#include "duckdb/catalog/catalog.hpp"
 
 #include <iostream>
 #include <fstream>
@@ -20,13 +22,16 @@ namespace duckdb {
 struct PACDDLBindData : public TableFunctionData {
 	string stripped_sql;
 	bool executed;
+	string table_name; // Track which table's metadata was updated
 
-	explicit PACDDLBindData(string sql) : stripped_sql(std::move(sql)), executed(false) {
+	explicit PACDDLBindData(string sql, string tbl_name = "")
+	    : stripped_sql(std::move(sql)), executed(false), table_name(std::move(tbl_name)) {
 	}
 };
 
 // Global storage for the SQL to execute (workaround for bind function limitations)
 static thread_local string g_pac_pending_sql;
+static thread_local string g_pac_pending_table_name;
 
 // ============================================================================
 // Static bind and execution functions for PAC DDL
@@ -36,7 +41,9 @@ static unique_ptr<FunctionData> PACDDLBindFunction(ClientContext &context, Table
                                                    vector<LogicalType> &return_types, vector<string> &names) {
 	// Get the pending SQL from thread-local storage
 	string sql_to_execute = g_pac_pending_sql;
+	string table_name = g_pac_pending_table_name;
 	g_pac_pending_sql.clear();
+	g_pac_pending_table_name.clear();
 
 	if (!sql_to_execute.empty()) {
 		// Use a separate connection to execute the DDL to avoid deadlock
@@ -48,11 +55,27 @@ static unique_ptr<FunctionData> PACDDLBindFunction(ClientContext &context, Table
 		}
 	}
 
+	// Save metadata to JSON file after any PAC DDL operation (CREATE or ALTER)
+	// For ALTER PAC TABLE, sql_to_execute is empty but table_name is set
+	// Only save to file if NOT an in-memory database
+	if (!sql_to_execute.empty() || !table_name.empty()) {
+		string metadata_path = PACMetadataManager::GetMetadataFilePath(context);
+		// Don't save to file for in-memory databases
+		if (!metadata_path.empty()) {
+#ifdef DEBUG
+			std::cerr << "[PAC DEBUG] PACDDLBindFunction: Saving metadata to: " << metadata_path << std::endl;
+			std::cerr << "[PAC DEBUG] PACDDLBindFunction: table_name=" << table_name
+			          << ", sql_to_execute.empty()=" << sql_to_execute.empty() << std::endl;
+#endif
+			PACMetadataManager::Get().SaveToFile(metadata_path);
+		}
+	}
+
 	// Set up return type for empty result
 	return_types.push_back(LogicalType::BOOLEAN);
 	names.push_back("success");
 
-	return make_uniq<PACDDLBindData>(sql_to_execute);
+	return make_uniq<PACDDLBindData>(sql_to_execute, table_name);
 }
 
 static void PACDDLExecuteFunction(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
@@ -102,16 +125,34 @@ string PACMetadataManager::SerializeToJSON(const PACTableMetadata &metadata) {
 	}
 	ss << "],\n";
 
-	// Serialize links
+	// Serialize links (now with support for composite keys)
 	ss << "  \"links\": [\n";
 	for (size_t i = 0; i < metadata.links.size(); i++) {
 		if (i > 0)
 			ss << ",\n";
 		const auto &link = metadata.links[i];
 		ss << "    {\n";
-		ss << "      \"local_column\": \"" << link.local_column << "\",\n";
+
+		// Serialize local_columns array
+		ss << "      \"local_columns\": [";
+		for (size_t j = 0; j < link.local_columns.size(); j++) {
+			if (j > 0)
+				ss << ", ";
+			ss << "\"" << link.local_columns[j] << "\"";
+		}
+		ss << "],\n";
+
 		ss << "      \"referenced_table\": \"" << link.referenced_table << "\",\n";
-		ss << "      \"referenced_column\": \"" << link.referenced_column << "\"\n";
+
+		// Serialize referenced_columns array
+		ss << "      \"referenced_columns\": [";
+		for (size_t j = 0; j < link.referenced_columns.size(); j++) {
+			if (j > 0)
+				ss << ", ";
+			ss << "\"" << link.referenced_columns[j] << "\"";
+		}
+		ss << "]\n";
+
 		ss << "    }";
 	}
 	ss << "\n  ],\n";
@@ -191,33 +232,114 @@ PACTableMetadata PACMetadataManager::DeserializeFromJSON(const string &json) {
 		}
 	}
 
-	// Extract links
-	std::regex links_regex(R"xxx("links"\s*:\s*\[([^\]]*(?:\{[^}]*\}[^\]]*)*)\])xxx");
-	if (std::regex_search(json, match, links_regex)) {
-		string links_section = match[1].str();
-		std::regex link_obj_regex(R"xxx(\{[^}]+\})xxx");
-		auto begin = std::sregex_iterator(links_section.begin(), links_section.end(), link_obj_regex);
-		auto end = std::sregex_iterator();
-		for (auto it = begin; it != end; ++it) {
-			string link_json = (*it).str();
-			PACLink link;
-
-			std::regex local_col_regex(R"xxx("local_column"\s*:\s*"([^"]+)")xxx");
-			std::regex ref_table_regex(R"xxx("referenced_table"\s*:\s*"([^"]+)")xxx");
-			std::regex ref_col_regex(R"xxx("referenced_column"\s*:\s*"([^"]+)")xxx");
-
-			std::smatch link_match;
-			if (std::regex_search(link_json, link_match, local_col_regex)) {
-				link.local_column = link_match[1].str();
-			}
-			if (std::regex_search(link_json, link_match, ref_table_regex)) {
-				link.referenced_table = link_match[1].str();
-			}
-			if (std::regex_search(link_json, link_match, ref_col_regex)) {
-				link.referenced_column = link_match[1].str();
+	// Extract links section by finding "links" and manually parsing the array
+	size_t links_pos = json.find("\"links\"");
+	if (links_pos != string::npos) {
+		// Find the opening bracket of the links array
+		size_t array_start = json.find('[', links_pos);
+		if (array_start != string::npos) {
+			// Find the matching closing bracket by counting brackets
+			int bracket_count = 0;
+			size_t array_end = array_start;
+			for (size_t i = array_start; i < json.length(); i++) {
+				if (json[i] == '[') {
+					bracket_count++;
+				} else if (json[i] == ']') {
+					bracket_count--;
+					if (bracket_count == 0) {
+						array_end = i;
+						break;
+					}
+				}
 			}
 
-			metadata.links.push_back(link);
+			// Extract the links array content (without the outer brackets)
+			string links_section = json.substr(array_start + 1, array_end - array_start - 1);
+
+			// Manually parse link objects by counting braces to handle nested arrays
+			size_t pos = 0;
+			while (pos < links_section.length()) {
+				// Skip whitespace and commas
+				while (pos < links_section.length() && (links_section[pos] == ' ' || links_section[pos] == ',' ||
+				                                        links_section[pos] == '\n' || links_section[pos] == '\t')) {
+					pos++;
+				}
+
+				if (pos >= links_section.length() || links_section[pos] != '{') {
+					break;
+				}
+
+				// Find the matching closing brace
+				int brace_count = 0;
+				size_t start = pos;
+				while (pos < links_section.length()) {
+					if (links_section[pos] == '{') {
+						brace_count++;
+					} else if (links_section[pos] == '}') {
+						brace_count--;
+						if (brace_count == 0) {
+							pos++; // Include the closing brace
+							break;
+						}
+					}
+					pos++;
+				}
+
+				// Extract the link object JSON
+				string link_json = links_section.substr(start, pos - start);
+				PACLink link;
+
+				// Try new format first (local_columns/referenced_columns arrays)
+				std::regex local_cols_regex(R"xxx("local_columns"\s*:\s*\[(.*?)\])xxx");
+				std::regex ref_cols_regex(R"xxx("referenced_columns"\s*:\s*\[(.*?)\])xxx");
+				std::regex ref_table_regex(R"xxx("referenced_table"\s*:\s*"([^"]+)")xxx");
+
+				std::smatch link_match;
+				bool is_new_format = false;
+
+				if (std::regex_search(link_json, link_match, local_cols_regex)) {
+					is_new_format = true;
+					string local_cols_str = link_match[1].str();
+					std::regex col_regex(R"xxx("([^"]+)")xxx");
+					auto cols_begin = std::sregex_iterator(local_cols_str.begin(), local_cols_str.end(), col_regex);
+					auto cols_end = std::sregex_iterator();
+					for (auto col_it = cols_begin; col_it != cols_end; ++col_it) {
+						link.local_columns.push_back((*col_it)[1].str());
+					}
+				}
+
+				if (std::regex_search(link_json, link_match, ref_table_regex)) {
+					link.referenced_table = link_match[1].str();
+				}
+
+				if (std::regex_search(link_json, link_match, ref_cols_regex)) {
+					is_new_format = true;
+					string ref_cols_str = link_match[1].str();
+					std::regex col_regex(R"xxx("([^"]+)")xxx");
+					auto cols_begin = std::sregex_iterator(ref_cols_str.begin(), ref_cols_str.end(), col_regex);
+					auto cols_end = std::sregex_iterator();
+					for (auto col_it = cols_begin; col_it != cols_end; ++col_it) {
+						link.referenced_columns.push_back((*col_it)[1].str());
+					}
+				}
+
+				// Fall back to old format (single local_column/referenced_column)
+				if (!is_new_format) {
+					std::regex local_col_regex(R"xxx("local_column"\s*:\s*"([^"]+)")xxx");
+					std::regex ref_col_regex(R"xxx("referenced_column"\s*:\s*"([^"]+)")xxx");
+
+					if (std::regex_search(link_json, link_match, local_col_regex)) {
+						link.local_columns.push_back(link_match[1].str());
+					}
+					if (std::regex_search(link_json, link_match, ref_col_regex)) {
+						link.referenced_columns.push_back(link_match[1].str());
+					}
+				}
+
+				if (!link.local_columns.empty() && !link.referenced_table.empty()) {
+					metadata.links.push_back(link);
+				}
+			}
 		}
 	}
 
@@ -291,6 +413,27 @@ void PACMetadataManager::Clear() {
 	table_metadata.clear();
 }
 
+string PACMetadataManager::GetMetadataFilePath(ClientContext &context) {
+	// Get the database path from the default catalog
+	auto &db_name = DatabaseManager::GetDefaultDatabase(context);
+	auto &catalog = Catalog::GetCatalog(context, db_name);
+	string db_path = catalog.GetDBPath();
+
+	// If in-memory database or empty path, return empty string (don't save to file)
+	if (db_path.empty() || db_path == ":memory:") {
+		return "";
+	}
+
+	// Extract directory from database path and append metadata filename
+	size_t last_slash = db_path.find_last_of("/\\");
+	if (last_slash != string::npos) {
+		return db_path.substr(0, last_slash + 1) + "pac_metadata.json";
+	}
+
+	// No directory separator found, use current directory
+	return "pac_metadata.json";
+}
+
 // ============================================================================
 // PACParserExtension Implementation
 // ============================================================================
@@ -338,17 +481,43 @@ bool PACParserExtension::ExtractPACPrimaryKey(const string &clause, vector<strin
 }
 
 bool PACParserExtension::ExtractPACLink(const string &clause, PACLink &link) {
-	// Match: PAC LINK (local_col) REFERENCES table_name(ref_col)
+	// Match: PAC LINK (col1, col2, ...) REFERENCES table_name(ref_col1, ref_col2, ...)
+	// Support both single and composite foreign keys
 	std::regex link_regex(
-	    R"(pac\s+link\s*\(\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\)\s+references\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\))");
+	    R"(pac\s+link\s*\(\s*([^)]+)\s*\)\s+references\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(\s*([^)]+)\s*\))");
 	std::smatch match;
 	string clause_lower = StringUtil::Lower(clause);
 
 	if (std::regex_search(clause_lower, match, link_regex)) {
-		link.local_column = match[1].str();
+		// Parse local columns (comma-separated)
+		string local_cols_str = match[1].str();
+		auto local_cols = StringUtil::Split(local_cols_str, ',');
+		for (auto &col : local_cols) {
+			StringUtil::Trim(col);
+			if (!col.empty()) {
+				link.local_columns.push_back(col);
+			}
+		}
+
+		// Parse referenced table
 		link.referenced_table = match[2].str();
-		link.referenced_column = match[3].str();
-		return true;
+
+		// Parse referenced columns (comma-separated)
+		string ref_cols_str = match[3].str();
+		auto ref_cols = StringUtil::Split(ref_cols_str, ',');
+		for (auto &col : ref_cols) {
+			StringUtil::Trim(col);
+			if (!col.empty()) {
+				link.referenced_columns.push_back(col);
+			}
+		}
+
+		// Validate that number of local columns matches number of referenced columns
+		if (link.local_columns.size() != link.referenced_columns.size()) {
+			return false;
+		}
+
+		return !link.local_columns.empty();
 	}
 	return false;
 }
@@ -482,8 +651,13 @@ bool PACParserExtension::ParseAlterTableAddPAC(const string &query, string &stri
 	if (has_pac_key) {
 		vector<string> new_pk_cols;
 		if (ExtractPACPrimaryKey(query, new_pk_cols)) {
-			metadata.primary_key_columns.insert(metadata.primary_key_columns.end(), new_pk_cols.begin(),
-			                                    new_pk_cols.end());
+			// Only add columns that don't already exist
+			for (const auto &col : new_pk_cols) {
+				if (std::find(metadata.primary_key_columns.begin(), metadata.primary_key_columns.end(), col) ==
+				    metadata.primary_key_columns.end()) {
+					metadata.primary_key_columns.push_back(col);
+				}
+			}
 		}
 	}
 
@@ -496,7 +670,20 @@ bool PACParserExtension::ParseAlterTableAddPAC(const string &query, string &stri
 		for (auto it = begin; it != end; ++it) {
 			PACLink link;
 			if (ExtractPACLink((*it).str(), link)) {
-				metadata.links.push_back(link);
+				// Only add link if it doesn't already exist (same local_columns, referenced_table, and
+				// referenced_columns)
+				bool link_exists = false;
+				for (const auto &existing_link : metadata.links) {
+					if (existing_link.local_columns == link.local_columns &&
+					    existing_link.referenced_table == link.referenced_table &&
+					    existing_link.referenced_columns == link.referenced_columns) {
+						link_exists = true;
+						break;
+					}
+				}
+				if (!link_exists) {
+					metadata.links.push_back(link);
+				}
 			}
 		}
 	}
@@ -505,8 +692,13 @@ bool PACParserExtension::ParseAlterTableAddPAC(const string &query, string &stri
 	if (has_protected) {
 		vector<string> new_protected_cols;
 		if (ExtractProtectedColumns(query, new_protected_cols)) {
-			metadata.protected_columns.insert(metadata.protected_columns.end(), new_protected_cols.begin(),
-			                                  new_protected_cols.end());
+			// Only add columns that don't already exist
+			for (const auto &col : new_protected_cols) {
+				if (std::find(metadata.protected_columns.begin(), metadata.protected_columns.end(), col) ==
+				    metadata.protected_columns.end()) {
+					metadata.protected_columns.push_back(col);
+				}
+			}
 		}
 	}
 
@@ -561,6 +753,7 @@ ParserExtensionPlanResult PACParserExtension::PACPlanFunction(ParserExtensionInf
 
 	// Store the SQL in thread-local storage for the bind function to execute
 	g_pac_pending_sql = pac_data.stripped_sql;
+	g_pac_pending_table_name = pac_data.metadata.table_name;
 
 	// Return a table function that will execute the DDL in its bind phase
 	ParserExtensionPlanResult plan_result;

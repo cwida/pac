@@ -74,14 +74,6 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 	// Check if join elimination is enabled
 	bool join_elimination = GetBooleanSetting(input.context, "pac_join_elimination", false);
 
-#ifdef DEBUG
-	Printer::Print("ModifyPlanWithoutPU: join_elimination = " + std::to_string(join_elimination));
-	Printer::Print("ModifyPlanWithoutPU: privacy_units:");
-	for (auto &pu : privacy_units) {
-		Printer::Print("  " + pu);
-	}
-#endif
-
 	// Create the necessary LogicalGets for missing tables
 	// IMPORTANT: We need to preserve the FK path ordering when creating joins
 	// Use fk_path as the canonical ordering, filter to only missing tables
@@ -101,9 +93,6 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 	for (auto &table : missing_set) {
 		if (FindNodeRefByTable(&plan, table) != nullptr) {
 			actually_present.insert(table);
-#ifdef DEBUG
-			Printer::Print("ModifyPlanWithoutPU: Table " + table + " marked as missing but already present in plan");
-#endif
 		}
 	}
 
@@ -129,9 +118,6 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 			auto get = CreateLogicalGet(input.context, plan, table, idx);
 			get_map[table] = std::move(get);
 			ordered_table_names.push_back(table);
-#ifdef DEBUG
-			Printer::Print("ModifyPlanWithoutPU: Added table " + table + " to join chain");
-#endif
 			idx++;
 		} else if (actually_present.find(table) != actually_present.end()) {
 			// Track the order of already-present tables in the FK path
@@ -186,12 +172,6 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 	// If there are missing tables, we iterate over the LAST present table to add joins to missing tables
 	// If there are NO missing tables, we iterate over the FIRST present table to add FK joins for subqueries
 	string connecting_table = ordered_table_names.empty() ? connecting_table_for_joins : connecting_table_for_missing;
-
-#ifdef DEBUG
-	Printer::Print("ModifyPlanWithoutPU: connecting_table_for_joins = " + connecting_table_for_joins);
-	Printer::Print("ModifyPlanWithoutPU: connecting_table_for_missing = " + connecting_table_for_missing);
-	Printer::Print("ModifyPlanWithoutPU: using connecting_table = " + connecting_table);
-#endif
 
 	// Find ALL instances of the connecting table (for correlated subqueries, there may be multiple)
 	vector<unique_ptr<LogicalOperator> *> all_connecting_nodes;
@@ -366,10 +346,13 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 			// and this instance can access it directly (not in a subquery branch)
 			// Find it and map the connecting table to it
 			// Search BOTH gets_present AND actually_present tables (tables marked missing but found in plan)
+			// IMPORTANT: We must also check that the FK table's columns are ACCESSIBLE
+			// (not blocked by MARK/SEMI/ANTI joins)
 			vector<string> all_present_tables;
 			all_present_tables.insert(all_present_tables.end(), gets_present.begin(), gets_present.end());
 			all_present_tables.insert(all_present_tables.end(), actually_present.begin(), actually_present.end());
 
+			bool found_accessible_fk_table = false;
 			for (auto &present_table : all_present_tables) {
 				// Check if this present table has an FK to the PU
 				auto it = check.table_metadata.find(present_table);
@@ -392,22 +375,64 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 						FindAllNodesByTable(&plan, present_table, fk_table_nodes);
 						if (!fk_table_nodes.empty()) {
 							// For the main query instance, map to the FK table in the outer query
+							// BUT only if the FK table's columns are accessible (not on right side of MARK join)
 							for (auto *fk_node : fk_table_nodes) {
 								auto &fk_table_get = fk_node->get()->Cast<LogicalGet>();
-								// Map connecting table to this FK table instance
-								// Use the FK table's own index as both key and value since it IS the orders table
-								connecting_table_to_orders_table[connecting_table_idx] = fk_table_get.table_index;
+								idx_t fk_table_idx = fk_table_get.table_index;
+
+								// Check if this FK table is accessible from the plan root
+								// (not blocked by MARK/SEMI/ANTI joins)
+								if (AreTableColumnsAccessible(plan.get(), fk_table_idx)) {
+									// Map connecting table to this FK table instance
+									connecting_table_to_orders_table[connecting_table_idx] = fk_table_idx;
 #ifdef DEBUG
-								Printer::Print("ModifyPlanWithoutPU: Mapped connecting table #" +
-								               std::to_string(connecting_table_idx) + " to FK table " + present_table +
-								               " #" + std::to_string(fk_table_get.table_index) + " for hashing");
+									Printer::Print("ModifyPlanWithoutPU: Mapped connecting table #" +
+									               std::to_string(connecting_table_idx) + " to FK table " +
+									               present_table + " #" + std::to_string(fk_table_idx) +
+									               " for hashing");
 #endif
-								break; // Only need the first one for the main query
+									found_accessible_fk_table = true;
+									break;
+								}
+#ifdef DEBUG
+								else {
+									Printer::Print("ModifyPlanWithoutPU: FK table " + present_table + " #" +
+									               std::to_string(fk_table_idx) +
+									               " is NOT accessible (blocked by MARK/SEMI/ANTI join)");
+								}
+#endif
 							}
-							break;
+							if (found_accessible_fk_table) {
+								break;
+							}
 						}
 					}
 				}
+			}
+
+			// If no accessible FK table was found, we need to add a join to bring in the FK table
+			// on the accessible (left) side of the query
+			if (!found_accessible_fk_table && !fk_table_with_pu_reference.empty()) {
+#ifdef DEBUG
+				Printer::Print("ModifyPlanWithoutPU: No accessible FK table found, adding join for " +
+				               fk_table_with_pu_reference + " to connecting table #" +
+				               std::to_string(connecting_table_idx));
+#endif
+				// Create a join to the FK table
+				unique_ptr<LogicalOperator> existing_node = (*target_ref)->Copy(input.context);
+
+				auto local_idx = GetNextTableIndex(plan);
+				auto it = check.table_metadata.find(fk_table_with_pu_reference);
+				if (it == check.table_metadata.end()) {
+					throw InternalException("PAC compiler: missing table metadata for FK table: " +
+					                        fk_table_with_pu_reference);
+				}
+
+				auto fk_get = CreateLogicalGet(input.context, plan, fk_table_with_pu_reference, local_idx);
+				connecting_table_to_orders_table[connecting_table_idx] = local_idx;
+
+				auto join = CreateLogicalJoin(check, input.context, std::move(existing_node), std::move(fk_get));
+				ReplaceNode(plan, *target_ref, join);
 			}
 		}
 	}
@@ -451,13 +476,18 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 		// For nested queries, the outer aggregate might contain both inner and outer tables
 		// So we need to find which connecting table is in the aggregate's direct path
 		// Strategy: check which connecting table indices exist, and use the one that's NOT in a DELIM_GET
+		// IMPORTANT: Also check that the table's columns are actually accessible (not blocked by MARK/SEMI/ANTI joins)
 
 		// First, collect all connecting table indices that appear in the aggregate's subtree
+		// AND whose columns are actually accessible (not in right side of MARK/SEMI/ANTI join)
 		vector<idx_t> candidate_conn_tables;
 		for (auto &kv : connecting_table_to_orders_table) {
 			idx_t conn_table_idx = kv.first;
 			if (HasTableIndexInSubtree(target_agg, conn_table_idx)) {
-				candidate_conn_tables.push_back(conn_table_idx);
+				// Also check that this table's columns are accessible (not blocked by MARK/SEMI/ANTI joins)
+				if (AreTableColumnsAccessible(target_agg, conn_table_idx)) {
+					candidate_conn_tables.push_back(conn_table_idx);
+				}
 			}
 		}
 
@@ -1166,10 +1196,10 @@ void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExten
                              const string &query, const string &query_hash) {
 
 #ifdef DEBUG
-	Printer::Print("CompilePacBitsliceQuery called for " + std::to_string(privacy_units.size()) +
-	               " PUs, hash=" + query_hash);
+	Printer::Print("=== PAC COMPILATION START ===");
+	Printer::Print("Privacy units: " + std::to_string(privacy_units.size()));
 	for (auto &pu : privacy_units) {
-		Printer::Print("  PU: " + pu);
+		Printer::Print("  " + pu);
 	}
 #endif
 
@@ -1207,6 +1237,11 @@ void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExten
 	// Replan with selected optimizers disabled
 	ReplanWithoutOptimizers(input.context, input.context.GetCurrentQuery(), plan);
 
+#ifdef DEBUG
+	Printer::Print("=== PLAN BEFORE PAC TRANSFORMATION ===");
+	plan->Print();
+#endif
+
 	// Build two vectors: present (GETs already in the plan) and missing (GETs to create)
 	vector<string> gets_present;
 	vector<string> gets_missing;
@@ -1221,6 +1256,8 @@ void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExten
 		ModifyPlanWithPU(input, plan, check.scanned_pu_tables, check);
 	} else if (!check.fk_paths.empty()) {
 		// Case b) query does not scan PU table(s): follow FK paths
+		// Note: Tables with protected columns are now treated as implicit privacy units,
+		// so their paths are included in fk_paths automatically.
 		string start_table;
 		vector<string> target_pus;
 		PopulateGetsFromFKPath(check, gets_present, gets_missing, start_table, target_pus);
@@ -1240,34 +1277,13 @@ void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExten
 		// Convert set back to vector for ModifyPlanWithoutPU
 		vector<string> unique_gets_missing(all_missing_tables.begin(), all_missing_tables.end());
 
-#ifdef DEBUG
-		Printer::Print("PAC bitslice: FK path detection for multi-PU");
-		Printer::Print("start_table: " + start_table);
-		Printer::Print("target_pus:");
-		for (auto &pu : target_pus) {
-			Printer::Print("  " + pu);
-		}
-		Printer::Print("fk_path:");
-		for (auto &p : fk_path_to_use) {
-			Printer::Print("  " + p);
-		}
-		Printer::Print("gets_present:");
-		for (auto &g : gets_present) {
-			Printer::Print("  " + g);
-		}
-		Printer::Print("unique_gets_missing:");
-		for (auto &g : unique_gets_missing) {
-			Printer::Print("  " + g);
-		}
-#endif
-
 		ModifyPlanWithoutPU(check, input, plan, unique_gets_missing, gets_present, fk_path_to_use, privacy_units);
 	}
 
-	plan->ResolveOperatorTypes();
-	plan->Verify(input.context);
 #ifdef DEBUG
+	Printer::Print("=== PLAN AFTER PAC TRANSFORMATION ===");
 	plan->Print();
+	Printer::Print("=== PAC COMPILATION END ===");
 #endif
 }
 

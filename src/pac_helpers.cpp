@@ -27,6 +27,7 @@
 #include "duckdb/parser/constraints/unique_constraint.hpp"
 #include "duckdb/parser/constraints/foreign_key_constraint.hpp"
 #include "include/pac_optimizer.hpp"
+#include "include/pac_parser.hpp"
 
 using idx_set = std::unordered_set<idx_t>;
 
@@ -391,6 +392,7 @@ vector<string> FindPrimaryKey(ClientContext &context, const string &table_name) 
 // Find foreign key constraints declared on the given table. Mirrors FindPrimaryKey's lookup logic
 // and returns a vector of (referenced_table_name, fk_column_names) pairs for every FOREIGN KEY
 // constraint defined on the table (i.e., where this table is the foreign-key side).
+// Also includes PAC LINK relationships defined in PAC metadata.
 vector<std::pair<string, vector<string>>> FindForeignKeys(ClientContext &context, const string &table_name) {
 	Connection con(*context.db);
 	Catalog &catalog = Catalog::GetCatalog(context, DatabaseManager::GetDefaultDatabase(context));
@@ -422,27 +424,48 @@ vector<std::pair<string, vector<string>>> FindForeignKeys(ClientContext &context
 		}
 	};
 
-	// If schema-qualified name is provided (schema.table), prefer that exact lookup
+	// Extract unqualified table name for PAC metadata lookup
+	string unqualified_table_name = table_name;
 	auto dot_pos = table_name.find('.');
+	if (dot_pos != string::npos) {
+		unqualified_table_name = table_name.substr(dot_pos + 1);
+	}
+
+	// If schema-qualified name is provided (schema.table), prefer that exact lookup
 	if (dot_pos != string::npos) {
 		string schema = table_name.substr(0, dot_pos);
 		string tbl = table_name.substr(dot_pos + 1);
 		auto entry = catalog.GetEntry(context, CatalogType::TABLE_ENTRY, schema, tbl, OnEntryNotFound::RETURN_NULL);
-		if (!entry)
-			return {};
-		process_entry(entry.get());
-		return result;
-	}
-
-	// Non-qualified name: walk the search path
-	CatalogSearchPath path(context);
-	for (auto &entry_path : path.Get()) {
-		auto entry = catalog.GetEntry(context, CatalogType::TABLE_ENTRY, entry_path.schema, table_name,
-		                              OnEntryNotFound::RETURN_NULL);
 		if (!entry) {
-			continue;
+			// Even if table not found in catalog, check PAC metadata
+			goto check_pac_metadata;
 		}
 		process_entry(entry.get());
+	} else {
+		// Non-qualified name: walk the search path
+		CatalogSearchPath path(context);
+		for (auto &entry_path : path.Get()) {
+			auto entry = catalog.GetEntry(context, CatalogType::TABLE_ENTRY, entry_path.schema, table_name,
+			                              OnEntryNotFound::RETURN_NULL);
+			if (!entry) {
+				continue;
+			}
+			process_entry(entry.get());
+		}
+	}
+
+check_pac_metadata:
+	// Now also check for PAC links in the metadata manager
+	// PAC links supplement FK constraints, so we add them to the result
+	auto &metadata_mgr = PACMetadataManager::Get();
+	auto *pac_metadata = metadata_mgr.GetTableMetadata(unqualified_table_name);
+
+	if (pac_metadata) {
+		// Add each PAC link as a foreign key relationship
+		for (auto &link : pac_metadata->links) {
+			// PAC links now support composite keys with local_columns and referenced_columns arrays
+			result.emplace_back(link.referenced_table, link.local_columns);
+		}
 	}
 
 	return result;

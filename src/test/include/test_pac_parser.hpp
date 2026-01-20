@@ -20,6 +20,8 @@ public:
 	static void TestCreatePACTableParsing();
 	// Test parsing of ALTER TABLE with PAC clauses
 	static void TestAlterTablePACParsing();
+	// Test composite foreign key parsing and serialization
+	static void TestCompositeKeyParsing();
 	// Test regex patterns for PAC clauses
 	static void TestRegexPatterns();
 	// Run all tests

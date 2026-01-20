@@ -18,6 +18,7 @@
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/common/enums/optimizer_type.hpp"
 #include "include/pac_compatibility_check.hpp"
+#include "include/pac_parser.hpp"
 
 #include <vector>
 #include <duckdb/planner/planner.hpp>
@@ -122,14 +123,32 @@ unique_ptr<LogicalOperator> CreateLogicalJoin(const PACCompatibilityResult &chec
 	const auto &left_meta = lit->second;
 	const auto &right_meta = rit->second;
 
+	// Get PAC metadata manager for looking up PAC LINKs with referenced_columns
+	auto &metadata_mgr = PACMetadataManager::Get();
+
 	vector<JoinCondition> conditions;
 
 	// Try: left has FK referencing right
 	for (auto &fk : left_meta.fks) {
 		if (fk.first == right_table_name) {
 			const auto &left_fk_cols = fk.second;
-			const auto &right_pks = right_meta.pks;
-			BuildJoinConditions(left, right.get(), left_fk_cols, right_pks, left_table_name, right_table_name,
+			vector<string> right_cols = right_meta.pks;
+
+			// If right table has no PKs defined, try to get referenced_columns from PAC LINK
+			if (right_cols.empty()) {
+				auto *left_pac_metadata = metadata_mgr.GetTableMetadata(left_table_name);
+				if (left_pac_metadata) {
+					for (auto &link : left_pac_metadata->links) {
+						if (link.referenced_table == right_table_name && link.local_columns == left_fk_cols &&
+						    !link.referenced_columns.empty()) {
+							right_cols = link.referenced_columns;
+							break;
+						}
+					}
+				}
+			}
+
+			BuildJoinConditions(left, right.get(), left_fk_cols, right_cols, left_table_name, right_table_name,
 			                    conditions);
 			break;
 		}
@@ -140,8 +159,23 @@ unique_ptr<LogicalOperator> CreateLogicalJoin(const PACCompatibilityResult &chec
 		for (auto &fk : right_meta.fks) {
 			if (fk.first == left_table_name) {
 				const auto &right_fk_cols = fk.second;
-				const auto &left_pks = left_meta.pks;
-				BuildJoinConditions(left, right.get(), left_pks, right_fk_cols, left_table_name, right_table_name,
+				vector<string> left_cols = left_meta.pks;
+
+				// If left table has no PKs defined, try to get referenced_columns from PAC LINK
+				if (left_cols.empty()) {
+					auto *right_pac_metadata = metadata_mgr.GetTableMetadata(right_table_name);
+					if (right_pac_metadata) {
+						for (auto &link : right_pac_metadata->links) {
+							if (link.referenced_table == left_table_name && link.local_columns == right_fk_cols &&
+							    !link.referenced_columns.empty()) {
+								left_cols = link.referenced_columns;
+								break;
+							}
+						}
+					}
+				}
+
+				BuildJoinConditions(left, right.get(), left_cols, right_fk_cols, left_table_name, right_table_name,
 				                    conditions);
 				break;
 			}

@@ -17,14 +17,22 @@ namespace duckdb {
 
 // Represents a PAC link (foreign key relationship without actual FK constraint)
 struct PACLink {
-	string local_column;
+	vector<string> local_columns; // Support multiple columns for composite keys
 	string referenced_table;
-	string referenced_column;
+	vector<string> referenced_columns; // Support multiple columns for composite keys
 
 	PACLink() = default;
+
+	// Constructor for single-column FK (backward compatibility)
 	PACLink(string local_col, string ref_table, string ref_col)
-	    : local_column(std::move(local_col)), referenced_table(std::move(ref_table)),
-	      referenced_column(std::move(ref_col)) {
+	    : local_columns({std::move(local_col)}), referenced_table(std::move(ref_table)),
+	      referenced_columns({std::move(ref_col)}) {
+	}
+
+	// Constructor for composite FK
+	PACLink(vector<string> local_cols, string ref_table, vector<string> ref_cols)
+	    : local_columns(std::move(local_cols)), referenced_table(std::move(ref_table)),
+	      referenced_columns(std::move(ref_cols)) {
 	}
 };
 
@@ -62,6 +70,9 @@ public:
 
 	// Clear all metadata
 	void Clear();
+
+	// Get the metadata file path based on database path
+	static string GetMetadataFilePath(ClientContext &context);
 
 	// Serialize table metadata to JSON string
 	static string SerializeToJSON(const PACTableMetadata &metadata);
