@@ -122,6 +122,11 @@ vector<string> PACMetadataManager::GetAllTableNames() const {
 	return names;
 }
 
+void PACMetadataManager::RemoveTable(const string &table_name) {
+	std::lock_guard<std::mutex> lock(metadata_mutex);
+	table_metadata.erase(table_name);
+}
+
 string PACMetadataManager::SerializeToJSON(const PACTableMetadata &metadata) const {
 	std::stringstream ss;
 	ss << "{\n";
@@ -759,6 +764,119 @@ bool PACParserExtension::ParseAlterTableAddPAC(const string &query, string &stri
 	return true;
 }
 
+bool PACParserExtension::ParseAlterTableDropPAC(const string &query, string &stripped_sql, PACTableMetadata &metadata) {
+	string query_lower = StringUtil::Lower(query);
+
+	// Check if this is an ALTER PAC TABLE ... DROP statement
+	// Must have "drop" but NOT "add" to avoid matching ADD statements
+	if (query_lower.find("alter pac table") == string::npos || query_lower.find("drop") == string::npos ||
+	    query_lower.find("add") != string::npos) {
+		return false;
+	}
+
+	// Extract table name
+	std::regex alter_pac_regex(R"(alter\s+pac\s+table\s+([a-zA-Z_][a-zA-Z0-9_]*))");
+	std::smatch match;
+	if (!std::regex_search(query_lower, match, alter_pac_regex)) {
+		return false;
+	}
+	metadata.table_name = match[1].str();
+
+	// Get existing metadata - it must exist for DROP operations
+	auto existing = PACMetadataManager::Get().GetTableMetadata(metadata.table_name);
+	if (!existing) {
+		throw ParserException("Table '" + metadata.table_name + "' does not have any PAC metadata to drop");
+	}
+	metadata = *existing;
+
+	// Check for DROP PAC LINK (column_list)
+	bool has_drop_link = query_lower.find("drop pac link") != string::npos;
+	bool has_drop_protected = query_lower.find("drop protected") != string::npos;
+
+	if (!has_drop_link && !has_drop_protected) {
+		return false;
+	}
+
+	// Handle DROP PAC LINK (col1, col2, ...)
+	if (has_drop_link) {
+		std::regex drop_link_regex(R"(drop\s+pac\s+link\s*\(\s*([^)]+)\s*\))", std::regex_constants::icase);
+		if (std::regex_search(query_lower, match, drop_link_regex)) {
+			string cols_str = match[1].str();
+			auto drop_cols = StringUtil::Split(cols_str, ',');
+			vector<string> normalized_drop_cols;
+			for (auto &col : drop_cols) {
+				StringUtil::Trim(col);
+				if (!col.empty()) {
+					normalized_drop_cols.push_back(StringUtil::Lower(col));
+				}
+			}
+
+			// Find and remove the link with these local columns
+			bool found = false;
+			for (auto it = metadata.links.begin(); it != metadata.links.end(); ++it) {
+				// Normalize local columns for comparison
+				vector<string> normalized_local_cols;
+				for (const auto &col : it->local_columns) {
+					normalized_local_cols.push_back(StringUtil::Lower(col));
+				}
+
+				if (normalized_local_cols == normalized_drop_cols) {
+					metadata.links.erase(it);
+					found = true;
+					break;
+				}
+			}
+
+			if (!found) {
+				if (normalized_drop_cols.size() == 1) {
+					throw ParserException("No PAC LINK found on column '" + normalized_drop_cols[0] + "'");
+				} else {
+					string cols_list;
+					for (size_t i = 0; i < normalized_drop_cols.size(); i++) {
+						if (i > 0)
+							cols_list += ", ";
+						cols_list += "'" + normalized_drop_cols[i] + "'";
+					}
+					throw ParserException("No PAC LINK found on columns (" + cols_list + ")");
+				}
+			}
+		}
+	}
+
+	// Handle DROP PROTECTED (col1, col2, ...)
+	if (has_drop_protected) {
+		std::regex drop_protected_regex(R"(drop\s+protected\s*\(\s*([^)]+)\s*\))", std::regex_constants::icase);
+		if (std::regex_search(query_lower, match, drop_protected_regex)) {
+			string cols_str = match[1].str();
+			auto drop_cols = StringUtil::Split(cols_str, ',');
+			for (auto &col : drop_cols) {
+				StringUtil::Trim(col);
+				if (col.empty())
+					continue;
+
+				// Find and remove the protected column
+				bool found = false;
+				for (auto it = metadata.protected_columns.begin(); it != metadata.protected_columns.end(); ++it) {
+					if (StringUtil::Lower(*it) == StringUtil::Lower(col)) {
+						metadata.protected_columns.erase(it);
+						found = true;
+						break;
+					}
+				}
+
+				if (!found) {
+					throw ParserException("Column '" + col + "' is not marked as protected");
+				}
+			}
+		}
+	}
+
+	// For ALTER PAC TABLE DROP, we only update metadata, no actual DDL execution needed
+	stripped_sql = "";
+
+	return true;
+}
+
 ParserExtensionParseResult PACParserExtension::PACParseFunction(ParserExtensionInfo *info, const string &query) {
 	// Clean up query - preserve spaces but remove semicolons and newlines
 	string clean_query = query;
@@ -777,6 +895,10 @@ ParserExtensionParseResult PACParserExtension::PACParseFunction(ParserExtensionI
 
 	// Try to parse as CREATE PAC TABLE
 	if (ParseCreatePACTable(clean_query, stripped_sql, metadata)) {
+		is_pac_ddl = true;
+	}
+	// Try to parse as ALTER TABLE DROP PAC (check DROP before ADD since DROP is more specific)
+	else if (ParseAlterTableDropPAC(clean_query, stripped_sql, metadata)) {
 		is_pac_ddl = true;
 	}
 	// Try to parse as ALTER TABLE ADD PAC

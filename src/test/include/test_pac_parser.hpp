@@ -24,6 +24,10 @@ public:
 	static void TestCompositeKeyParsing();
 	// Test regex patterns for PAC clauses
 	static void TestRegexPatterns();
+	// Test DROP PAC constraints (PROTECTED and LINK)
+	static void TestDropPACConstraints();
+	// Test DROP TABLE cleanup of referencing links
+	static void TestDropTableCleanup();
 	// Run all tests
 	static void RunAllTests();
 };

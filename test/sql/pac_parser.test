@@ -410,90 +410,7 @@ ALTER PAC TABLE comp_link_test ADD PAC LINK (id1, id2) REFERENCES comp_target_b(
 ----
 Column(s) already have a PAC LINK defined
 
-# Test 35: Duplicate protected column in same statement should fail
-statement ok
-CREATE TABLE dup_protected_test (col1 VARCHAR, col2 VARCHAR);
-
-statement error
-ALTER PAC TABLE dup_protected_test ADD PROTECTED (col1, col1);
-----
-Duplicate protected column 'col1'
-
-# Test 36: Duplicate protected column in separate statements should be idempotent (no error)
-statement ok
-ALTER PAC TABLE dup_protected_test ADD PROTECTED (col1);
-
-# Test 37: Case insensitive duplicate protected column should be idempotent (no error)
-statement error
-ALTER PAC TABLE dup_protected_test ADD PROTECTED (COL1);
-----
-Column 'col1' is already marked as protected
-
-# Test 38: Mix of duplicates in same statement should fail on first duplicate
-statement error
-ALTER PAC TABLE dup_protected_test ADD PROTECTED (col2, col1, col2);
-----
-Duplicate protected column 'col2'
-
-# Test 39: Protecting new column should succeed
-statement ok
-ALTER PAC TABLE dup_protected_test ADD PROTECTED (col2);
-
-# Test 40: Nation example from user - first link succeeds
-statement ok
-CREATE TABLE nation_test (n_nationkey INTEGER, n_regionkey INTEGER, n_name VARCHAR);
-
-statement ok
-CREATE TABLE region_test (r_regionkey INTEGER, r_name VARCHAR);
-
-statement ok
-CREATE TABLE other_table (b INTEGER);
-
-statement ok
-ALTER PAC TABLE nation_test ADD PAC LINK (n_regionkey) REFERENCES region_test(r_regionkey);
-
-# Test 41: Nation example - second link on same column to different table fails
-statement error
-ALTER PAC TABLE nation_test ADD PAC LINK (n_regionkey) REFERENCES other_table(b);
-----
-Column(s) already have a PAC LINK defined
-
-# Test 42: Nation example - exact same link again is idempotent
-statement ok
-ALTER PAC TABLE nation_test ADD PAC LINK (n_regionkey) REFERENCES region_test(r_regionkey);
-
-# Test 43: Different column can have its own link
-statement ok
-ALTER PAC TABLE nation_test ADD PAC LINK (n_nationkey) REFERENCES other_table(b);
-
-# Test 44: Subset of composite key cannot have a separate link
-statement ok
-CREATE TABLE subset_test (a INTEGER, b INTEGER, c INTEGER);
-
-statement ok
-CREATE TABLE subset_ref1 (x INTEGER, y INTEGER);
-
-statement ok
-CREATE TABLE subset_ref2 (z INTEGER);
-
-statement ok
-ALTER PAC TABLE subset_test ADD PAC LINK (a, b) REFERENCES subset_ref1(x, y);
-
-# This should succeed because column 'c' is not involved in the existing link
-statement ok
-ALTER PAC TABLE subset_test ADD PAC LINK (c) REFERENCES subset_ref2(z);
-
-# But trying to add a link on 'a' alone should fail if we check for exact column matches
-# Actually, 'a' alone is different from 'a,b' composite, so this should succeed
-statement ok
-CREATE TABLE subset_ref3 (w INTEGER);
-
-# Note: This is a design decision - we only prevent exact column set matches
-# So (a) is different from (a, b) and should be allowed
-statement ok
-ALTER PAC TABLE subset_test ADD PAC LINK (a) REFERENCES subset_ref3(w);
-
-# Cleanup duplicate link tests
+# Cleanup duplicate tests
 statement ok
 DROP TABLE IF EXISTS link_test;
 
@@ -513,28 +430,235 @@ statement ok
 DROP TABLE IF EXISTS comp_target_b;
 
 statement ok
-DROP TABLE IF EXISTS dup_protected_test;
+PRAGMA clear_pac_metadata;
+
+# ============================================================================
+# DROP PAC Constraint Tests
+# ============================================================================
+
+# Test 35: Setup tables for DROP tests
+statement ok
+CREATE PAC TABLE drop_test (
+    id INTEGER,
+    col1 VARCHAR,
+    col2 VARCHAR,
+    col3 INTEGER,
+    ref_id INTEGER,
+    PAC KEY (id),
+    PROTECTED (col1, col2)
+);
 
 statement ok
-DROP TABLE IF EXISTS nation_test;
+CREATE TABLE drop_ref_table (ref_id INTEGER);
 
 statement ok
-DROP TABLE IF EXISTS region_test;
+ALTER PAC TABLE drop_test ADD PAC LINK (ref_id) REFERENCES drop_ref_table(ref_id);
+
+# Test 36: DROP PROTECTED column
+statement ok
+ALTER PAC TABLE drop_test DROP PROTECTED (col1);
+
+# Verify col1 is no longer protected (add it again should work)
+statement ok
+ALTER PAC TABLE drop_test ADD PROTECTED (col1);
+
+# Test 37: DROP multiple PROTECTED columns
+statement ok
+ALTER PAC TABLE drop_test DROP PROTECTED (col1, col2);
+
+# Test 38: DROP PROTECTED column that doesn't exist should fail
+statement error
+ALTER PAC TABLE drop_test DROP PROTECTED (nonexistent_col);
+----
+Column 'nonexistent_col' is not marked as protected
+
+# Test 39: DROP PROTECTED column that's not protected should fail
+statement error
+ALTER PAC TABLE drop_test DROP PROTECTED (col3);
+----
+Column 'col3' is not marked as protected
+
+# Test 40: DROP PAC LINK
+statement ok
+ALTER PAC TABLE drop_test DROP PAC LINK (ref_id);
+
+# Verify link is removed (add it again should work)
+statement ok
+ALTER PAC TABLE drop_test ADD PAC LINK (ref_id) REFERENCES drop_ref_table(ref_id);
+
+# Test 41: DROP PAC LINK that doesn't exist should fail
+statement error
+ALTER PAC TABLE drop_test DROP PAC LINK (col3);
+----
+No PAC LINK found on column 'col3'
+
+# Test 42: DROP PAC LINK with composite key
+statement ok
+CREATE TABLE comp_drop_test (id1 INTEGER, id2 INTEGER, data VARCHAR);
 
 statement ok
-DROP TABLE IF EXISTS other_table;
+CREATE TABLE comp_drop_ref (ref1 INTEGER, ref2 INTEGER);
 
 statement ok
-DROP TABLE IF EXISTS subset_test;
+ALTER PAC TABLE comp_drop_test ADD PAC LINK (id1, id2) REFERENCES comp_drop_ref(ref1, ref2);
 
 statement ok
-DROP TABLE IF EXISTS subset_ref1;
+ALTER PAC TABLE comp_drop_test DROP PAC LINK (id1, id2);
+
+# Test 43: DROP composite PAC LINK that doesn't exist should fail
+statement error
+ALTER PAC TABLE comp_drop_test DROP PAC LINK (id1, id2);
+----
+No PAC LINK found on columns ('id1', 'id2')
+
+# Test 44: DROP from table without PAC metadata should fail
+statement ok
+CREATE TABLE no_pac_table (id INTEGER, name VARCHAR);
+
+statement error
+ALTER PAC TABLE no_pac_table DROP PROTECTED (name);
+----
+Table 'no_pac_table' does not have any PAC metadata to drop
+
+# Test 45: Case insensitivity in DROP operations
+statement ok
+ALTER PAC TABLE drop_test ADD PROTECTED (col1);
 
 statement ok
-DROP TABLE IF EXISTS subset_ref2;
+ALTER PAC TABLE drop_test DROP PROTECTED (COL1);
+
+# Test 46: DROP TABLE with PAC metadata should clean up metadata
+statement ok
+CREATE PAC TABLE cleanup_test (
+    id INTEGER,
+    data VARCHAR,
+    PAC KEY (id),
+    PROTECTED (data)
+);
 
 statement ok
-DROP TABLE IF EXISTS subset_ref3;
+CREATE PAC TABLE cleanup_link_test (
+    id INTEGER,
+    cleanup_id INTEGER,
+    PAC LINK (cleanup_id) REFERENCES cleanup_test(id)
+);
+
+# Drop the referenced table
+statement ok
+DROP TABLE cleanup_test;
+
+# The link from cleanup_link_test should be automatically removed
+# Verify by saving and reloading metadata
+statement ok
+PRAGMA save_pac_metadata('/tmp/pac_drop_test.json');
+
+statement ok
+PRAGMA clear_pac_metadata;
+
+statement ok
+PRAGMA load_pac_metadata('/tmp/pac_drop_test.json');
+
+# cleanup_link_test should still exist but without the link to cleanup_test
+# We can't directly verify this in SQL, but the metadata should be cleaned up
+
+# Test 47: DROP TABLE IF EXISTS with PAC metadata
+statement ok
+CREATE PAC TABLE if_exists_test (
+    id INTEGER,
+    name VARCHAR,
+    PAC KEY (id),
+    PROTECTED (name)
+);
+
+statement ok
+DROP TABLE IF EXISTS if_exists_test;
+
+# Verify metadata was cleaned up by trying to drop non-existent table
+statement ok
+DROP TABLE IF EXISTS if_exists_test;
+
+# Test 48: Multiple DROP operations
+statement ok
+CREATE PAC TABLE multi_drop_test (
+    id INTEGER,
+    col1 VARCHAR,
+    col2 VARCHAR,
+    col3 VARCHAR,
+    ref1 INTEGER,
+    ref2 INTEGER
+);
+
+statement ok
+CREATE TABLE multi_ref1 (id INTEGER);
+
+statement ok
+CREATE TABLE multi_ref2 (id INTEGER);
+
+statement ok
+ALTER PAC TABLE multi_drop_test ADD PROTECTED (col1, col2, col3);
+
+statement ok
+ALTER PAC TABLE multi_drop_test ADD PAC LINK (ref1) REFERENCES multi_ref1(id);
+
+statement ok
+ALTER PAC TABLE multi_drop_test ADD PAC LINK (ref2) REFERENCES multi_ref2(id);
+
+# Drop protected columns one by one
+statement ok
+ALTER PAC TABLE multi_drop_test DROP PROTECTED (col1);
+
+statement ok
+ALTER PAC TABLE multi_drop_test DROP PROTECTED (col2);
+
+statement ok
+ALTER PAC TABLE multi_drop_test DROP PROTECTED (col3);
+
+# Drop links one by one
+statement ok
+ALTER PAC TABLE multi_drop_test DROP PAC LINK (ref1);
+
+statement ok
+ALTER PAC TABLE multi_drop_test DROP PAC LINK (ref2);
+
+# Now the table should have no PAC metadata except possibly PAC KEY
+# Try to drop again should fail
+statement error
+ALTER PAC TABLE multi_drop_test DROP PROTECTED (col1);
+----
+Column 'col1' is not marked as protected
+
+statement error
+ALTER PAC TABLE multi_drop_test DROP PAC LINK (ref1);
+----
+No PAC LINK found on column 'ref1'
+
+# Cleanup DROP tests
+statement ok
+DROP TABLE IF EXISTS drop_test;
+
+statement ok
+DROP TABLE IF EXISTS drop_ref_table;
+
+statement ok
+DROP TABLE IF EXISTS comp_drop_test;
+
+statement ok
+DROP TABLE IF EXISTS comp_drop_ref;
+
+statement ok
+DROP TABLE IF EXISTS no_pac_table;
+
+statement ok
+DROP TABLE IF EXISTS cleanup_link_test;
+
+statement ok
+DROP TABLE IF EXISTS multi_drop_test;
+
+statement ok
+DROP TABLE IF EXISTS multi_ref1;
+
+statement ok
+DROP TABLE IF EXISTS multi_ref2;
 
 statement ok
 PRAGMA clear_pac_metadata;

@@ -12,10 +12,119 @@
 #include "include/pac_helpers.hpp"
 // Include PAC bitslice compiler
 #include "include/pac_bitslice_compiler.hpp"
+// Include PAC parser for metadata management
+#include "include/pac_parser.hpp"
+// Include DuckDB headers for DROP operation handling
+#include "duckdb/execution/operator/schema/physical_drop.hpp"
+#include "duckdb/parser/parsed_data/drop_info.hpp"
+#include "duckdb/planner/operator/logical_simple.hpp"
 
 namespace duckdb {
 
-// todo- optimizer rule for DROP TABLE
+// ============================================================================
+// PACDropTableRule - Separate optimizer rule for DROP TABLE operations
+// ============================================================================
+
+void PACDropTableRule::PACDropTableRuleFunction(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan) {
+	if (!plan || plan->type != LogicalOperatorType::LOGICAL_DROP) {
+		return;
+	}
+
+	// Cast to LogicalSimple to access the parse info (DROP operations use LogicalSimple)
+	auto &simple = plan->Cast<LogicalSimple>();
+	if (simple.info->info_type != ParseInfoType::DROP_INFO) {
+		return;
+	}
+
+	// Cast to DropInfo to access drop details
+	auto &drop_info = simple.info->Cast<DropInfo>();
+
+	// Only handle DROP TABLE operations
+	if (drop_info.type != CatalogType::TABLE_ENTRY) {
+		return;
+	}
+
+	string table_name = drop_info.name;
+
+	// Check if this table has PAC metadata
+	auto &metadata_mgr = PACMetadataManager::Get();
+	if (!metadata_mgr.HasMetadata(table_name)) {
+		// No metadata for this table, nothing to clean up
+		return;
+	}
+
+#ifdef DEBUG
+	std::cerr << "[PAC DEBUG] DROP TABLE detected for table with PAC metadata: " << table_name << std::endl;
+#endif
+
+	// Check if any other tables have PAC LINKs pointing to this table
+	auto all_tables = metadata_mgr.GetAllTableNames();
+	vector<string> tables_with_links_to_dropped;
+
+	for (const auto &other_table : all_tables) {
+		if (StringUtil::Lower(other_table) == StringUtil::Lower(table_name)) {
+			continue; // Skip the table being dropped
+		}
+
+		auto other_metadata = metadata_mgr.GetTableMetadata(other_table);
+		if (!other_metadata) {
+			continue;
+		}
+
+		// Check if this table has any links to the table being dropped
+		for (const auto &link : other_metadata->links) {
+			if (StringUtil::Lower(link.referenced_table) == StringUtil::Lower(table_name)) {
+				tables_with_links_to_dropped.push_back(other_table);
+				break;
+			}
+		}
+	}
+
+	// Remove links from other tables that reference the dropped table
+	for (const auto &other_table : tables_with_links_to_dropped) {
+		auto other_metadata = metadata_mgr.GetTableMetadata(other_table);
+		if (!other_metadata) {
+			continue;
+		}
+
+		// Make a copy and remove links
+		PACTableMetadata updated_metadata = *other_metadata;
+		updated_metadata.links.erase(std::remove_if(updated_metadata.links.begin(), updated_metadata.links.end(),
+		                                            [&table_name](const PACLink &link) {
+			                                            return StringUtil::Lower(link.referenced_table) ==
+			                                                   StringUtil::Lower(table_name);
+		                                            }),
+		                             updated_metadata.links.end());
+
+		// Update the metadata
+		metadata_mgr.AddOrUpdateTable(other_table, updated_metadata);
+
+#ifdef DEBUG
+		std::cerr << "[PAC DEBUG] Removed PAC LINKs from table '" << other_table << "' that referenced dropped table '"
+		          << table_name << "'" << std::endl;
+#endif
+	}
+
+	// Remove metadata for the dropped table
+	metadata_mgr.RemoveTable(table_name);
+
+#ifdef DEBUG
+	std::cerr << "[PAC DEBUG] Removed PAC metadata for dropped table: " << table_name << std::endl;
+#endif
+
+	// Save updated metadata to file
+	string metadata_path = PACMetadataManager::GetMetadataFilePath(input.context);
+	if (!metadata_path.empty()) {
+		metadata_mgr.SaveToFile(metadata_path);
+#ifdef DEBUG
+		std::cerr << "[PAC DEBUG] Saved updated PAC metadata after DROP TABLE" << std::endl;
+#endif
+	}
+}
+
+// ============================================================================
+// PACRewriteRule - Main PAC query rewriting optimizer rule
+// ============================================================================
 
 void PACRewriteRule::PACRewriteRuleFunction(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan) {
 

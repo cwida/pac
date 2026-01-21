@@ -373,6 +373,147 @@ void TestPACParser::TestRegexPatterns() {
 	TEST_ASSERT(stripped.find("id INTEGER") != string::npos, "Stripped SQL should still contain column definitions");
 }
 
+void TestPACParser::TestDropPACConstraints() {
+	auto &manager = PACMetadataManager::Get();
+	manager.Clear();
+
+	// Setup: Create metadata with protected columns and links
+	PACTableMetadata metadata("drop_test_table");
+	metadata.primary_key_columns = {"id"};
+	metadata.protected_columns = {"col1", "col2", "col3"};
+	metadata.links.push_back(PACLink("ref1", "ref_table", "id"));
+	metadata.links.push_back(PACLink(vector<string> {"key1", "key2"}, "comp_ref_table", vector<string> {"id1", "id2"}));
+	manager.AddOrUpdateTable("drop_test_table", metadata);
+
+	// Test removing protected column
+	auto *current = manager.GetTableMetadata("drop_test_table");
+	TEST_ASSERT(current->protected_columns.size() == 3, "Should have 3 protected columns initially");
+
+	// Simulate dropping col1
+	PACTableMetadata updated1 = *current;
+	updated1.protected_columns.erase(
+	    std::remove(updated1.protected_columns.begin(), updated1.protected_columns.end(), "col1"),
+	    updated1.protected_columns.end());
+	manager.AddOrUpdateTable("drop_test_table", updated1);
+
+	current = manager.GetTableMetadata("drop_test_table");
+	TEST_ASSERT(current->protected_columns.size() == 2, "Should have 2 protected columns after drop");
+	TEST_ASSERT(std::find(current->protected_columns.begin(), current->protected_columns.end(), "col1") ==
+	                current->protected_columns.end(),
+	            "col1 should be removed");
+	TEST_ASSERT(std::find(current->protected_columns.begin(), current->protected_columns.end(), "col2") !=
+	                current->protected_columns.end(),
+	            "col2 should still exist");
+
+	// Test removing PAC LINK (single column)
+	TEST_ASSERT(current->links.size() == 2, "Should have 2 links initially");
+
+	PACTableMetadata updated2 = *current;
+	updated2.links.erase(std::remove_if(updated2.links.begin(), updated2.links.end(),
+	                                    [](const PACLink &link) {
+		                                    return link.local_columns.size() == 1 && link.local_columns[0] == "ref1";
+	                                    }),
+	                     updated2.links.end());
+	manager.AddOrUpdateTable("drop_test_table", updated2);
+
+	current = manager.GetTableMetadata("drop_test_table");
+	TEST_ASSERT(current->links.size() == 1, "Should have 1 link after drop");
+	TEST_ASSERT(current->links[0].local_columns.size() == 2, "Remaining link should be composite");
+
+	// Test removing composite PAC LINK
+	PACTableMetadata updated3 = *current;
+	updated3.links.erase(std::remove_if(updated3.links.begin(), updated3.links.end(),
+	                                    [](const PACLink &link) {
+		                                    return link.local_columns.size() == 2 && link.local_columns[0] == "key1" &&
+		                                           link.local_columns[1] == "key2";
+	                                    }),
+	                     updated3.links.end());
+	manager.AddOrUpdateTable("drop_test_table", updated3);
+
+	current = manager.GetTableMetadata("drop_test_table");
+	TEST_ASSERT(current->links.empty(), "Should have no links after dropping all");
+
+	// Test RemoveTable functionality
+	TEST_ASSERT(manager.HasMetadata("drop_test_table"), "Table should exist before removal");
+	manager.RemoveTable("drop_test_table");
+	TEST_ASSERT(!manager.HasMetadata("drop_test_table"), "Table should not exist after removal");
+	TEST_ASSERT(manager.GetTableMetadata("drop_test_table") == nullptr, "Should return null after removal");
+}
+
+void TestPACParser::TestDropTableCleanup() {
+	auto &manager = PACMetadataManager::Get();
+	manager.Clear();
+
+	// Setup: Create tables with links
+	PACTableMetadata target_table("target_table");
+	target_table.primary_key_columns = {"id"};
+	manager.AddOrUpdateTable("target_table", target_table);
+
+	PACTableMetadata link_table1("link_table1");
+	link_table1.links.push_back(PACLink("target_id", "target_table", "id"));
+	manager.AddOrUpdateTable("link_table1", link_table1);
+
+	PACTableMetadata link_table2("link_table2");
+	link_table2.links.push_back(PACLink("target_id", "target_table", "id"));
+	link_table2.links.push_back(PACLink("other_id", "other_table", "id"));
+	manager.AddOrUpdateTable("link_table2", link_table2);
+
+	// Verify initial state
+	TEST_ASSERT(manager.HasMetadata("target_table"), "target_table should exist");
+	TEST_ASSERT(manager.HasMetadata("link_table1"), "link_table1 should exist");
+	TEST_ASSERT(manager.HasMetadata("link_table2"), "link_table2 should exist");
+
+	// Simulate DROP TABLE target_table - need to clean up referencing links
+	auto all_tables = manager.GetAllTableNames();
+	for (const auto &table_name : all_tables) {
+		if (table_name == "target_table") {
+			continue;
+		}
+
+		auto metadata = manager.GetTableMetadata(table_name);
+		if (!metadata) {
+			continue;
+		}
+
+		// Check if this table has links to target_table
+		bool has_link = false;
+		for (const auto &link : metadata->links) {
+			if (link.referenced_table == "target_table") {
+				has_link = true;
+				break;
+			}
+		}
+
+		if (has_link) {
+			// Remove the link
+			PACTableMetadata updated = *metadata;
+			updated.links.erase(
+			    std::remove_if(updated.links.begin(), updated.links.end(),
+			                   [](const PACLink &link) { return link.referenced_table == "target_table"; }),
+			    updated.links.end());
+			manager.AddOrUpdateTable(table_name, updated);
+		}
+	}
+
+	// Remove target_table metadata
+	manager.RemoveTable("target_table");
+
+	// Verify cleanup
+	TEST_ASSERT(!manager.HasMetadata("target_table"), "target_table should be removed");
+
+	auto *link1 = manager.GetTableMetadata("link_table1");
+	TEST_ASSERT(link1 != nullptr, "link_table1 should still exist");
+	TEST_ASSERT(link1->links.empty(), "link_table1 should have no links after cleanup");
+
+	auto *link2 = manager.GetTableMetadata("link_table2");
+	TEST_ASSERT(link2 != nullptr, "link_table2 should still exist");
+	TEST_ASSERT(link2->links.size() == 1, "link_table2 should have 1 link after cleanup");
+	TEST_ASSERT(link2->links[0].referenced_table == "other_table", "Remaining link should reference other_table");
+
+	// Cleanup
+	manager.Clear();
+}
+
 void TestPACParser::RunAllTests() {
 	std::cout << "Running TestJSONSerialization..." << std::endl;
 	TestJSONSerialization();
@@ -397,6 +538,14 @@ void TestPACParser::RunAllTests() {
 	std::cout << "Running TestRegexPatterns..." << std::endl;
 	TestRegexPatterns();
 	std::cout << "PASSED: TestRegexPatterns" << std::endl;
+
+	std::cout << "Running TestDropPACConstraints..." << std::endl;
+	TestDropPACConstraints();
+	std::cout << "PASSED: TestDropPACConstraints" << std::endl;
+
+	std::cout << "Running TestDropTableCleanup..." << std::endl;
+	TestDropTableCleanup();
+	std::cout << "PASSED: TestDropTableCleanup" << std::endl;
 
 	std::cout << "\nAll tests passed!" << std::endl;
 }

@@ -115,6 +115,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 	pac_rewrite_rule.optimizer_info = pac_info;
 	db.config.optimizer_extensions.push_back(pac_rewrite_rule);
 
+	// Register PAC DROP TABLE cleanup rule (separate rule to handle DROP TABLE operations)
+	auto pac_drop_table_rule = PACDropTableRule();
+	db.config.optimizer_extensions.push_back(pac_drop_table_rule);
+
 	db.config.AddExtensionOption("pac_privacy_file", "path for privacy units", LogicalType::VARCHAR);
 	// Add option to enable/disable PAC noise application (this is useful for testing, since noise affects result
 	// determinism)

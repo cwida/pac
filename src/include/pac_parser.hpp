@@ -65,6 +65,9 @@ public:
 	// Get all table names with metadata
 	vector<string> GetAllTableNames() const;
 
+	// Remove metadata for a table (e.g., when table is dropped)
+	void RemoveTable(const string &table_name);
+
 	// Save metadata to JSON file
 	void SaveToFile(const string &filepath);
 
@@ -131,6 +134,9 @@ public:
 
 	// Parse ALTER TABLE ... ADD PAC ... syntax
 	static bool ParseAlterTableAddPAC(const string &query, string &stripped_sql, PACTableMetadata &metadata);
+
+	// Parse ALTER PAC TABLE ... DROP PAC LINK/PROTECTED ... syntax
+	static bool ParseAlterTableDropPAC(const string &query, string &stripped_sql, PACTableMetadata &metadata);
 
 	// Extract PAC PRIMARY KEY from CREATE statement
 	static bool ExtractPACPrimaryKey(const string &clause, vector<string> &pk_columns);
