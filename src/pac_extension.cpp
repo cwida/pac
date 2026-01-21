@@ -64,13 +64,41 @@ static void LoadInternal(ExtensionLoader &loader) {
 		// Get all attached database paths and try to load metadata from the first one's directory
 		auto paths = db.GetDatabaseManager().GetAttachedDatabasePaths();
 		if (!paths.empty()) {
-			string db_path = paths[0];
-			string metadata_path;
+			const string &db_path = paths[0];
+
+			// Extract database name from path (filename without extension)
+			// Or use "memory" as default for in-memory databases
+			string db_name = "memory";
 			size_t last_slash = db_path.find_last_of("/\\");
+			if (last_slash != string::npos && last_slash + 1 < db_path.length()) {
+				string filename = db_path.substr(last_slash + 1);
+				size_t dot_pos = filename.find_last_of('.');
+				if (dot_pos != string::npos) {
+					db_name = filename.substr(0, dot_pos);
+				} else {
+					db_name = filename;
+				}
+			} else if (last_slash == string::npos && !db_path.empty()) {
+				// No slash, so path is just the filename
+				size_t dot_pos = db_path.find_last_of('.');
+				if (dot_pos != string::npos) {
+					db_name = db_path.substr(0, dot_pos);
+				} else {
+					db_name = db_path;
+				}
+			}
+
+			// Default schema is "main"
+			string schema_name = DEFAULT_SCHEMA;
+
+			// Build metadata path with db and schema names
+			string metadata_path;
+			string filename = "pac_metadata_" + db_name + "_" + schema_name + ".json";
+
 			if (last_slash != string::npos) {
-				metadata_path = db_path.substr(0, last_slash + 1) + "pac_metadata.json";
+				metadata_path = db_path.substr(0, last_slash + 1) + filename;
 			} else {
-				metadata_path = "pac_metadata.json";
+				metadata_path = filename;
 			}
 
 #ifdef DEBUG

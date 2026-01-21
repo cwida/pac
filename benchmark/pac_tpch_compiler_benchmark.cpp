@@ -463,7 +463,7 @@ void RunTPCHCompilerBenchmark(double scale_factor, const string &scale_factor_st
             }
 
             // Reload metadata on manual connection after manual query completes
-            string metadata_path = "pac_metadata.json";
+            string metadata_path = "pac_metadata_memory_main.json";
             if (FileExists(metadata_path)) {
                 con_manual.Query("PRAGMA load_pac_metadata('" + metadata_path + "')");
             }

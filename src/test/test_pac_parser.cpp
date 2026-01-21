@@ -96,7 +96,7 @@ void TestPACParser::TestFilePersistence() {
 	metadata2.links.push_back(PACLink("user_id", "users", "user_id"));
 	manager.AddOrUpdateTable("orders", metadata2);
 	// Save to file
-	string filepath = "/tmp/test_pac_metadata.json";
+	string filepath = "/tmp/test_pac_metadata_testdb_main.json";
 	manager.SaveToFile(filepath);
 	// Verify file exists and contains expected content
 	std::ifstream file(filepath);

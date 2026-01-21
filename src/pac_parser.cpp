@@ -8,6 +8,7 @@
 #include "duckdb/main/database_manager.hpp"
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
+#include "duckdb/catalog/catalog_search_path.hpp"
 
 #include <iostream>
 #include <fstream>
@@ -440,14 +441,30 @@ string PACMetadataManager::GetMetadataFilePath(ClientContext &context) {
 		return "";
 	}
 
-	// Extract directory from database path and append metadata filenameG
+	// Extract schema name from the catalog search path
+	string schema_name = DEFAULT_SCHEMA; // Fallback to "main"
+	try {
+		CatalogSearchPath search_path(context);
+		auto entries = search_path.Get();
+		if (!entries.empty()) {
+			schema_name = entries[0].schema;
+		}
+	} catch (...) {
+		// If we can't get search path, use default schema
+		schema_name = DEFAULT_SCHEMA;
+	}
+
+	// Extract directory from database path and append metadata filename
+	// Format: pac_metadata_<dbname>_<schema>.json
+	string filename = "pac_metadata_" + db_name + "_" + schema_name + ".json";
+
 	size_t last_slash = db_path.find_last_of("/\\");
 	if (last_slash != string::npos) {
-		return db_path.substr(0, last_slash + 1) + "pac_metadata.json";
+		return db_path.substr(0, last_slash + 1) + filename;
 	}
 
 	// No directory separator found, use current directory
-	return "pac_metadata.json";
+	return filename;
 }
 
 // ============================================================================
@@ -768,13 +785,20 @@ bool PACParserExtension::ParseAlterTableDropPAC(const string &query, string &str
 	string query_lower = StringUtil::Lower(query);
 
 	// Check if this is an ALTER PAC TABLE ... DROP statement
-	// Must have "drop" but NOT "add" to avoid matching ADD statements
-	if (query_lower.find("alter pac table") == string::npos || query_lower.find("drop") == string::npos ||
-	    query_lower.find("add") != string::npos) {
+	// Must check for specific DROP patterns (drop pac link, drop protected), not just "drop" anywhere
+	if (query_lower.find("alter pac table") == string::npos) {
 		return false;
 	}
 
-	// Extract table name
+	// Check for DROP PAC LINK or DROP PROTECTED (not just "drop" which could be part of table name)
+	bool has_drop_link = query_lower.find("drop pac link") != string::npos;
+	bool has_drop_protected = query_lower.find("drop protected") != string::npos;
+
+	if (!has_drop_link && !has_drop_protected) {
+		return false;
+	}
+
+	// Extract table name - for ALTER PAC TABLE, the table name comes after "alter pac table"
 	std::regex alter_pac_regex(R"(alter\s+pac\s+table\s+([a-zA-Z_][a-zA-Z0-9_]*))");
 	std::smatch match;
 	if (!std::regex_search(query_lower, match, alter_pac_regex)) {
@@ -788,14 +812,6 @@ bool PACParserExtension::ParseAlterTableDropPAC(const string &query, string &str
 		throw ParserException("Table '" + metadata.table_name + "' does not have any PAC metadata to drop");
 	}
 	metadata = *existing;
-
-	// Check for DROP PAC LINK (column_list)
-	bool has_drop_link = query_lower.find("drop pac link") != string::npos;
-	bool has_drop_protected = query_lower.find("drop protected") != string::npos;
-
-	if (!has_drop_link && !has_drop_protected) {
-		return false;
-	}
 
 	// Handle DROP PAC LINK (col1, col2, ...)
 	if (has_drop_link) {
@@ -897,7 +913,8 @@ ParserExtensionParseResult PACParserExtension::PACParseFunction(ParserExtensionI
 	if (ParseCreatePACTable(clean_query, stripped_sql, metadata)) {
 		is_pac_ddl = true;
 	}
-	// Try to parse as ALTER TABLE DROP PAC (check DROP before ADD since DROP is more specific)
+	// Try to parse as ALTER TABLE DROP PAC (must be checked BEFORE ADD since DROP commands also contain keywords like
+	// "protected")
 	else if (ParseAlterTableDropPAC(clean_query, stripped_sql, metadata)) {
 		is_pac_ddl = true;
 	}
