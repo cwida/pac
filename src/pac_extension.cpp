@@ -73,23 +73,42 @@ static void LoadInternal(ExtensionLoader &loader) {
 				metadata_path = "pac_metadata.json";
 			}
 
-			std::ifstream metadata_file(metadata_path);
-			if (metadata_file.good()) {
-				metadata_file.close();
+#ifdef DEBUG
+			std::cerr << "[PAC DEBUG] LoadInternal: Checking for metadata at: " << metadata_path << std::endl;
+#endif
+
+			// Try to load the metadata file if it exists
+			std::ifstream test_file(metadata_path);
+			if (test_file.good()) {
+				test_file.close();
 				PACMetadataManager::Get().LoadFromFile(metadata_path);
+#ifdef DEBUG
+				std::cerr << "[PAC DEBUG] LoadInternal: Successfully loaded metadata from " << metadata_path
+				          << std::endl;
+				std::cerr << "[PAC DEBUG] LoadInternal: Loaded " << PACMetadataManager::Get().GetAllTableNames().size()
+				          << " tables" << std::endl;
+#endif
+			} else {
+#ifdef DEBUG
+				std::cerr << "[PAC DEBUG] LoadInternal: Metadata file not found at " << metadata_path << std::endl;
+#endif
 			}
 		} else {
 #ifdef DEBUG
 			std::cerr << "[PAC DEBUG] LoadInternal: No database paths available (in-memory DB?)" << std::endl;
 #endif
 		}
-	} catch (...) {
-		// Silently ignore if file doesn't exist or can't be loaded
+	} catch (const std::exception &e) {
 #ifdef DEBUG
-		std::cerr << "[PAC DEBUG] LoadInternal: Failed to load metadata (exception)" << std::endl;
+		std::cerr << "[PAC DEBUG] LoadInternal: Failed to load metadata: " << e.what() << std::endl;
+#endif
+	} catch (...) {
+#ifdef DEBUG
+		std::cerr << "[PAC DEBUG] LoadInternal: Failed to load metadata (unknown exception)" << std::endl;
 #endif
 	}
 
+	// Register PAC optimizer rule
 	auto pac_rewrite_rule = PACRewriteRule();
 	// attach PAC-specific optimizer info so the extension can coordinate replan state
 	auto pac_info = make_shared_ptr<PACOptimizerInfo>();

@@ -62,6 +62,9 @@ public:
 	// Check if a table has PAC metadata
 	bool HasMetadata(const string &table_name) const;
 
+	// Get all table names with metadata
+	vector<string> GetAllTableNames() const;
+
 	// Save metadata to JSON file
 	void SaveToFile(const string &filepath);
 
@@ -74,8 +77,8 @@ public:
 	// Get the metadata file path based on database path
 	static string GetMetadataFilePath(ClientContext &context);
 
-	// Serialize table metadata to JSON string
-	static string SerializeToJSON(const PACTableMetadata &metadata);
+	// Serialize table metadata to JSON string (instance method)
+	string SerializeToJSON(const PACTableMetadata &metadata) const;
 
 	// Deserialize table metadata from JSON string
 	static PACTableMetadata DeserializeFromJSON(const string &json);

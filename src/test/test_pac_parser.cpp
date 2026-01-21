@@ -26,7 +26,7 @@ void TestPACParser::TestJSONSerialization() {
 	metadata.links.push_back(PACLink("org_id", "organizations", "id"));
 	metadata.protected_columns = {"salary", "ssn", "email"};
 	// Serialize to JSON
-	string json = PACMetadataManager::SerializeToJSON(metadata);
+	string json = PACMetadataManager::Get().SerializeToJSON(metadata);
 	// Verify JSON contains expected fields
 	TEST_ASSERT(json.find("\"table_name\": \"test_table\"") != string::npos, "JSON should contain table_name");
 	TEST_ASSERT(json.find("\"id\"") != string::npos, "JSON should contain id");
@@ -279,7 +279,7 @@ void TestPACParser::TestCompositeKeyParsing() {
 	serialize_test.links.push_back(PACLink(vector<string> {"col1", "col2"}, "target", vector<string> {"ref1", "ref2"}));
 	serialize_test.protected_columns = {"sensitive"};
 
-	string json = PACMetadataManager::SerializeToJSON(serialize_test);
+	string json = PACMetadataManager::Get().SerializeToJSON(serialize_test);
 	TEST_ASSERT(json.find("\"local_columns\"") != string::npos, "JSON should contain local_columns array");
 	TEST_ASSERT(json.find("\"referenced_columns\"") != string::npos, "JSON should contain referenced_columns array");
 	TEST_ASSERT(json.find("\"col1\"") != string::npos, "JSON should contain col1");

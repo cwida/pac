@@ -7,6 +7,7 @@
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database_manager.hpp"
 #include "duckdb/catalog/catalog.hpp"
+#include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 
 #include <iostream>
 #include <fstream>
@@ -111,7 +112,17 @@ bool PACMetadataManager::HasMetadata(const string &table_name) const {
 	return table_metadata.find(table_name) != table_metadata.end();
 }
 
-string PACMetadataManager::SerializeToJSON(const PACTableMetadata &metadata) {
+vector<string> PACMetadataManager::GetAllTableNames() const {
+	std::lock_guard<std::mutex> lock(metadata_mutex);
+	vector<string> names;
+	names.reserve(table_metadata.size());
+	for (const auto &entry : table_metadata) {
+		names.push_back(entry.first);
+	}
+	return names;
+}
+
+string PACMetadataManager::SerializeToJSON(const PACTableMetadata &metadata) const {
 	std::stringstream ss;
 	ss << "{\n";
 	ss << "  \"table_name\": \"" << metadata.table_name << "\",\n";
@@ -424,7 +435,7 @@ string PACMetadataManager::GetMetadataFilePath(ClientContext &context) {
 		return "";
 	}
 
-	// Extract directory from database path and append metadata filename
+	// Extract directory from database path and append metadata filenameG
 	size_t last_slash = db_path.find_last_of("/\\");
 	if (last_slash != string::npos) {
 		return db_path.substr(0, last_slash + 1) + "pac_metadata.json";
@@ -640,6 +651,15 @@ bool PACParserExtension::ParseAlterTableAddPAC(const string &query, string &stri
 	auto existing = PACMetadataManager::Get().GetTableMetadata(metadata.table_name);
 	if (existing) {
 		metadata = *existing;
+#ifdef DEBUG
+		std::cerr << "[PAC DEBUG] ParseAlterTableAddPAC: Found existing metadata for " << metadata.table_name
+		          << ", links=" << existing->links.size() << ", protected=" << existing->protected_columns.size()
+		          << std::endl;
+#endif
+	} else {
+#ifdef DEBUG
+		std::cerr << "[PAC DEBUG] ParseAlterTableAddPAC: No existing metadata for " << metadata.table_name << std::endl;
+#endif
 	}
 
 	// Check for PAC-related keywords
@@ -670,8 +690,22 @@ bool PACParserExtension::ParseAlterTableAddPAC(const string &query, string &stri
 		for (auto it = begin; it != end; ++it) {
 			PACLink link;
 			if (ExtractPACLink((*it).str(), link)) {
-				// Only add link if it doesn't already exist (same local_columns, referenced_table, and
-				// referenced_columns)
+				// Check if a link already exists on these local columns (to a different table or columns)
+				for (const auto &existing_link : metadata.links) {
+					if (existing_link.local_columns == link.local_columns) {
+						// Check if it's exactly the same link (same target table and columns)
+						if (existing_link.referenced_table == link.referenced_table &&
+						    existing_link.referenced_columns == link.referenced_columns) {
+							// This is the exact same link - skip it (idempotent)
+							continue;
+						}
+						// Different target - this is an error
+						throw ParserException("Column(s) already have a PAC LINK defined. A column or set of columns "
+						                      "can only reference one target.");
+					}
+				}
+
+				// Add the link if it doesn't conflict
 				bool link_exists = false;
 				for (const auto &existing_link : metadata.links) {
 					if (existing_link.local_columns == link.local_columns &&
@@ -692,12 +726,29 @@ bool PACParserExtension::ParseAlterTableAddPAC(const string &query, string &stri
 	if (has_protected) {
 		vector<string> new_protected_cols;
 		if (ExtractProtectedColumns(query, new_protected_cols)) {
+			// Check for duplicates in the new protected columns being added
+			for (size_t i = 0; i < new_protected_cols.size(); i++) {
+				for (size_t j = i + 1; j < new_protected_cols.size(); j++) {
+					if (StringUtil::Lower(new_protected_cols[i]) == StringUtil::Lower(new_protected_cols[j])) {
+						throw ParserException("Duplicate protected column '" + new_protected_cols[i] +
+						                      "' in ALTER PAC TABLE statement");
+					}
+				}
+			}
+
 			// Only add columns that don't already exist
 			for (const auto &col : new_protected_cols) {
-				if (std::find(metadata.protected_columns.begin(), metadata.protected_columns.end(), col) ==
-				    metadata.protected_columns.end()) {
-					metadata.protected_columns.push_back(col);
+				bool already_protected = false;
+				for (const auto &existing_col : metadata.protected_columns) {
+					if (StringUtil::Lower(existing_col) == StringUtil::Lower(col)) {
+						already_protected = true;
+						break;
+					}
 				}
+				if (already_protected) {
+					throw ParserException("Column '" + col + "' is already marked as protected");
+				}
+				metadata.protected_columns.push_back(col);
 			}
 		}
 	}
@@ -746,8 +797,129 @@ ParserExtensionPlanResult PACParserExtension::PACPlanFunction(ParserExtensionInf
                                                               unique_ptr<ParserExtensionParseData> parse_data) {
 	auto &pac_data = dynamic_cast<PACParseData &>(*parse_data);
 
-	// Store metadata in global manager FIRST before any parsing
+	// Validate metadata before storing it
 	if (pac_data.is_pac_ddl && !pac_data.metadata.table_name.empty()) {
+		// For ALTER PAC TABLE operations, validate that the table exists
+		if (pac_data.stripped_sql.empty()) {
+			// This is an ALTER PAC TABLE operation (stripped_sql is empty for ALTER PAC TABLE)
+			// Check if table exists in the catalog
+			try {
+				auto &catalog = Catalog::GetCatalog(context, DatabaseManager::GetDefaultDatabase(context));
+				auto table_entry = catalog.GetEntry(context, CatalogType::TABLE_ENTRY, DEFAULT_SCHEMA,
+				                                    pac_data.metadata.table_name, OnEntryNotFound::RETURN_NULL);
+				if (!table_entry) {
+					throw CatalogException("Table '" + pac_data.metadata.table_name + "' does not exist");
+				}
+
+				auto &table = table_entry->Cast<TableCatalogEntry>();
+
+				// Validate ALL protected columns exist before adding any (atomic operation)
+				vector<string> missing_protected_cols;
+				for (const auto &col_name : pac_data.metadata.protected_columns) {
+					bool found = false;
+					for (auto &col : table.GetColumns().Logical()) {
+						if (StringUtil::Lower(col.GetName()) == StringUtil::Lower(col_name)) {
+							found = true;
+							break;
+						}
+					}
+					if (!found) {
+						missing_protected_cols.push_back(col_name);
+					}
+				}
+				if (!missing_protected_cols.empty()) {
+					if (missing_protected_cols.size() == 1) {
+						throw CatalogException("Column '" + missing_protected_cols[0] + "' does not exist in table '" +
+						                       pac_data.metadata.table_name + "'");
+					} else {
+						string cols_list;
+						for (size_t i = 0; i < missing_protected_cols.size(); i++) {
+							if (i > 0)
+								cols_list += ", ";
+							cols_list += "'" + missing_protected_cols[i] + "'";
+						}
+						throw CatalogException("Columns " + cols_list + " do not exist in table '" +
+						                       pac_data.metadata.table_name + "'. No protected columns were added.");
+					}
+				}
+
+				// Validate ALL columns in PAC LINKs exist before adding any (atomic operation)
+				for (const auto &link : pac_data.metadata.links) {
+					// Check local columns
+					vector<string> missing_local_cols;
+					for (const auto &local_col : link.local_columns) {
+						bool found = false;
+						for (auto &col : table.GetColumns().Logical()) {
+							if (StringUtil::Lower(col.GetName()) == StringUtil::Lower(local_col)) {
+								found = true;
+								break;
+							}
+						}
+						if (!found) {
+							missing_local_cols.push_back(local_col);
+						}
+					}
+					if (!missing_local_cols.empty()) {
+						if (missing_local_cols.size() == 1) {
+							throw CatalogException("Column '" + missing_local_cols[0] + "' does not exist in table '" +
+							                       pac_data.metadata.table_name + "'");
+						} else {
+							string cols_list;
+							for (size_t i = 0; i < missing_local_cols.size(); i++) {
+								if (i > 0)
+									cols_list += ", ";
+								cols_list += "'" + missing_local_cols[i] + "'";
+							}
+							throw CatalogException("Columns " + cols_list + " do not exist in table '" +
+							                       pac_data.metadata.table_name + "'. PAC LINK was not added.");
+						}
+					}
+
+					// Validate that referenced table exists
+					auto ref_table_entry = catalog.GetEntry(context, CatalogType::TABLE_ENTRY, DEFAULT_SCHEMA,
+					                                        link.referenced_table, OnEntryNotFound::RETURN_NULL);
+					if (!ref_table_entry) {
+						throw CatalogException("Referenced table '" + link.referenced_table + "' does not exist");
+					}
+
+					// Check referenced columns
+					auto &ref_table = ref_table_entry->Cast<TableCatalogEntry>();
+					vector<string> missing_ref_cols;
+					for (const auto &ref_col : link.referenced_columns) {
+						bool found = false;
+						for (auto &col : ref_table.GetColumns().Logical()) {
+							if (StringUtil::Lower(col.GetName()) == StringUtil::Lower(ref_col)) {
+								found = true;
+								break;
+							}
+						}
+						if (!found) {
+							missing_ref_cols.push_back(ref_col);
+						}
+					}
+					if (!missing_ref_cols.empty()) {
+						if (missing_ref_cols.size() == 1) {
+							throw CatalogException("Column '" + missing_ref_cols[0] +
+							                       "' does not exist in referenced table '" + link.referenced_table +
+							                       "'");
+						} else {
+							string cols_list;
+							for (size_t i = 0; i < missing_ref_cols.size(); i++) {
+								if (i > 0)
+									cols_list += ", ";
+								cols_list += "'" + missing_ref_cols[i] + "'";
+							}
+							throw CatalogException("Columns " + cols_list + " do not exist in referenced table '" +
+							                       link.referenced_table + "'. PAC LINK was not added.");
+						}
+					}
+				}
+			} catch (const CatalogException &e) {
+				throw;
+			}
+		}
+
+		// Store metadata in global manager after validation
 		PACMetadataManager::Get().AddOrUpdateTable(pac_data.metadata.table_name, pac_data.metadata);
 	}
 

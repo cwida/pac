@@ -159,18 +159,66 @@ static void CreateTPCHDatabase(Connection &con, double scale_factor) {
     con.Query("CALL dbgen(sf=" + FormatNumber(scale_factor) + ")");
 
     std::cout << "[" << Timestamp() << "] TPC-H database created successfully" << std::endl;
+}
 
-	// Execute schema file to create tables with PK/FK constraints
-	std::cout << "[" << Timestamp() << "] Adding PAC links..." << std::endl;
+static void LoadPACSchema(Connection &con) {
+	// Execute schema file to add PAC links and protected columns
+	std::cout << "[" << Timestamp() << "] Adding PAC links and protected columns..." << std::endl;
 	string schema_file = FindSchemaFile("pac_tpch_schema.sql");
 	if (schema_file.empty()) {
 		throw std::runtime_error("Cannot find pac_tpch_schema.sql");
 	}
 
 	string schema_sql = ReadFileToString(schema_file);
-	auto schema_result = con.Query(schema_sql);
-	if (schema_result->HasError()) {
-		throw std::runtime_error("Failed to add links: " + schema_result->GetError());
+
+	// Split the SQL file into individual statements and execute them separately
+	// This is necessary because the PAC parser extension needs to process each
+	// ALTER PAC TABLE statement individually to properly save metadata
+	std::istringstream sql_stream(schema_sql);
+	string line;
+	string current_statement;
+
+	while (std::getline(sql_stream, line)) {
+		// Skip empty lines and comments
+		string trimmed_line = line;
+		// Trim leading whitespace
+		size_t start = trimmed_line.find_first_not_of(" \t\r\n");
+		if (start != string::npos) {
+			trimmed_line = trimmed_line.substr(start);
+		} else {
+			continue; // Empty line
+		}
+
+		// Skip comment lines
+		if (trimmed_line.empty() || trimmed_line.substr(0, 2) == "--") {
+			continue;
+		}
+
+		// Accumulate the statement
+		current_statement += line + " ";
+
+		// Check if we have a complete statement (ends with semicolon)
+		if (trimmed_line.find(';') != string::npos) {
+			// Execute the statement
+			auto result = con.Query(current_statement);
+			if (result->HasError()) {
+				throw std::runtime_error("Failed to execute PAC schema statement: " + result->GetError() +
+				                         "\nStatement: " + current_statement);
+			}
+			current_statement.clear();
+		}
+	}
+
+	// Execute any remaining statement (in case file doesn't end with semicolon)
+	if (!current_statement.empty()) {
+		string trimmed = current_statement;
+		size_t start = trimmed.find_first_not_of(" \t\r\n");
+		if (start != string::npos) {
+			auto result = con.Query(current_statement);
+			if (result->HasError()) {
+				throw std::runtime_error("Failed to execute PAC schema statement: " + result->GetError());
+			}
+		}
 	}
 }
 
@@ -259,22 +307,38 @@ void RunTPCHCompilerBenchmark(double scale_factor, const string &scale_factor_st
 
     // Open database
     DuckDB db(db_path);
-    Connection con(db);
+
+    // ===== CONNECTION 1: With PAC extension (for automatic compilation) =====
+    Connection con_pac(db);
 
 	// Load TPC-H extension
-	con.Query("INSTALL tpch");
-	con.Query("LOAD tpch");
+	con_pac.Query("INSTALL tpch");
+	con_pac.Query("LOAD tpch");
 
-	// Load PAC extension (needed for ALTER PAC TABLE syntax)
-	auto r = con.Query("LOAD pac");
+	// Load PAC extension (needed for ALTER PAC TABLE syntax and automatic compilation)
+	auto r = con_pac.Query("LOAD pac");
 	if (r->HasError()) {
 		throw std::runtime_error("Failed to load PAC extension: " + r->GetError());
 	}
 
     // Create database if needed
     if (!db_exists) {
-        CreateTPCHDatabase(con, scale_factor);
+        CreateTPCHDatabase(con_pac, scale_factor);
     }
+
+    // Always load PAC schema (adds links and protected columns)
+    LoadPACSchema(con_pac);
+
+    // ===== CONNECTION 2: Without PAC extension (for manual queries) =====
+    Connection con_manual(db);
+
+    // Load TPC-H extension only (NO PAC - so manual queries won't be rewritten)
+    con_manual.Query("INSTALL tpch");
+    con_manual.Query("LOAD tpch");
+
+    std::cout << "[" << Timestamp() << "] Created two connections:" << std::endl;
+    std::cout << "  - Connection 1: PAC enabled (for automatic compilation)" << std::endl;
+    std::cout << "  - Connection 2: PAC disabled (for manual queries)" << std::endl;
 
     // Find query directories
     string pac_queries_dir = FindQueriesDirectory("tpch_pac_queries");
@@ -327,12 +391,12 @@ void RunTPCHCompilerBenchmark(double scale_factor, const string &scale_factor_st
             // Build PRAGMA query for automatic compilation
             string pragma_query = "PRAGMA tpch(" + std::to_string(q) + ");";
 
-            // ===== PHASE 1: Run automatically compiled query (PRAGMA) =====
+            // ===== PHASE 1: Run automatically compiled query (PRAGMA) on PAC connection =====
 
             // Cold run of automatically compiled query (not timed)
-            std::cout << "[" << Timestamp() << "] Running cold automatic PAC query..." << std::endl;
+            std::cout << "[" << Timestamp() << "] Running cold automatic PAC query (PAC connection)..." << std::endl;
             try {
-                auto cold_result = con.Query(pragma_query);
+                auto cold_result = con_pac.Query(pragma_query);
                 if (cold_result->HasError()) {
                     std::cout << "[WARNING] Cold run error: " << cold_result->GetError() << std::endl;
                 }
@@ -340,11 +404,11 @@ void RunTPCHCompilerBenchmark(double scale_factor, const string &scale_factor_st
                 std::cout << "[WARNING] Cold run exception: " << e.what() << std::endl;
             }
 
-        	// ===== PHASE 2: Run automatically compiled query (PRAGMA) =====
-            std::cout << "[" << Timestamp() << "] Running timed PAC automatic query..." << std::endl;
+        	// ===== PHASE 2: Run automatically compiled query (PRAGMA) on PAC connection =====
+            std::cout << "[" << Timestamp() << "] Running timed PAC automatic query (PAC connection)..." << std::endl;
 
             // Reset seed for deterministic noise
-            con.Query("SET pac_seed = " + std::to_string(seed));
+            con_pac.Query("SET pac_seed = " + std::to_string(seed));
 
             double automatic_time_ms = 0;
             unique_ptr<MaterializedQueryResult> automatic_result;
@@ -352,7 +416,7 @@ void RunTPCHCompilerBenchmark(double scale_factor, const string &scale_factor_st
             string automatic_error;
 
             try {
-                automatic_result = ExecuteQueryWithTiming(con, pragma_query, automatic_time_ms);
+                automatic_result = ExecuteQueryWithTiming(con_pac, pragma_query, automatic_time_ms);
                 automatic_success = true;
                 std::cout << "[SUCCESS] PAC automatic query completed in " << std::fixed << std::setprecision(2)
                          << automatic_time_ms << " ms" << std::endl;
@@ -367,12 +431,15 @@ void RunTPCHCompilerBenchmark(double scale_factor, const string &scale_factor_st
                 std::cout << "        Error: " << automatic_error << std::endl;
             }
 
-            // ===== PHASE 3: Run manually compiled query (from file) =====
+            // ===== PHASE 3: Run manually compiled query on NON-PAC connection =====
 
-            std::cout << "[" << Timestamp() << "] Running timed PAC manual query..." << std::endl;
+            std::cout << "[" << Timestamp() << "] Running timed PAC manual query (non-PAC connection)..." << std::endl;
 
-            // Reset seed to ensure same noise as automatic query
-            con.Query("SET pac_seed = " + std::to_string(seed));
+            // Clear metadata on manual connection to prevent PAC compilation
+            con_manual.Query("PRAGMA clear_pac_metadata");
+
+            // Set seed on manual connection (if query uses PAC functions, though it shouldn't be rewritten)
+            con_manual.Query("SET pac_seed = " + std::to_string(seed));
 
             double manual_time_ms = 0;
             unique_ptr<MaterializedQueryResult> manual_result;
@@ -380,7 +447,7 @@ void RunTPCHCompilerBenchmark(double scale_factor, const string &scale_factor_st
             string manual_error;
 
             try {
-                manual_result = ExecuteQueryWithTiming(con, manual_query, manual_time_ms);
+                manual_result = ExecuteQueryWithTiming(con_manual, manual_query, manual_time_ms);
                 manual_success = true;
                 std::cout << "[SUCCESS] PAC manual query completed in " << std::fixed << std::setprecision(2)
                          << manual_time_ms << " ms" << std::endl;
@@ -393,6 +460,12 @@ void RunTPCHCompilerBenchmark(double scale_factor, const string &scale_factor_st
                 std::cout << "[ERROR] PAC manual query failed in " << std::fixed << std::setprecision(2)
                          << manual_time_ms << " ms" << std::endl;
                 std::cout << "        Error: " << manual_error << std::endl;
+            }
+
+            // Reload metadata on manual connection after manual query completes
+            string metadata_path = "pac_metadata.json";
+            if (FileExists(metadata_path)) {
+                con_manual.Query("PRAGMA load_pac_metadata('" + metadata_path + "')");
             }
 
             // ===== COMPARE RESULTS =====
