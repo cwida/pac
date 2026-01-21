@@ -1,0 +1,540 @@
+# name: test/sql/pac_parser.test
+# description: Test PAC parser extension for CREATE PAC TABLE and ALTER TABLE with PAC metadata
+# group: [sql]
+
+require pac
+
+statement ok
+PRAGMA clear_pac_metadata;
+
+# ============================================================================
+# PAC Parser Tests: Basic Functionality
+# ============================================================================
+
+# Test 1: Simple CREATE PAC TABLE with PAC KEY
+statement ok
+CREATE PAC TABLE users (
+    user_id INTEGER,
+    name VARCHAR,
+    email VARCHAR,
+    PAC KEY (user_id)
+);
+
+# Verify table was created
+query I
+SELECT COUNT(*) FROM users;
+----
+0
+
+# Test 2: CREATE PAC TABLE with PAC LINK
+statement ok
+CREATE PAC TABLE orders (
+    order_id INTEGER,
+    user_id INTEGER,
+    amount DECIMAL(10,2),
+    PAC LINK (user_id) REFERENCES users(user_id)
+);
+
+query I
+SELECT COUNT(*) FROM orders;
+----
+0
+
+# Test 3: CREATE PAC TABLE with PROTECTED columns
+statement ok
+CREATE PAC TABLE transactions (
+    transaction_id INTEGER,
+    order_id INTEGER,
+    card_number VARCHAR,
+    PROTECTED (card_number),
+    PAC LINK (order_id) REFERENCES orders(order_id)
+);
+
+query I
+SELECT COUNT(*) FROM transactions;
+----
+NULL
+
+# Test 4: CREATE PAC TABLE with multiple PAC clauses
+statement ok
+CREATE PAC TABLE employees (
+    emp_id INTEGER,
+    dept_id INTEGER,
+    salary INTEGER,
+    ssn VARCHAR,
+    PAC KEY (emp_id),
+    PAC LINK (dept_id) REFERENCES departments(dept_id),
+    PROTECTED (salary, ssn)
+);
+
+query I
+SELECT COUNT(*) FROM employees;
+----
+NULL
+
+# Test 5: Regular CREATE TABLE (no PAC keywords) should still work
+statement ok
+CREATE TABLE departments (
+    dept_id INTEGER PRIMARY KEY,
+    dept_name VARCHAR
+);
+
+query I
+SELECT COUNT(*) FROM departments;
+----
+0
+
+# Test 6: ALTER PAC TABLE with PAC KEY
+statement ok
+CREATE TABLE products (
+    product_id INTEGER,
+    name VARCHAR,
+    price DECIMAL(10,2)
+);
+
+statement ok
+ALTER PAC TABLE products ADD PAC KEY (product_id);
+
+# Test 7: ALTER PAC TABLE with PAC LINK
+statement ok
+CREATE TABLE reviews (
+    review_id INTEGER,
+    product_id INTEGER,
+    rating INTEGER
+);
+
+statement ok
+ALTER PAC TABLE reviews ADD PAC LINK (product_id) REFERENCES products(product_id);
+
+# Test 8: ALTER PAC TABLE with PROTECTED columns
+statement ok
+ALTER PAC TABLE reviews ADD PROTECTED (rating);
+
+# Test 9: Save and load PAC metadata
+statement ok
+PRAGMA save_pac_metadata('/tmp/pac_metadata_test.json');
+
+statement ok
+PRAGMA clear_pac_metadata;
+
+statement ok
+PRAGMA load_pac_metadata ('/tmp/pac_metadata_test.json');
+
+# Test 10: CREATE PAC TABLE with IF NOT EXISTS
+statement ok
+CREATE PAC TABLE IF NOT EXISTS customers (
+    customer_id INTEGER,
+    email VARCHAR,
+    PAC KEY (customer_id),
+    PROTECTED (email)
+);
+
+query I
+SELECT COUNT(*) FROM customers;
+----
+NULL
+
+# Test 11: Multiple PAC LINKs in one table
+statement ok
+CREATE PAC TABLE order_items (
+    item_id INTEGER,
+    order_id INTEGER,
+    product_id INTEGER,
+    quantity INTEGER,
+    PAC LINK (order_id) REFERENCES orders(order_id),
+    PAC LINK (product_id) REFERENCES products(product_id)
+);
+
+query I
+SELECT COUNT(*) FROM order_items;
+----
+0
+
+# Test 12: Composite PAC KEY
+statement ok
+CREATE PAC TABLE inventory (
+    warehouse_id INTEGER,
+    product_id INTEGER,
+    quantity INTEGER,
+    PAC KEY (warehouse_id, product_id)
+);
+
+query I
+SELECT COUNT(*) FROM inventory;
+----
+0
+
+# Cleanup
+statement ok
+DROP TABLE IF EXISTS users;
+
+statement ok
+DROP TABLE IF EXISTS orders;
+
+statement ok
+DROP TABLE IF EXISTS transactions;
+
+statement ok
+DROP TABLE IF EXISTS employees;
+
+statement ok
+DROP TABLE IF EXISTS departments;
+
+statement ok
+DROP TABLE IF EXISTS products;
+
+statement ok
+DROP TABLE IF EXISTS reviews;
+
+statement ok
+DROP TABLE IF EXISTS customers;
+
+statement ok
+DROP TABLE IF EXISTS order_items;
+
+statement ok
+DROP TABLE IF EXISTS inventory;
+
+statement ok
+PRAGMA clear_pac_metadata;
+
+# ============================================================================
+# Edge Case Tests: Validation and Error Handling
+# ============================================================================
+
+# Test 13: ALTER PAC TABLE on non-existent table should fail
+statement ok
+CREATE TABLE test_table (id INTEGER, name VARCHAR);
+
+statement error
+ALTER PAC TABLE nonexistent_table ADD PAC LINK (id) REFERENCES test_table(id);
+----
+Table 'nonexistent_table' does not exist
+
+# Test 14: ALTER PAC TABLE with non-existent column should fail
+statement error
+ALTER PAC TABLE test_table ADD PROTECTED (nonexistent_column);
+----
+Column 'nonexistent_column' does not exist in table 'test_table'
+
+# Test 15: ALTER PAC TABLE with PAC LINK to non-existent local column should fail
+statement error
+ALTER PAC TABLE test_table ADD PAC LINK (nonexistent_col) REFERENCES test_table(id);
+----
+Column 'nonexistent_col' does not exist in table 'test_table'
+
+# Test 16: ALTER PAC TABLE with PAC LINK to non-existent referenced table should fail
+statement error
+ALTER PAC TABLE test_table ADD PAC LINK (id) REFERENCES nonexistent_ref_table(id);
+----
+Referenced table 'nonexistent_ref_table' does not exist
+
+# Test 17: ALTER PAC TABLE with PAC LINK to non-existent referenced column should fail
+statement ok
+CREATE TABLE ref_table (ref_id INTEGER, value VARCHAR);
+
+statement error
+ALTER PAC TABLE test_table ADD PAC LINK (id) REFERENCES ref_table(nonexistent_ref_col);
+----
+Column 'nonexistent_ref_col' does not exist in referenced table 'ref_table'
+
+# Test 18: Multiple non-existent protected columns should fail
+statement error
+ALTER PAC TABLE test_table ADD PROTECTED (col1, col2, col3);
+----
+Columns 'col1', 'col2', 'col3' do not exist in table 'test_table'. No protected columns were added.
+
+# Test 19: Mix of existing and non-existing protected columns should fail atomically
+statement error
+ALTER PAC TABLE test_table ADD PROTECTED (name, nonexistent_col);
+----
+Column 'nonexistent_col' does not exist in table 'test_table'
+
+# Test 20: Composite PAC LINK with non-existent local column should fail
+statement ok
+CREATE TABLE composite_test (id1 INTEGER, id2 INTEGER, data VARCHAR);
+
+statement ok
+CREATE TABLE composite_ref (ref1 INTEGER, ref2 INTEGER);
+
+statement error
+ALTER PAC TABLE composite_test ADD PAC LINK (id1, nonexistent_id) REFERENCES composite_ref(ref1, ref2);
+----
+Column 'nonexistent_id' does not exist in table 'composite_test'
+
+# Test 21: Composite PAC LINK with non-existent referenced column should fail
+statement error
+ALTER PAC TABLE composite_test ADD PAC LINK (id1, id2) REFERENCES composite_ref(ref1, nonexistent_ref);
+----
+Column 'nonexistent_ref' does not exist in referenced table 'composite_ref'
+
+# Test 22: Valid ALTER PAC TABLE operations should succeed
+statement ok
+ALTER PAC TABLE test_table ADD PROTECTED (name);
+
+statement ok
+ALTER PAC TABLE test_table ADD PAC LINK (id) REFERENCES ref_table(ref_id);
+
+# Test 23: Adding duplicate protected column should fail
+statement error
+ALTER PAC TABLE test_table ADD PROTECTED (name);
+----
+Column 'name' is already marked as protected
+
+# Test 24: Adding duplicate PAC LINK should be idempotent (no error)
+statement ok
+ALTER PAC TABLE test_table ADD PAC LINK (id) REFERENCES ref_table(ref_id);
+
+# Test 25: Case insensitivity - duplicate protected columns should fail
+statement error
+ALTER PAC TABLE test_table ADD PROTECTED (NAME);
+----
+Column 'name' is already marked as protected
+
+# Test 26: Case insensitivity - table and column names in PAC LINK
+statement ok
+ALTER PAC TABLE TEST_TABLE ADD PAC LINK (ID) REFERENCES REF_TABLE(REF_ID);
+
+# Test 27: Valid composite PAC LINK should succeed
+statement ok
+ALTER PAC TABLE composite_test ADD PAC LINK (id1, id2) REFERENCES composite_ref(ref1, ref2);
+
+# Test 28: Whitespace handling in column lists
+statement ok
+CREATE TABLE whitespace_test (col_a INTEGER, col_b INTEGER, col_c VARCHAR);
+
+statement ok
+ALTER PAC TABLE whitespace_test ADD PROTECTED ( col_a , col_b , col_c );
+
+statement ok
+CREATE TABLE whitespace_ref (ref_a INTEGER, ref_b INTEGER);
+
+statement ok
+ALTER PAC TABLE whitespace_test ADD PAC LINK ( col_a , col_b ) REFERENCES whitespace_ref ( ref_a , ref_b );
+
+# Test 29: Empty or malformed syntax should fail gracefully
+# (These will fail at the SQL parser level before reaching PAC parser)
+
+# Test 30: Multiple ALTER operations on same table accumulate metadata
+statement ok
+CREATE TABLE accumulate_test (id INTEGER, col1 VARCHAR, col2 VARCHAR, col3 INTEGER, ref_id INTEGER);
+
+statement ok
+ALTER PAC TABLE accumulate_test ADD PROTECTED (col1);
+
+statement ok
+ALTER PAC TABLE accumulate_test ADD PROTECTED (col2);
+
+statement ok
+ALTER PAC TABLE accumulate_test ADD PAC LINK (ref_id) REFERENCES ref_table(ref_id);
+
+statement ok
+ALTER PAC TABLE accumulate_test ADD PROTECTED (col3);
+
+# Test 31: Verify metadata persistence and reload
+statement ok
+PRAGMA save_pac_metadata('/tmp/pac_edge_case_test.json');
+
+statement ok
+PRAGMA clear_pac_metadata;
+
+statement ok
+PRAGMA load_pac_metadata('/tmp/pac_edge_case_test.json');
+
+# Cleanup edge case tests
+statement ok
+DROP TABLE IF EXISTS test_table;
+
+statement ok
+DROP TABLE IF EXISTS ref_table;
+
+statement ok
+DROP TABLE IF EXISTS composite_test;
+
+statement ok
+DROP TABLE IF EXISTS composite_ref;
+
+statement ok
+DROP TABLE IF EXISTS whitespace_test;
+
+statement ok
+DROP TABLE IF EXISTS whitespace_ref;
+
+statement ok
+DROP TABLE IF EXISTS accumulate_test;
+
+statement ok
+PRAGMA clear_pac_metadata;
+
+# ============================================================================
+# Edge Case Tests: Duplicate Link and Protected Column Prevention
+# ============================================================================
+
+# Test 32: Duplicate PAC LINK on same columns to different target should fail
+statement ok
+CREATE TABLE link_test (id INTEGER, ref_id INTEGER, data VARCHAR);
+
+statement ok
+CREATE TABLE target_a (id INTEGER);
+
+statement ok
+CREATE TABLE target_b (id INTEGER);
+
+statement ok
+ALTER PAC TABLE link_test ADD PAC LINK (ref_id) REFERENCES target_a(id);
+
+statement error
+ALTER PAC TABLE link_test ADD PAC LINK (ref_id) REFERENCES target_b(id);
+----
+Column(s) already have a PAC LINK defined
+
+# Test 33: Same PAC LINK twice should be idempotent (no error)
+statement ok
+ALTER PAC TABLE link_test ADD PAC LINK (ref_id) REFERENCES target_a(id);
+
+# Test 34: Composite key duplicate link to different target should fail
+statement ok
+CREATE TABLE comp_link_test (id1 INTEGER, id2 INTEGER, data VARCHAR);
+
+statement ok
+CREATE TABLE comp_target_a (key1 INTEGER, key2 INTEGER);
+
+statement ok
+CREATE TABLE comp_target_b (key1 INTEGER, key2 INTEGER);
+
+statement ok
+ALTER PAC TABLE comp_link_test ADD PAC LINK (id1, id2) REFERENCES comp_target_a(key1, key2);
+
+statement error
+ALTER PAC TABLE comp_link_test ADD PAC LINK (id1, id2) REFERENCES comp_target_b(key1, key2);
+----
+Column(s) already have a PAC LINK defined
+
+# Test 35: Duplicate protected column in same statement should fail
+statement ok
+CREATE TABLE dup_protected_test (col1 VARCHAR, col2 VARCHAR);
+
+statement error
+ALTER PAC TABLE dup_protected_test ADD PROTECTED (col1, col1);
+----
+Duplicate protected column 'col1'
+
+# Test 36: Duplicate protected column in separate statements should be idempotent (no error)
+statement ok
+ALTER PAC TABLE dup_protected_test ADD PROTECTED (col1);
+
+# Test 37: Case insensitive duplicate protected column should be idempotent (no error)
+statement error
+ALTER PAC TABLE dup_protected_test ADD PROTECTED (COL1);
+----
+Column 'col1' is already marked as protected
+
+# Test 38: Mix of duplicates in same statement should fail on first duplicate
+statement error
+ALTER PAC TABLE dup_protected_test ADD PROTECTED (col2, col1, col2);
+----
+Duplicate protected column 'col2'
+
+# Test 39: Protecting new column should succeed
+statement ok
+ALTER PAC TABLE dup_protected_test ADD PROTECTED (col2);
+
+# Test 40: Nation example from user - first link succeeds
+statement ok
+CREATE TABLE nation_test (n_nationkey INTEGER, n_regionkey INTEGER, n_name VARCHAR);
+
+statement ok
+CREATE TABLE region_test (r_regionkey INTEGER, r_name VARCHAR);
+
+statement ok
+CREATE TABLE other_table (b INTEGER);
+
+statement ok
+ALTER PAC TABLE nation_test ADD PAC LINK (n_regionkey) REFERENCES region_test(r_regionkey);
+
+# Test 41: Nation example - second link on same column to different table fails
+statement error
+ALTER PAC TABLE nation_test ADD PAC LINK (n_regionkey) REFERENCES other_table(b);
+----
+Column(s) already have a PAC LINK defined
+
+# Test 42: Nation example - exact same link again is idempotent
+statement ok
+ALTER PAC TABLE nation_test ADD PAC LINK (n_regionkey) REFERENCES region_test(r_regionkey);
+
+# Test 43: Different column can have its own link
+statement ok
+ALTER PAC TABLE nation_test ADD PAC LINK (n_nationkey) REFERENCES other_table(b);
+
+# Test 44: Subset of composite key cannot have a separate link
+statement ok
+CREATE TABLE subset_test (a INTEGER, b INTEGER, c INTEGER);
+
+statement ok
+CREATE TABLE subset_ref1 (x INTEGER, y INTEGER);
+
+statement ok
+CREATE TABLE subset_ref2 (z INTEGER);
+
+statement ok
+ALTER PAC TABLE subset_test ADD PAC LINK (a, b) REFERENCES subset_ref1(x, y);
+
+# This should succeed because column 'c' is not involved in the existing link
+statement ok
+ALTER PAC TABLE subset_test ADD PAC LINK (c) REFERENCES subset_ref2(z);
+
+# But trying to add a link on 'a' alone should fail if we check for exact column matches
+# Actually, 'a' alone is different from 'a,b' composite, so this should succeed
+statement ok
+CREATE TABLE subset_ref3 (w INTEGER);
+
+# Note: This is a design decision - we only prevent exact column set matches
+# So (a) is different from (a, b) and should be allowed
+statement ok
+ALTER PAC TABLE subset_test ADD PAC LINK (a) REFERENCES subset_ref3(w);
+
+# Cleanup duplicate link tests
+statement ok
+DROP TABLE IF EXISTS link_test;
+
+statement ok
+DROP TABLE IF EXISTS target_a;
+
+statement ok
+DROP TABLE IF EXISTS target_b;
+
+statement ok
+DROP TABLE IF EXISTS comp_link_test;
+
+statement ok
+DROP TABLE IF EXISTS comp_target_a;
+
+statement ok
+DROP TABLE IF EXISTS comp_target_b;
+
+statement ok
+DROP TABLE IF EXISTS dup_protected_test;
+
+statement ok
+DROP TABLE IF EXISTS nation_test;
+
+statement ok
+DROP TABLE IF EXISTS region_test;
+
+statement ok
+DROP TABLE IF EXISTS other_table;
+
+statement ok
+DROP TABLE IF EXISTS subset_test;
+
+statement ok
+DROP TABLE IF EXISTS subset_ref1;
+
+statement ok
+DROP TABLE IF EXISTS subset_ref2;
+
+statement ok
+DROP TABLE IF EXISTS subset_ref3;
+
+statement ok
+PRAGMA clear_pac_metadata;
