@@ -1411,23 +1411,6 @@ void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExten
 	// This ensures that all column bindings are properly updated after we've added new columns
 	// to table scans and modified aggregate expressions
 
-	// Also clear any FILTER projection_maps in the plan, as they can interfere with
-	// the ColumnBindingResolver when we've modified aggregate expressions.
-	// The projection_maps are optimization hints that tell DuckDB which columns to keep,
-	// but after PAC transformation they may be stale.
-	std::function<void(LogicalOperator *)> clear_filter_projection_maps = [&](LogicalOperator *op) {
-		if (!op)
-			return;
-		if (op->type == LogicalOperatorType::LOGICAL_FILTER) {
-			auto &filter = op->Cast<LogicalFilter>();
-			filter.projection_map.clear();
-		}
-		for (auto &child : op->children) {
-			clear_filter_projection_maps(child.get());
-		}
-	};
-	clear_filter_projection_maps(plan.get());
-
 	plan->ResolveOperatorTypes();
 
 #ifdef DEBUG
