@@ -389,3 +389,93 @@ SELECT bonus, COUNT(*) FROM employees GROUP BY bonus ORDER BY bonus;
 # Clean up
 statement ok
 DROP TABLE employees;
+
+# ============================================================================
+# Test cycle detection in foreign key relationships
+# ============================================================================
+
+# Create tables with circular foreign key dependencies
+# Tables need PROTECTED columns to be treated as implicit privacy units
+statement ok
+CREATE PAC TABLE cycle_a (id INTEGER PRIMARY KEY, b_id INTEGER, value_a INTEGER, PROTECTED (value_a));
+
+statement ok
+CREATE PAC TABLE cycle_b (id INTEGER PRIMARY KEY, c_id INTEGER, value_b INTEGER, PROTECTED (value_b));
+
+statement ok
+CREATE PAC TABLE cycle_c (id INTEGER PRIMARY KEY, a_id INTEGER, value_c INTEGER, PROTECTED (value_c));
+
+# Define PAC LINKs that form a cycle: cycle_a -> cycle_b -> cycle_c -> cycle_a
+statement ok
+ALTER PAC TABLE cycle_a ADD PAC LINK (b_id) REFERENCES cycle_b(id);
+
+statement ok
+ALTER PAC TABLE cycle_b ADD PAC LINK (c_id) REFERENCES cycle_c(id);
+
+statement ok
+ALTER PAC TABLE cycle_c ADD PAC LINK (a_id) REFERENCES cycle_a(id);
+
+# Insert some test data
+statement ok
+INSERT INTO cycle_a VALUES (1, 1, 100), (2, 2, 200);
+
+statement ok
+INSERT INTO cycle_b VALUES (1, 1, 300), (2, 2, 400);
+
+statement ok
+INSERT INTO cycle_c VALUES (1, 1, 500), (2, 2, 600);
+
+# Test 1: Query on cycle_b should detect FK link cycle
+statement error
+SELECT SUM(value_b) FROM cycle_b;
+----
+PAC rewrite: circular foreign key dependencies detected. PAC compilation requires acyclic foreign key relationships.
+
+# Test 2: Query on cycle_c should also detect FK link cycle
+statement error
+SELECT SUM(value_c) FROM cycle_c;
+----
+PAC rewrite: circular foreign key dependencies detected. PAC compilation requires acyclic foreign key relationships.
+
+# Test 3: Circular join query (A JOIN B JOIN C JOIN A)
+# This forms a query-level cycle independent of FK links
+statement error
+SELECT SUM(cycle_a.value_a) FROM cycle_a
+JOIN cycle_b ON cycle_a.b_id = cycle_b.id
+JOIN cycle_c ON cycle_b.c_id = cycle_c.id
+JOIN cycle_a AS cycle_a2 ON cycle_c.a_id = cycle_a2.id;
+----
+PAC rewrite: circular foreign key dependencies detected. PAC compilation requires acyclic foreign key relationships.
+
+# Test 4: With conservative mode off - should not throw error, just skip PAC compilation
+statement ok
+SET pac_conservative_mode = false;
+
+# FK link cycle - should succeed without PAC compilation
+query I
+SELECT SUM(value_b) FROM cycle_b;
+----
+700
+
+# Query-level cycle - should succeed without PAC compilation
+query I
+SELECT SUM(cycle_a.value_a) FROM cycle_a
+JOIN cycle_b ON cycle_a.b_id = cycle_b.id
+JOIN cycle_c ON cycle_b.c_id = cycle_c.id
+JOIN cycle_a AS cycle_a2 ON cycle_c.a_id = cycle_a2.id;
+----
+300
+
+# Reset conservative mode
+statement ok
+SET pac_conservative_mode = true;
+
+# Clean up cycle tables
+statement ok
+DROP TABLE cycle_a;
+
+statement ok
+DROP TABLE cycle_b;
+
+statement ok
+DROP TABLE cycle_c;

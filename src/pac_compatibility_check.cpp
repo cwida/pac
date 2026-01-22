@@ -479,6 +479,97 @@ static bool IsScalarSubquerySubtree(const LogicalOperator &op) {
 	return false;
 }
 
+/**
+ * DetectCycleInFKGraph: Detects cycles in the foreign key graph
+ *
+ * A cycle exists when following foreign keys from a table can eventually lead back to itself.
+ * For example: A -> B -> C -> A forms a cycle.
+ *
+ * This is important because PAC compilation follows FK paths from scanned tables to privacy units,
+ * and cycles would cause infinite loops during path traversal.
+ *
+ * @param context - Client context for accessing catalog
+ * @param start_tables - Tables to start cycle detection from (typically scanned tables)
+ * @return true if a cycle is detected, false otherwise
+ */
+static bool DetectCycleInFKGraph(ClientContext &context, const vector<string> &start_tables) {
+	// Build adjacency list for the FK graph
+	std::unordered_map<string, vector<string>> graph;
+	std::unordered_set<string> all_tables;
+
+	// Start with the initial tables
+	std::queue<string> to_process;
+	for (auto &table : start_tables) {
+		to_process.push(table);
+		all_tables.insert(table);
+	}
+
+	// Build the FK graph by following all FK edges
+	while (!to_process.empty()) {
+		string current = to_process.front();
+		to_process.pop();
+
+		// Get foreign keys from this table
+		auto fks = FindForeignKeys(context, current);
+		for (auto &fk : fks) {
+			string referenced_table = fk.first;
+
+			// Add edge to graph
+			graph[current].push_back(referenced_table);
+
+			// Add referenced table to processing queue if not seen before
+			if (all_tables.find(referenced_table) == all_tables.end()) {
+				all_tables.insert(referenced_table);
+				to_process.push(referenced_table);
+			}
+		}
+	}
+
+	// Perform DFS-based cycle detection using three-color algorithm
+	// WHITE (0): unvisited, GRAY (1): being processed, BLACK (2): fully processed
+	std::unordered_map<string, int> colors;
+	for (auto &table : all_tables) {
+		colors[table] = 0; // WHITE
+	}
+
+	// DFS helper function
+	std::function<bool(const string &)> has_cycle_dfs = [&](const string &node) -> bool {
+		colors[node] = 1; // GRAY - currently processing
+
+		// Visit all neighbors
+		auto it = graph.find(node);
+		if (it != graph.end()) {
+			for (auto &neighbor : it->second) {
+				if (colors[neighbor] == 1) {
+					// Back edge detected - cycle found
+					return true;
+				}
+				if (colors[neighbor] == 0) {
+					// Unvisited - recurse
+					if (has_cycle_dfs(neighbor)) {
+						return true;
+					}
+				}
+				// If neighbor is BLACK (2), no need to visit (already fully processed)
+			}
+		}
+
+		colors[node] = 2; // BLACK - fully processed
+		return false;
+	};
+
+	// Run DFS from each unvisited node
+	for (auto &table : all_tables) {
+		if (colors[table] == 0) {
+			if (has_cycle_dfs(table)) {
+				return true;
+			}
+		}
+	}
+
+	return false;
+}
+
 // helper: count scans within a SINGLE SCOPE (stops at subquery boundaries for self-join detection)
 static void CountScansInScope(const LogicalOperator &op, std::unordered_map<string, idx_t> &counts) {
 	if (op.type == LogicalOperatorType::LOGICAL_GET) {
@@ -801,6 +892,16 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 	if (!result.scanned_pu_tables.empty() || has_fk_linked_tables) {
 		// Get conservative mode setting
 		bool is_conservative = GetBooleanSetting(context, "pac_conservative_mode", true);
+
+		// Check for cycles in the FK graph FIRST
+		// This prevents infinite loops during FK path traversal
+		if (DetectCycleInFKGraph(context, scanned_tables)) {
+			if (is_conservative) {
+				throw InvalidInputException("PAC rewrite: circular foreign key dependencies detected. "
+				                            "PAC compilation requires acyclic foreign key relationships.");
+			}
+			return result;
+		}
 
 		if (ContainsWindowFunction(*plan)) {
 			if (is_conservative) {

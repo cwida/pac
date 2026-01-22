@@ -48,55 +48,8 @@ struct PACTableMetadata {
 	}
 };
 
-// Global PAC metadata manager - stores all PAC metadata in memory
-class PACMetadataManager {
-public:
-	static PACMetadataManager &Get();
-
-	// Add or update metadata for a table
-	void AddOrUpdateTable(const string &table_name, const PACTableMetadata &metadata);
-
-	// Get metadata for a table
-	const PACTableMetadata *GetTableMetadata(const string &table_name) const;
-
-	// Check if a table has PAC metadata
-	bool HasMetadata(const string &table_name) const;
-
-	// Get all table names with metadata
-	vector<string> GetAllTableNames() const;
-
-	// Remove metadata for a table (e.g., when table is dropped)
-	void RemoveTable(const string &table_name);
-
-	// Save metadata to JSON file
-	void SaveToFile(const string &filepath);
-
-	// Load metadata from JSON file
-	void LoadFromFile(const string &filepath);
-
-	// Clear all metadata
-	void Clear();
-
-	// Get the metadata file path based on database path
-	static string GetMetadataFilePath(ClientContext &context);
-
-	// Serialize table metadata to JSON string (instance method)
-	string SerializeToJSON(const PACTableMetadata &metadata) const;
-
-	// Deserialize table metadata from JSON string
-	static PACTableMetadata DeserializeFromJSON(const string &json);
-
-	// Serialize all metadata to JSON
-	string SerializeAllToJSON() const;
-
-	// Deserialize all metadata from JSON
-	void DeserializeAllFromJSON(const string &json);
-
-private:
-	PACMetadataManager() = default;
-	unordered_map<string, PACTableMetadata> table_metadata;
-	mutable std::mutex metadata_mutex;
-};
+// Forward declaration - full definition in pac_metadata_manager.hpp
+class PACMetadataManager;
 
 // Parse data for PAC parser extension
 struct PACParseData : public ParserExtensionParseData {
@@ -155,5 +108,8 @@ public:
 };
 
 } // namespace duckdb
+
+// Include PACMetadataManager full definition (placed after namespace to avoid circular dependencies)
+#include "pac_metadata_manager.hpp"
 
 #endif // PAC_PARSER_HPP

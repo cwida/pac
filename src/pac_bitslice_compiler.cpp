@@ -27,7 +27,6 @@
 #include "duckdb/optimizer/optimizer.hpp"
 
 namespace duckdb {
-
 /**
  * GetBooleanSetting: Helper to safely retrieve boolean settings with defaults
  *
@@ -91,7 +90,7 @@ static bool GetBooleanSetting(ClientContext &context, const string &setting_name
  * ALGORITHM:
  * 1. Determine which tables need to be joined (filter gets_missing by FK path)
  * 2. If join_elimination enabled, skip joining PU tables themselves
- * 3. Find "connecting table" - last present table in FK path (e.g., lineitem)
+ * 3. Find "connecting table" - last present table in FK path order (e.g., lineitem)
  * 4. For each instance of connecting table:
  *    a. Create fresh LogicalGet nodes for missing tables
  *    b. Build join chain: connecting_table -> table1 -> table2 -> ...
@@ -542,7 +541,7 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 		vector<idx_t> candidate_conn_tables;
 		for (auto &kv : connecting_table_to_orders_table) {
 			idx_t conn_table_idx = kv.first;
-			if (HasTableInSubtree(target_agg, conn_table_idx)) {
+			if (HasTableIndexInSubtree(target_agg, conn_table_idx)) {
 				// Also check that this table's columns are accessible (not blocked by MARK/SEMI/ANTI joins)
 				if (AreTableColumnsAccessible(target_agg, conn_table_idx)) {
 					candidate_conn_tables.push_back(conn_table_idx);
@@ -1345,4 +1344,4 @@ void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExten
 	Printer::Print("=== PAC COMPILATION END ===");
 #endif
 }
-
+} // namespace duckdb
