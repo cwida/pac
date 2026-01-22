@@ -27,6 +27,8 @@
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/optimizer/optimizer.hpp"
 
+#include <duckdb/planner/operator/logical_filter.hpp>
+
 namespace duckdb {
 
 /**
@@ -280,7 +282,7 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 
 		// SUBQUERY SPECIAL CASE:
 		// For subquery instances, check if we need to add a join to the FK table
-		// even though it's "present" in the outer query
+		// even though it's "present" in outer query
 		if (is_in_subquery && !fk_table_with_pu_reference.empty() &&
 		    std::find(ordered_table_names.begin(), ordered_table_names.end(), fk_table_with_pu_reference) ==
 		        ordered_table_names.end()) {
@@ -455,26 +457,77 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 			// If no accessible FK table was found, we need to add a join to bring in the FK table
 			// on the accessible (left) side of the query
 			if (!found_accessible_fk_table && !fk_table_with_pu_reference.empty()) {
-#ifdef DEBUG
-				Printer::Print("ModifyPlanWithoutPU: No accessible FK table found, adding join for " +
-				               fk_table_with_pu_reference + " to connecting table #" +
-				               std::to_string(connecting_table_idx));
-#endif
-				// Create a join to the FK table
-				unique_ptr<LogicalOperator> existing_node = (*target_ref)->Copy(input.context);
+				// We need to join through ALL intermediate tables in the FK chain
+				// to reach the FK table with PU reference.
+				// Example: shipments -> order_items -> orders (FK to users)
+				// We can't just join shipments directly to orders - we need order_items in between.
 
-				auto local_idx = GetNextTableIndex(plan);
-				auto it = check.table_metadata.find(fk_table_with_pu_reference);
-				if (it == check.table_metadata.end()) {
-					throw InternalException("PAC compiler: missing table metadata for FK table: " +
+				// Find the connecting table's position in the FK path
+				string connecting_table_name;
+				auto table_ptr = target_op.GetTable();
+				if (table_ptr) {
+					connecting_table_name = table_ptr->name;
+				}
+
+				// Build list of tables we need to join to reach fk_table_with_pu_reference
+				vector<string> tables_to_add;
+				bool found_connecting = false;
+				bool found_fk_table = false;
+
+				for (auto &table_in_path : fk_path) {
+					if (table_in_path == connecting_table_name) {
+						found_connecting = true;
+						continue; // Skip the connecting table itself
+					}
+					if (found_connecting && !found_fk_table) {
+						tables_to_add.push_back(table_in_path);
+						if (table_in_path == fk_table_with_pu_reference) {
+							found_fk_table = true;
+						}
+					}
+				}
+
+#ifdef DEBUG
+				Printer::Print("ModifyPlanWithoutPU: No accessible FK table found, adding join chain for " +
+				               std::to_string(tables_to_add.size()) + " tables to connecting table #" +
+				               std::to_string(connecting_table_idx));
+				for (auto &t : tables_to_add) {
+					Printer::Print("  - " + t);
+				}
+#endif
+
+				if (tables_to_add.empty()) {
+					throw InternalException("PAC compiler: could not find path from " + connecting_table_name + " to " +
 					                        fk_table_with_pu_reference);
 				}
 
-				auto fk_get = CreateLogicalGet(input.context, plan, fk_table_with_pu_reference, local_idx);
-				connecting_table_to_orders_table[connecting_table_idx] = local_idx;
+				// Create joins for all intermediate tables
+				unique_ptr<LogicalOperator> current_node = (*target_ref)->Copy(input.context);
+				auto local_idx = GetNextTableIndex(plan);
+				idx_t fk_table_idx = DConstants::INVALID_INDEX;
 
-				auto join = CreateLogicalJoin(check, input.context, std::move(existing_node), std::move(fk_get));
-				ReplaceNode(plan, *target_ref, join);
+				for (auto &table_to_add : tables_to_add) {
+					auto it = check.table_metadata.find(table_to_add);
+					if (it == check.table_metadata.end()) {
+						throw InternalException("PAC compiler: missing table metadata for table: " + table_to_add);
+					}
+
+					auto table_get = CreateLogicalGet(input.context, plan, table_to_add, local_idx);
+
+					if (table_to_add == fk_table_with_pu_reference) {
+						fk_table_idx = local_idx;
+					}
+
+					auto join = CreateLogicalJoin(check, input.context, std::move(current_node), std::move(table_get));
+					current_node = std::move(join);
+					local_idx++;
+				}
+
+				if (fk_table_idx != DConstants::INVALID_INDEX) {
+					connecting_table_to_orders_table[connecting_table_idx] = fk_table_idx;
+				}
+
+				ReplaceNode(plan, *target_ref, current_node);
 			}
 		}
 	}
@@ -606,8 +659,22 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 
 									// Build hash expression
 									auto base_hash_expr = BuildXorHashFromPKs(input, node_get, fk_cols);
+
+									// ALWAYS propagate the hash expression through any intermediate operators
+									// between the table scan and the aggregate. This ensures:
+									// 1. Projection maps are updated to include the new column
+									// 2. Operator types are re-resolved
+									// 3. The binding is correctly mapped through the operator chain
+									// Even if the aggregate reads directly from the scan, PropagatePKThroughProjections
+									// will handle it correctly (returning the original expression if no intermediate
+									// ops)
 									auto hash_input_expr = PropagatePKThroughProjections(
 									    *plan, node_get, std::move(base_hash_expr), target_agg);
+
+#ifdef DEBUG
+									Printer::Print("ModifyPlanWithoutPU: FK table #" + std::to_string(node_table_idx) +
+									               " hash expression propagated");
+#endif
 
 									// Modify this aggregate with PAC functions
 									ModifyAggregatesWithPacFunctions(input, target_agg, hash_input_expr);
@@ -796,6 +863,15 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 
 		// Skip to next aggregate if we already handled this one via direct FK
 		if (handled_via_direct_fk) {
+			continue;
+		}
+
+		// Also skip if there are no candidate connecting tables (safety check)
+		// This should not happen if the above logic is correct, but ensures we don't proceed with empty candidates
+		if (candidate_conn_tables.empty()) {
+#ifdef DEBUG
+			Printer::Print("ModifyPlanWithoutPU: Skipping aggregate with no candidate connecting tables");
+#endif
 			continue;
 		}
 
@@ -1088,15 +1164,22 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 
 		for (auto &pu_table_name : pu_table_names) {
 			// Check if this aggregate has the PU table in its subtree
-			if (HasTableInSubtree(target_agg, pu_table_name)) {
-				// Direct PU scan case: use PU's primary key
-				// Find the table scan WITHIN THIS AGGREGATE'S SUBTREE (not globally)
-				// This is important when the same table is scanned multiple times in different subqueries
-				auto *get_ptr = FindTableScanInSubtree(target_agg, pu_table_name);
-				if (!get_ptr) {
-					throw InternalException("PAC Compiler: could not find table scan for " + pu_table_name +
-					                        " in aggregate's subtree");
+			// AND if the PU table's columns are actually accessible
+			// (not blocked by MARK/SEMI/ANTI joins from IN/EXISTS subqueries)
+			bool pu_in_subtree = HasTableInSubtree(target_agg, pu_table_name);
+			bool pu_columns_accessible = false;
+			LogicalGet *get_ptr = nullptr;
+
+			if (pu_in_subtree) {
+				get_ptr = FindTableScanInSubtree(target_agg, pu_table_name);
+				if (get_ptr) {
+					pu_columns_accessible = AreTableColumnsAccessible(target_agg, get_ptr->table_index);
 				}
+			}
+
+			if (pu_in_subtree && pu_columns_accessible && get_ptr) {
+				// Direct PU scan case: use PU's primary key
+				// The PU table is in the subtree AND its columns are accessible
 				auto &get = *get_ptr;
 
 #ifdef DEBUG
@@ -1207,7 +1290,7 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 					}
 					auto &fk_get = fk_scan_ptr->get()->Cast<LogicalGet>();
 
-					// Ensure FK columns are present
+					// Ensure FK columns are projected
 					AddPKColumns(fk_get, fk_cols);
 
 					// Build hash expression from FK columns
@@ -1323,6 +1406,29 @@ void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExten
 
 		ModifyPlanWithoutPU(check, input, plan, unique_gets_missing, gets_present, fk_path_to_use, privacy_units);
 	}
+
+	// IMPORTANT: After all PAC modifications, resolve operator types for the entire plan tree
+	// This ensures that all column bindings are properly updated after we've added new columns
+	// to table scans and modified aggregate expressions
+
+	// Also clear any FILTER projection_maps in the plan, as they can interfere with
+	// the ColumnBindingResolver when we've modified aggregate expressions.
+	// The projection_maps are optimization hints that tell DuckDB which columns to keep,
+	// but after PAC transformation they may be stale.
+	std::function<void(LogicalOperator *)> clear_filter_projection_maps = [&](LogicalOperator *op) {
+		if (!op)
+			return;
+		if (op->type == LogicalOperatorType::LOGICAL_FILTER) {
+			auto &filter = op->Cast<LogicalFilter>();
+			filter.projection_map.clear();
+		}
+		for (auto &child : op->children) {
+			clear_filter_projection_maps(child.get());
+		}
+	};
+	clear_filter_projection_maps(plan.get());
+
+	plan->ResolveOperatorTypes();
 
 #ifdef DEBUG
 	Printer::Print("=== PLAN AFTER PAC TRANSFORMATION ===");
