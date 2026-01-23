@@ -232,17 +232,15 @@ static void PacMinMaxFinalizeCounters(Vector &states, AggregateInputData &input,
 		list_entries[offset + i].offset = i * 64;
 		list_entries[offset + i].length = 64;
 
-		double buf[64];
+		double *dst = &child_data[i * 64];
 		if (s && s->initialized) {
-			s->GetTotalsAsDouble(buf);
+			// Write directly to destination and divide by 2 in same loop
+			// (min/max adds value to both deterministic and probabilistic counters)
+			for (idx_t j = 0; j < 64; j++) {
+				dst[j] = ToDouble(s->extremes[j]) * 0.5;
+			}
 		} else {
-			memset(buf, 0, sizeof(buf));
-		}
-
-		// Note: we divide by 2 like in normal finalize since min/max adds value to both
-		// deterministic and probabilistic counters
-		for (idx_t j = 0; j < 64; j++) {
-			child_data[i * 64 + j] = buf[j] / 2.0;
+			memset(dst, 0, 64 * sizeof(double));
 		}
 	}
 }

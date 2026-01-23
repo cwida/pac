@@ -213,10 +213,8 @@ void PacCountFinalizeCounters(Vector &states, AggregateInputData &input, Vector 
 			memset(buf, 0, sizeof(buf));
 		}
 
-		// Copy the 64 counters to the list
-		for (idx_t j = 0; j < 64; j++) {
-			child_data[i * 64 + j] = buf[j];
-		}
+		// Copy the 64 counters to the list (memcpy is faster than element-by-element)
+		memcpy(&child_data[i * 64], buf, sizeof(buf));
 	}
 }
 
