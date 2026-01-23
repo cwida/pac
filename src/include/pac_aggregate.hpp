@@ -17,20 +17,6 @@
 
 namespace duckdb {
 
-// Mix key_hash with query_hash for uniform bit distribution.
-// Uses fmix64 (MurmurHash3 finalizer) for excellent avalanche properties.
-static inline uint64_t PacMixHash(uint64_t key_hash, uint64_t query_hash) {
-	// Combine key and query hashes, add constant to avoid 0->0 fixed point
-	uint64_t x = key_hash + query_hash + 1;
-	// Apply fmix64
-	x ^= x >> 33;
-	x *= 0xff51afd7ed558ccdULL;
-	x ^= x >> 33;
-	x *= 0xc4ceb9fe1a85ec53ULL;
-	x ^= x >> 33;
-	return x;
-}
-
 // Header for PAC aggregate helpers and public declarations used across pac_* files.
 // Contains bindings and small helpers shared between pac_aggregate, pac_count and pac_sum implementations.
 
