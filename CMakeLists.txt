@@ -15,6 +15,17 @@ project(${TARGET_NAME})
 include_directories(src/include)
 include_directories(benchmark/include)
 
+# Option to disable approximate sum algorithm (use exact cascading instead)
+# By default, pac_sum/pac_avg use the approx algorithm (16-bit cascading counters)
+# Set PAC_NOAPPROX=ON to use exact cascading instead
+option(PAC_NOAPPROX "Disable approximate sum algorithm, use exact cascading" OFF)
+if(PAC_NOAPPROX)
+    add_definitions(-DPAC_NOAPPROX)
+    message(STATUS "PAC: Using exact cascading sum algorithm (PAC_NOAPPROX)")
+else()
+    message(STATUS "PAC: Using approximate sum algorithm (default)")
+endif()
+
 # Extension sources
 set(EXTENSION_SOURCES src/pac_extension.cpp src/pac_optimizer.cpp src/pac_privacy_unit.cpp
         src/pac_compatibility_check.cpp src/pac_aggregate.cpp src/pac_helpers.cpp

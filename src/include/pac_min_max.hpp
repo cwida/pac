@@ -106,25 +106,26 @@ AUTOVECTORIZE inline
 
 #ifdef PAC_GODBOLT
 // Explicit instantiations for Godbolt analysis (omit hugeint)
-template void UpdateExtremesSIMD<uint8_t, uint8_t, uint8_t, 8, 0x0000000100000001ULL, true, false, false>(uint8_t *,
+// Template params: <T, UintT, BitsT, SHIFTS, MASK, IS_MAX, FLOAT, SIGNED>
+template void UpdateExtremesSIMD<uint8_t, uint8_t, uint8_t, 8, 0x0101010101010101ULL, true, false, false>(uint8_t *,
                                                                                                           uint64_t,
                                                                                                           uint8_t);
 template void
-UpdateExtremesSIMD<int8_t, uint8_t, int8_t, 8, 0x0000000100000001ULL, false, false, true>(int8_t *, uint64_t, int8_t);
+UpdateExtremesSIMD<int8_t, uint8_t, int8_t, 8, 0x0101010101010101ULL, false, false, true>(int8_t *, uint64_t, int8_t);
 template void
-UpdateExtremesSIMD<uint16_t, uuint16_t, uint16_t, 16, 0x0000000100000001ULL, true, false, true>(uint16_t *, uint64_t,
+UpdateExtremesSIMD<uint16_t, uint16_t, uint16_t, 16, 0x0001000100010001ULL, true, false, false>(uint16_t *, uint64_t,
                                                                                                 uint16_t);
-template void UpdateExtremesSIMD<int16_t, uint16_t, int16_t, 16, 0x0000000100000001ULL, false, false, true>(int16_t *,
+template void UpdateExtremesSIMD<int16_t, uint16_t, int16_t, 16, 0x0001000100010001ULL, false, false, true>(int16_t *,
                                                                                                             uint64_t,
                                                                                                             int16_t);
-template void UpdateExtremesSIMD<uint32_t, uint32_t, uint32_t, 32, 0x0000000100000001ULL, true, false, true>(uint32_t *,
-                                                                                                             uint64_t,
-                                                                                                             uint32_t);
+template void
+UpdateExtremesSIMD<uint32_t, uint32_t, uint32_t, 32, 0x0000000100000001ULL, true, false, false>(uint32_t *, uint64_t,
+                                                                                                uint32_t);
 template void UpdateExtremesSIMD<int32_t, uint32_t, int32_t, 32, 0x0000000100000001ULL, false, false, true>(int32_t *,
                                                                                                             uint64_t,
                                                                                                             int32_t);
-template void UpdateExtremesSIMD<uint64_t, uint64_t, uint64_t, 64, 1ULL, true, false, true>(uint64_t *, uint64_t,
-                                                                                            uint64_t);
+template void UpdateExtremesSIMD<uint64_t, uint64_t, uint64_t, 64, 1ULL, true, false, false>(uint64_t *, uint64_t,
+                                                                                             uint64_t);
 template void UpdateExtremesSIMD<int64_t, uint64_t, int64_t, 64, 1ULL, false, false, true>(int64_t *, uint64_t,
                                                                                            int64_t);
 template void

@@ -28,8 +28,6 @@ using int64_t = signed long long;
 namespace duckdb {
 void RegisterPacSumFunctions(ExtensionLoader &loader);
 void RegisterPacAvgFunctions(ExtensionLoader &loader);
-void RegisterPacSumApproxFunctions(ExtensionLoader &loader);
-void RegisterPacAvgApproxFunctions(ExtensionLoader &loader);
 void RegisterPacSumCountersFunctions(ExtensionLoader &loader);
 
 // ============================================================================
@@ -79,6 +77,7 @@ void RegisterPacSumCountersFunctions(ExtensionLoader &loader);
 // Define PAC_NOBUFFERING to disable the buffering optimization.
 // Define PAC_NOCASCADING to disable multi-level cascading from small into wider types (aggregate in final type)
 // Define PAC_NOSIMD to get the IF..THEN SIMD-unfriendly aggregate computation kernel
+// Define PAC_NOAPPROX to use exact cascading instead of the approximate algorithm (approx is default)
 #endif
 #if defined(PAC_NOSIMD) && !defined(PAC_NOCASCADING)
 PAC_NOSIMD only makes sense in combination with PAC_NOCASCADING
@@ -157,9 +156,26 @@ template void AddToTotalsSimple<double, double>(double *, double, uint64_t);
 #define CHECK_BOUNDS_64(new_total, value, exact_total)                                                                 \
 	((SIGNED && (value) < 0) ? ((new_total) > (exact_total)) : ((new_total) < (exact_total)))
 
+// ============================================================================
+// Approximate sum constants (default, disabled when PAC_NOAPPROX is defined)
+// ============================================================================
+// Number of levels in the approximate implementation (covers 104 bits: 8 + 12*8)
+constexpr int PAC_APPROX_NUM_LEVELS = 13;
+// SWAR elements per level (16 uint64_t, each holding 4 int16_t counters = 128 bytes)
+constexpr int PAC_APPROX_SWAR_ELEMENTS = 16;
+// Values 0-256 go to level 0 without shifting
+constexpr int PAC_APPROX_MAX_BITS_LEVEL0 = 8;
+// SWAR mask for 16-bit elements (one bit per 16-bit lane)
+constexpr uint64_t PAC_APPROX_SWAR_MASK = 0x0001000100010001ULL;
+// When allocating level X, allocate levels 0 to X+ALLOC_AHEAD (batch allocation for efficiency)
+constexpr int PAC_APPROX_ALLOC_AHEAD = 4;
+
 // Templated integer state - SIGNED selects signed/unsigned types and thresholds
 // Uses lazy allocation via DuckDB's ArenaAllocator for memory management.
 // Arena handles cleanup automatically when aggregate operation completes.
+//
+// By default uses the approximate algorithm with 13 levels of 16-bit counters.
+// Define PAC_NOAPPROX to use the exact 5-level cascading implementation instead.
 template <bool SIGNED>
 struct PacSumIntState {
 	// Type aliases based on signedness
@@ -168,23 +184,130 @@ struct PacSumIntState {
 	typedef typename std::conditional<SIGNED, int32_t, uint32_t>::type T32;
 	typedef typename std::conditional<SIGNED, int64_t, uint64_t>::type T64;
 
-#ifdef PAC_NOCASCADING
+#if !defined(PAC_NOAPPROX)
+	// ========== APPROXIMATE STATE LAYOUT (LAZY ALLOCATION) ==========
+	// Uses 13 levels of 16-bit counters with 8-bit overlap between adjacent levels.
+	// Each level k covers bit positions 8k to 8k+15 of the value space.
+	// Values are shifted right by 8*k bits before being added to level k counters.
+	// Lower bits are discarded with statistical rounding compensation.
+	//
+	// Lazy allocation: level arrays are allocated on demand via ArenaAllocator.
+	// When level X is needed, levels 0 to min(X+4, 12) are allocated together.
+	// This amortizes allocation overhead while keeping memory usage low for small values.
+	uint64_t key_hash;     // OR of all key_hashes seen (for PacNoiseInNull)
+	uint64_t exact_count;  // total count of values added (for pac_avg)
+	int8_t max_level_used; // highest level that received data (-1 if none)
+
+	// Exact subtotal at each level - tracks cumulative sum for overflow detection
+	int32_t exact_total[PAC_APPROX_NUM_LEVELS];
+
+	// Lazily allocated level arrays - nullptr if not yet allocated
+	// Each level is 16 uint64_t in SWAR layout (128 bytes)
+	uint64_t *levels[PAC_APPROX_NUM_LEVELS];
+
+	// Get the level index for a value based on its highest set bit
+	static inline int GetLevel(int64_t value) {
+		uint64_t abs_val = SIGNED && value < 0 ? static_cast<uint64_t>(-value) : static_cast<uint64_t>(value);
+		int highest_bit = 63 - __builtin_clzll(abs_val | 1);
+		return (abs_val <= (1 << PAC_APPROX_MAX_BITS_LEVEL0)) ? 0 : (highest_bit - 2) >> 3;
+	}
+
+	// Ensure level k is allocated. When allocating, also allocate levels 0 to min(k+4, NUM_LEVELS-1).
+	inline void EnsureLevelAllocated(ArenaAllocator &allocator, int k) {
+		if (levels[k]) {
+			return; // already allocated
+		}
+		// Allocate levels 0 up to min(k+ALLOC_AHEAD, NUM_LEVELS-1)
+		int alloc_up_to = std::min(k + PAC_APPROX_ALLOC_AHEAD, PAC_APPROX_NUM_LEVELS - 1);
+		for (int i = 0; i <= alloc_up_to; i++) {
+			if (!levels[i]) {
+				levels[i] =
+				    reinterpret_cast<uint64_t *>(allocator.Allocate(PAC_APPROX_SWAR_ELEMENTS * sizeof(uint64_t)));
+				memset(levels[i], 0, PAC_APPROX_SWAR_ELEMENTS * sizeof(uint64_t));
+			}
+		}
+	}
+
+	// Cascade level k to level k+1 (called when level k would overflow)
+	void Cascade(int k, ArenaAllocator &allocator) {
+		if (k >= PAC_APPROX_NUM_LEVELS - 1) {
+			return;
+		}
+
+		// Ensure level k+1 is allocated before cascading into it
+		EnsureLevelAllocated(allocator, k + 1);
+
+		int32_t cascade_amount = exact_total[k] >> 8;
+		constexpr int32_t OVERFLOW_THRESHOLD = SIGNED ? 8191 : 16383;
+		constexpr int32_t UNDERFLOW_THRESHOLD = SIGNED ? -8192 : 0;
+		int32_t new_total_k1 = exact_total[k + 1] + cascade_amount;
+
+		if (new_total_k1 > OVERFLOW_THRESHOLD || new_total_k1 < UNDERFLOW_THRESHOLD) {
+			Cascade(k + 1, allocator);
+			new_total_k1 = cascade_amount;
+		}
+
+		if (k + 1 > max_level_used) {
+			max_level_used = static_cast<int8_t>(k + 1);
+		}
+
+		int16_t *src_i16 = reinterpret_cast<int16_t *>(levels[k]);
+		int16_t *dst_i16 = reinterpret_cast<int16_t *>(levels[k + 1]);
+		for (int j = 0; j < 64; j++) {
+			int16_t val = src_i16[j];
+			int16_t shifted = static_cast<int16_t>(val >> 8);
+			shifted += static_cast<int16_t>((val >> 7) & 1); // rounding compensation
+			dst_i16[j] += shifted;
+		}
+
+		exact_total[k + 1] = new_total_k1;
+		memset(levels[k], 0, PAC_APPROX_SWAR_ELEMENTS * sizeof(uint64_t));
+		exact_total[k] = 0;
+	}
+
+	// Flush all levels by cascading up to the highest level that received data
+	void Flush(ArenaAllocator &allocator) {
+		if (max_level_used < 0) {
+			return;
+		}
+		for (int k = 0; k < max_level_used; k++) {
+			Cascade(k, allocator);
+		}
+	}
+
+	// Get probabilistic totals as double[64] for finalization
+	void GetTotalsAsDouble(double *dst) const {
+		if (max_level_used < 0 || !levels[max_level_used]) {
+			memset(dst, 0, 64 * sizeof(double));
+			return;
+		}
+		double scale = static_cast<double>(1ULL << (8 * max_level_used));
+		const int16_t *counters = reinterpret_cast<const int16_t *>(levels[max_level_used]);
+		for (int j = 0; j < 64; j++) {
+			int swar_idx = (j % 16) * 4 + (j / 16);
+			dst[j] = static_cast<double>(counters[swar_idx]) * scale;
+		}
+	}
+
+#elif defined(PAC_NOCASCADING)
+	// ========== NON-CASCADING STATE LAYOUT ==========
 	uint64_t key_hash;                    // OR of all key_hashes seen (for PacNoiseInNull)
 	uint64_t exact_count;                 // total count of values added (for pac_avg)
 	hugeint_t probabilistic_total128[64]; // final total (non-cascading mode only)
-#ifdef PAC_UNSAFENULL
-	bool seen_null;
-#endif
+
+	void Flush(ArenaAllocator &) {
+	} // no-op
+	void GetTotalsAsDouble(double *dst) const {
+		ToDoubleArray(probabilistic_total128, dst);
+	}
+
 #else
+	// ========== EXACT STATE LAYOUT (default) ==========
 	// Field ordering optimized for memory layout:
-	// 1. seen_null (1 byte -- only in the old unsafe NULL semantics)
-	// 2. exact_totals (sized to fit level's range - value is always valid after flush)
-	// 3. key_hash (used to track initialization of all counters)
-	// 4. exact_count (required for AVG really)
-	// 5. probabilistic pointers (lazily allocated)
-#ifdef PAC_UNSAFENULL
-	bool seen_null;
-#endif
+	// 1. exact_totals (sized to fit level's range - value is always valid after flush)
+	// 2. key_hash (used to track initialization of all counters)
+	// 3. exact_count (required for AVG really)
+	// 4. probabilistic pointers (lazily allocated)
 	// Exact subtotals for each level - sized to fit level's representable range.
 	// After any Flush, exact_totalN is either:
 	//   - the incoming `value` (which fits in TN since it was routed to level N), or
@@ -204,15 +327,7 @@ struct PacSumIntState {
 	uint64_t *probabilistic_total32;   // 32 x uint64_t (256 bytes) when allocated, each holds 2 packed T32
 	uint64_t *probabilistic_total64;   // 64 x uint64_t (512 bytes) when allocated, each holds 1 T64
 	hugeint_t *probabilistic_total128; // 64 x hugeint_t (1024 bytes) when allocated
-#endif
-#ifdef PAC_NOCASCADING
-	// NOCASCADING: dummy methods for uniform interface
-	void Flush(ArenaAllocator &) {
-	} // no-op
-	void GetTotalsAsDouble(double *dst) const {
-		ToDoubleArray(probabilistic_total128, dst);
-	}
-#else
+
 	// Lazily allocate a level's buffer if not yet allocated
 	// BUF_T: buffer element type (uint64_t for SWAR levels, hugeint_t for level 128)
 	// Returns 0 if allocated, otherwise returns exact_total unchanged
@@ -370,7 +485,7 @@ struct PacSumIntState {
 			memset(dst, 0, 64 * sizeof(double));
 		}
 	}
-#endif
+#endif // !PAC_NOAPPROX (approx) / PAC_NOCASCADING / default (exact)
 
 	// Interface methods for wrapper compatibility
 	PacSumIntState *GetState() {
@@ -383,9 +498,6 @@ struct PacSumIntState {
 
 // Double pac_sum state is noncascading: directly aggregates float/double into double
 struct PacSumDoubleState {
-#ifdef PAC_UNSAFENULL
-	bool seen_null;
-#endif
 	uint64_t key_hash;    // OR of all key_hashes seen (for PacNoiseInNull)
 	uint64_t exact_count; // total count of values added (for pac_avg)
 	double probabilistic_total[64];
@@ -437,9 +549,26 @@ struct PacSumStateWrapper {
 		if (!s) {
 			s = reinterpret_cast<State *>(a.Allocate(sizeof(State)));
 			memset(s, 0, sizeof(State));
+			InitializeState(s);
 			state = s;
 		}
 		return s;
+	}
+
+private:
+	// Helper to initialize state - only sets max_level_used for integer state in approx mode
+	template <typename S = State>
+	typename std::enable_if<!std::is_same<S, PacSumDoubleState>::value>::type InitializeState(S *s) {
+#ifndef PAC_NOAPPROX
+		s->max_level_used = -1; // no levels have received data yet
+		                        // levels[] pointers are already zeroed by memset
+#else
+		(void)s;
+#endif
+	}
+	template <typename S = State>
+	typename std::enable_if<std::is_same<S, PacSumDoubleState>::value>::type InitializeState(S *) {
+		// PacSumDoubleState doesn't use approx algorithm
 	}
 };
 
@@ -449,176 +578,6 @@ using PacSumIntStateWrapper = PacSumStateWrapper<PacSumIntState<SIGNED>, typenam
 using PacSumDoubleStateWrapper = PacSumStateWrapper<PacSumDoubleState, double>;
 #endif // PAC_NOBUFFERING
 
-// ============================================================================
-// PAC_SUM_APPROX / PAC_AVG_APPROX: 16-bit cascading counter implementation
-// ============================================================================
-// This approximate implementation uses 11 levels of 16-bit counters with 8-bit overlap.
-// Each level k covers bit positions 8k to 8k+15 of the value space.
-// Values are routed to the smallest level that can hold them (with 2-bit overflow margin).
-// Lower bits are discarded when routing to higher levels, with statistical rounding compensation.
-//
-// Design:
-// - 11 levels covering 96 bits (64+32) - sufficient for most practical values
-// - Level k covers bits 8k to 8k+15 (16-bit window, 8-bit overlap with adjacent levels)
-// - Each level has 64 int16_t counters (one per key_hash bit position) stored as 16 uint64_t in SWAR layout
-// - ALL levels are inlined (no pointers) for cache efficiency
-// - 2-bit margin: values use at most 14 bits of each 16-bit counter
-// - Rounding compensation: when cascading, add 1 if bit 7 is set
-
-// Number of levels in the approximate implementation (covers 96 bits)
-constexpr int PAC_APPROX_NUM_LEVELS = 11;
-// SWAR elements per level (16 uint64_t, each holding 4 int16_t counters)
-constexpr int PAC_APPROX_SWAR_ELEMENTS = 16;
-// With 3-bit margin, we want to accumulate 8 values before overflow
-// Threshold is 4095 (12 bits), so each value should fit in 10 bits (1023)
-// This allows 8 * 1023 = 8184 < 8191 before cascade
-constexpr int PAC_APPROX_MAX_BITS_LEVEL0 = 8;  // values 0-1023
-// SWAR mask for 16-bit elements (one bit per 16-bit lane)
-constexpr uint64_t PAC_APPROX_SWAR_MASK = 0x0001000100010001ULL;
-
-// Approximate integer state for pac_sum_approx/pac_avg_approx
-// Uses 11 levels of 16-bit counters with 8-bit overlap between adjacent levels
-// All arrays are inlined for cache efficiency (no pointer chasing)
-// Total size: ~1.5KB per state
-template <bool SIGNED>
-struct PacSumApproxIntState {
-	uint64_t key_hash;    // OR of all key_hashes seen (for PacNoiseInNull)
-	uint64_t exact_count; // total count of values added (for pac_avg)
-	int8_t max_level_used; // highest level that received data (-1 if none)
-
-	// Exact subtotal at each level - tracks cumulative sum for overflow detection
-	int32_t exact_total[PAC_APPROX_NUM_LEVELS];
-
-	// 11 inlined level arrays - each is 16 uint64_t in SWAR layout (128 bytes)
-	// Each uint64_t holds 4 int16_t counters for bits i, i+16, i+32, i+48
-	// Level k handles values shifted right by 8*k bits
-	uint64_t levels[PAC_APPROX_NUM_LEVELS][PAC_APPROX_SWAR_ELEMENTS];
-
-	// Get the level index for a value based on its highest set bit
-	// With 3-bit margin, we want each shifted value to fit in 10 bits (max 1023)
-	// This allows accumulating 8 values before hitting the 12-bit threshold (4095)
-	// Level k shifts by 8k bits, so value <= 1023 * 2^(8k)
-	// This means highest_bit <= 9 + 8k, or k >= (highest_bit - 9) / 8
-	static inline int GetLevel(int64_t value) {
-		uint64_t abs_val = SIGNED && value < 0 ? static_cast<uint64_t>(-value) : static_cast<uint64_t>(value);
-		int highest_bit = 63 - __builtin_clzll(abs_val);
-		return (abs_val <= (1 << PAC_APPROX_MAX_BITS_LEVEL0)) ? 0 : (highest_bit - 2) >> 3;
-	}
-
-	// Cascade level k to level k+1 (called when level k would overflow)
-	// Shifts each counter right by 8 bits and adds to next level
-	void Cascade(int k) {
-		if (k >= PAC_APPROX_NUM_LEVELS - 1) {
-			return; // can't cascade from highest level
-		}
-
-		// Compute how much we're adding to level k+1
-		int32_t cascade_amount = exact_total[k] >> 8;
-
-		// Check if level k+1 would overflow from this cascade
-		constexpr int32_t OVERFLOW_THRESHOLD = SIGNED ? 8191 : 16383;
-		constexpr int32_t UNDERFLOW_THRESHOLD = SIGNED ? -8192 : 0;
-		int32_t new_total_k1 = exact_total[k + 1] + cascade_amount;
-
-		if (new_total_k1 > OVERFLOW_THRESHOLD || new_total_k1 < UNDERFLOW_THRESHOLD) {
-			// Recursively cascade level k+1 first
-			Cascade(k + 1);
-			new_total_k1 = cascade_amount; // After cascade, exact_total[k+1] is 0
-		}
-
-		// Update max_level_used since we're putting data in level k+1
-		if (k + 1 > max_level_used) {
-			max_level_used = static_cast<int8_t>(k + 1);
-		}
-
-		// Process SWAR-packed counters: shift each 16-bit element right by 8, add rounding, add to dst
-		int16_t *src_i16 = reinterpret_cast<int16_t *>(levels[k]);
-		int16_t *dst_i16 = reinterpret_cast<int16_t *>(levels[k + 1]);
-		for (int j = 0; j < 64; j++) {
-			int16_t val = src_i16[j];
-			int16_t shifted = static_cast<int16_t>(val >> 8);
-			// Rounding compensation: add 1 if bit 7 is set
-			shifted += static_cast<int16_t>((val >> 7) & 1);
-			dst_i16[j] += shifted;
-		}
-
-		// Update exact_total for level k+1 and clear level k
-		exact_total[k + 1] = new_total_k1;
-		memset(levels[k], 0, PAC_APPROX_SWAR_ELEMENTS * sizeof(uint64_t));
-		exact_total[k] = 0;
-	}
-
-	// Flush all levels by cascading up to the highest level that received data
-	void Flush() {
-		if (max_level_used < 0) {
-			return;
-		}
-		// Cascade from level 0 up to max_level_used-1
-		// This consolidates all data into max_level_used
-		for (int k = 0; k < max_level_used; k++) {
-			Cascade(k);
-		}
-	}
-
-	// Get probabilistic totals as double[64] for finalization
-	// After Flush(), all data is in max_level_used
-	void GetTotalsAsDouble(double *dst) const {
-		if (max_level_used < 0) {
-			memset(dst, 0, 64 * sizeof(double));
-			return;
-		}
-
-		// Scale factor: level k values are shifted by 8*k, so multiply by 2^(8*k)
-		double scale = static_cast<double>(1ULL << (8 * max_level_used));
-		const int16_t *counters = reinterpret_cast<const int16_t *>(levels[max_level_used]);
-		// Unpack from SWAR layout: counter for bit j is at physical index (j % 16) * 4 + (j / 16)
-		for (int j = 0; j < 64; j++) {
-			int swar_idx = (j % 16) * 4 + (j / 16);
-			dst[j] = static_cast<double>(counters[swar_idx]) * scale;
-		}
-	}
-
-	// Interface methods for wrapper compatibility
-	PacSumApproxIntState *GetState() {
-		return this;
-	}
-	PacSumApproxIntState *EnsureState(ArenaAllocator &) {
-		return this;
-	}
-};
-
-// Wrapper for approximate state with buffering for better cache locality
-// Buffers (hash, value) pairs before allocating and updating the inner state
-template <bool SIGNED>
-struct PacSumApproxIntStateWrapper {
-	using State = PacSumApproxIntState<SIGNED>;
-	using Value = int64_t;
-	static constexpr int BUF_SIZE = 2;       // Buffer 2 values before flushing (same as pac_sum)
-	static constexpr uint64_t BUF_MASK = 3ULL; // Lower 2 bits for count (0-2)
-
-	int64_t val_buf[BUF_SIZE];
-	uint64_t hash_buf[BUF_SIZE];
-	uint64_t exact_count; // tracked separately, merged on flush/combine
-	union {
-		uint64_t n_buffered; // lower 3 bits: count, upper bits: state pointer
-		State *state;
-	};
-
-	State *GetState() const {
-		return reinterpret_cast<State *>(reinterpret_cast<uintptr_t>(state) & ~BUF_MASK);
-	}
-
-	State *EnsureState(ArenaAllocator &a) {
-		State *s = GetState();
-		if (!s) {
-			s = reinterpret_cast<State *>(a.Allocate(sizeof(State)));
-			memset(s, 0, sizeof(State));
-			s->max_level_used = -1; // no levels have received data yet
-			state = s;
-		}
-		return s;
-	}
-};
 // Forward declarations for pac_sum functions exported for pac_avg
 
 // State type selection (defined in pac_sum.cpp, needed by pac_avg.cpp)
@@ -669,6 +628,12 @@ void PacSumScatterUpdateUBigInt(Vector inputs[], AggregateInputData &aggr, idx_t
 void PacSumScatterUpdateUHugeInt(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states, idx_t count);
 void PacSumScatterUpdateFloat(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states, idx_t count);
 void PacSumScatterUpdateDouble(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states, idx_t count);
+
+#ifndef PAC_NOAPPROX
+// HugeInt variants using double state (for approx mode)
+void PacSumUpdateHugeIntDouble(Vector inputs[], AggregateInputData &aggr, idx_t, data_ptr_t state_p, idx_t count);
+void PacSumScatterUpdateHugeIntDouble(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states, idx_t count);
+#endif
 
 // Combine functions
 void PacSumCombineSigned(Vector &src, Vector &dst, AggregateInputData &aggr, idx_t count);

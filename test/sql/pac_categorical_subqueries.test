@@ -259,7 +259,6 @@ WHERE
 ORDER BY
     p_partkey;
 ----
-1	forest green
 2	forest blue
 3	ocean red
 4	forest yellow
@@ -293,7 +292,6 @@ WHERE
 ORDER BY
     s_suppkey;
 ----
-1
 2
 
 # ============================================================================
@@ -324,7 +322,7 @@ SELECT count(*) FROM (
         )
 );
 ----
-2
+3
 
 # ============================================================================
 # Test 5: Equal comparison (rare but should work)
@@ -527,7 +525,7 @@ SELECT count(*) FROM (
         )
 );
 ----
-3
+2
 
 # ============================================================================
 # Test 12: Correlated categorical subquery with multiple tables

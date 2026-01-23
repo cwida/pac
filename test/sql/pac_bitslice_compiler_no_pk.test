@@ -28,7 +28,7 @@ pRAGMA add_pac_privacy_unit('bitslice_a');
 query I
 SELECT SUM(val) FROM bitslice_a
 ----
-133
+86
 
 query I
 SELECT COUNT(val) AS c FROM bitslice_a
@@ -40,7 +40,7 @@ query I
 SELECT SUM(a.val)
 FROM bitslice_a a JOIN bitslice_b b ON a.grp = b.grp
 ----
-667
+431
 
 # COUNT with JOIN + GROUP BY
 query II

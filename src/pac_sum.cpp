@@ -12,14 +12,15 @@ namespace duckdb {
 // ============================================================================
 //#define PAC_APPROX_PROFILE 1
 #ifdef PAC_APPROX_PROFILE
-static std::atomic<uint64_t> g_approx_update_count{0};
+static std::atomic<uint64_t> g_approx_update_count {0};
 static std::atomic<uint64_t> g_approx_cascade_count[PAC_APPROX_NUM_LEVELS] = {};
 static std::atomic<uint64_t> g_approx_level_update_count[PAC_APPROX_NUM_LEVELS] = {};
 
 struct ApproxProfilePrinter {
 	~ApproxProfilePrinter() {
 		uint64_t total_updates = g_approx_update_count.load();
-		if (total_updates == 0) return;
+		if (total_updates == 0)
+			return;
 		fprintf(stderr, "\n=== pac_sum_approx profiling ===\n");
 		fprintf(stderr, "Total updates: %llu\n", total_updates);
 		uint64_t total_cascades = 0;
@@ -28,9 +29,8 @@ struct ApproxProfilePrinter {
 			uint64_t level_cascades = g_approx_cascade_count[k].load();
 			total_cascades += level_cascades;
 			if (level_updates > 0 || level_cascades > 0) {
-				fprintf(stderr, "  Level %2d: %10llu updates, %10llu cascades (%.4f%%)\n",
-				        k, level_updates, level_cascades,
-				        level_updates > 0 ? 100.0 * level_cascades / level_updates : 0.0);
+				fprintf(stderr, "  Level %2d: %10llu updates, %10llu cascades (%.4f%%)\n", k, level_updates,
+				        level_cascades, level_updates > 0 ? 100.0 * level_cascades / level_updates : 0.0);
 			}
 		}
 		fprintf(stderr, "Total cascades: %llu (%.4f%% of updates)\n", total_cascades,
@@ -67,11 +67,38 @@ AUTOVECTORIZE inline void // main worker function for probabilistically adding o
 PacSumUpdateOneInternal(PacSumIntState<SIGNED> &state, uint64_t key_hash, typename PacSumIntState<SIGNED>::T64 value,
                         ArenaAllocator &allocator) {
 	state.key_hash |= key_hash;
-#ifdef PAC_NOCASCADING
+#if !defined(PAC_NOAPPROX)
+	// APPROX ALGORITHM: route by bit position, shift value
+	int level = PacSumIntState<SIGNED>::GetLevel(static_cast<int64_t>(value));
+	uint64_t shift = level << 3;
+	int64_t shifted_val = static_cast<int64_t>(value) >> shift;
+	// Rounding compensation: add 1 in 50% of cases when bit being truncated is set
+	// Use key_hash bit 0 for random selection (count is tracked in wrapper, not here)
+	shifted_val += (1 & key_hash & (static_cast<int64_t>(value) >> (shift - 1)));
+
+	// Ensure level is allocated (also allocates levels 0 to level+4)
+	state.EnsureLevelAllocated(allocator, level);
+
+	if (level > state.max_level_used) {
+		state.max_level_used = static_cast<int8_t>(level);
+	}
+
+	constexpr int32_t OVERFLOW_THRESHOLD = SIGNED ? 4095 : 8191;
+	constexpr int32_t UNDERFLOW_THRESHOLD = SIGNED ? -4096 : 0;
+	int32_t new_total = state.exact_total[level] + static_cast<int32_t>(shifted_val);
+
+	if (new_total > OVERFLOW_THRESHOLD || new_total < UNDERFLOW_THRESHOLD) {
+		state.Cascade(level, allocator);
+		state.exact_total[level] = static_cast<int32_t>(shifted_val);
+	} else {
+		state.exact_total[level] = new_total;
+	}
+	AddToTotalsSWAR<int16_t, uint16_t, PAC_APPROX_SWAR_MASK>(state.levels[level], shifted_val, key_hash);
+#elif defined(PAC_NOCASCADING)
 	AddToTotalsSimple(state.probabilistic_total128, value, key_hash); // directly add the value to the final total
 #else
-	// decide based on the (integer) value, in which level to aggregate (ensure the level is allocated)
-	// note that SIGNED stuff will be compiled away for unsigned types
+	// EXACT ALGORITHM: decide based on the (integer) value, in which level to aggregate
+	// (ensure the level is allocated). Note that SIGNED stuff will be compiled away for unsigned types.
 	if ((SIGNED && value < 0) ? (value >= LOWERBOUND_BITWIDTH(8)) : (value < UPPERBOUND_BITWIDTH(8))) {
 		state.exact_total8 =
 		    PacSumIntState<SIGNED>::EnsureLevelAllocated(allocator, state.probabilistic_total8, 8, state.exact_total8);
@@ -188,11 +215,6 @@ template <class State, bool SIGNED, class VALUE_TYPE, class INPUT_TYPE>
 static void PacSumUpdate(Vector inputs[], data_ptr_t state_p, idx_t count, ArenaAllocator &allocator,
                          uint64_t query_hash) {
 	auto &state = *reinterpret_cast<State *>(state_p);
-#ifdef PAC_UNSAFENULL
-	if (state.seen_null) {
-		return;
-	}
-#endif
 	UnifiedVectorFormat hash_data, value_data;
 	inputs[0].ToUnifiedFormat(count, hash_data);
 	inputs[1].ToUnifiedFormat(count, value_data);
@@ -216,12 +238,7 @@ static void PacSumUpdate(Vector inputs[], data_ptr_t state_p, idx_t count, Arena
 			auto h_idx = hash_data.sel->get_index(i);
 			auto v_idx = value_data.sel->get_index(i);
 			if (!hash_data.validity.RowIsValid(h_idx) || !value_data.validity.RowIsValid(v_idx)) {
-#ifdef PAC_UNSAFENULL
-				inner.seen_null = true;
-				return;
-#else
-				continue; // safe mode: ignore NULLs
-#endif
+				continue; // ignore NULLs
 			}
 			state.exact_count++;
 			PacSumUpdateOneInternal<SIGNED>(inner, hashes[h_idx] ^ query_hash,
@@ -246,23 +263,12 @@ static void PacSumScatterUpdate(Vector inputs[], Vector &states, idx_t count, Ar
 		auto h_idx = hash_data.sel->get_index(i);
 		auto v_idx = value_data.sel->get_index(i);
 		auto state = state_ptrs[sdata.sel->get_index(i)];
-#ifdef PAC_UNSAFENULL
-		auto *inner = state->GetState();
-		if (inner && inner->seen_null) {
-			continue; // result will be NULL anyway
-		} else if (!hash_data.validity.RowIsValid(h_idx) || !value_data.validity.RowIsValid(v_idx)) {
-			if (inner)
-				inner->seen_null = true;
-		} else {
-#else
 		if (!hash_data.validity.RowIsValid(h_idx) || !value_data.validity.RowIsValid(v_idx)) {
-			continue; // safe mode: ignore NULLs
-		} else {
-#endif
-			state->exact_count++;
-			PacSumUpdateOne<SIGNED>(*state, hashes[h_idx] ^ query_hash,
-			                        ConvertValue<VALUE_TYPE>::convert(values[v_idx]), allocator);
+			continue; // ignore NULLs
 		}
+		state->exact_count++;
+		PacSumUpdateOne<SIGNED>(*state, hashes[h_idx] ^ query_hash, ConvertValue<VALUE_TYPE>::convert(values[v_idx]),
+		                        allocator);
 	}
 }
 
@@ -293,16 +299,6 @@ AUTOVECTORIZE static void PacSumCombineInt(Vector &src, Vector &dst, idx_t count
 #endif
 		auto *s = src_wrapper[i]->GetState();
 		auto *d_wrapper = dst_wrapper[i];
-#ifdef PAC_UNSAFENULL
-		if (s && s->seen_null) {
-			auto *d = d_wrapper->EnsureState(allocator);
-			d->seen_null = true;
-		}
-		auto *d_inner = d_wrapper->GetState();
-		if (d_inner && d_inner->seen_null) {
-			continue;
-		}
-#endif
 		// Merge exact_count from wrapper
 #ifndef PAC_NOBUFFERING
 		d_wrapper->exact_count += src_wrapper[i]->exact_count;
@@ -312,13 +308,44 @@ AUTOVECTORIZE static void PacSumCombineInt(Vector &src, Vector &dst, idx_t count
 		}
 		auto *d = d_wrapper->EnsureState(allocator);
 		d->key_hash |= s->key_hash;
-#ifdef PAC_NOCASCADING
+#if !defined(PAC_NOAPPROX)
+		// APPROX COMBINE: merge levels from src into dst
+		d->exact_count += s->exact_count;
+		if (s->max_level_used > d->max_level_used) {
+			d->max_level_used = s->max_level_used;
+		}
+
+		// Combine each level up to src's max_level_used (only allocated levels)
+		for (int k = 0; k <= s->max_level_used; k++) {
+			if (!s->levels[k]) {
+				continue; // src level not allocated, skip
+			}
+			// Ensure dst level is allocated
+			d->EnsureLevelAllocated(allocator, k);
+
+			constexpr int32_t OVERFLOW_THRESHOLD = SIGNED ? 4095 : 8191;
+			constexpr int32_t UNDERFLOW_THRESHOLD = SIGNED ? -4096 : 0;
+			int32_t new_total = d->exact_total[k] + s->exact_total[k];
+
+			if (new_total > OVERFLOW_THRESHOLD || new_total < UNDERFLOW_THRESHOLD) {
+				d->Cascade(k, allocator);
+				d->exact_total[k] = s->exact_total[k];
+			} else {
+				d->exact_total[k] = new_total;
+			}
+
+			// Add counters (SWAR layout: 16 uint64_t elements per level)
+			for (int j = 0; j < PAC_APPROX_SWAR_ELEMENTS; j++) {
+				d->levels[k][j] += s->levels[k][j];
+			}
+		}
+#elif defined(PAC_NOCASCADING)
 		for (int j = 0; j < 64; j++) {
 			d->probabilistic_total128[j] += s->probabilistic_total128[j];
 		}
 #else
-		// Handle exact_totals: if sum would overflow, flush dst (passing src's value so it becomes
-		// the new exact_total after flush). Otherwise just add. Both must be allocated to overflow.
+		// EXACT COMBINE: Handle exact_totals - if sum would overflow, flush dst (passing src's value
+		// so it becomes the new exact_total after flush). Otherwise just add.
 		// Note: we cast to int64_t for the overflow check to avoid truncation with small types.
 		if (CHECK_BOUNDS_8(static_cast<int64_t>(s->exact_total8) + d->exact_total8)) {
 			d->Flush8(allocator, s->exact_total8, true); // flushes d, sets d->exact_total8 = s->exact_total8
@@ -347,7 +374,9 @@ AUTOVECTORIZE static void PacSumCombineInt(Vector &src, Vector &dst, idx_t count
 		CombineLevel(s->probabilistic_total64, d->probabilistic_total64, 64);
 		CombineLevel(s->probabilistic_total128, d->probabilistic_total128, 64);
 #endif
+#ifdef PAC_NOAPPROX
 		d->exact_count += s->exact_count;
+#endif
 	}
 }
 
@@ -362,16 +391,6 @@ AUTOVECTORIZE static void PacSumCombineDouble(Vector &src, Vector &dst, idx_t co
 #endif
 		auto *s = src_wrapper[i]->GetState();
 		auto *d_wrapper = dst_wrapper[i];
-#ifdef PAC_UNSAFENULL
-		if (s && s->seen_null) {
-			auto *d = d_wrapper->EnsureState(allocator);
-			d->seen_null = true;
-		}
-		auto *d_inner = d_wrapper->GetState();
-		if (d_inner && d_inner->seen_null) {
-			continue;
-		}
-#endif
 		// Merge exact_count from wrapper
 #ifndef PAC_NOBUFFERING
 		d_wrapper->exact_count += src_wrapper[i]->exact_count;
@@ -405,12 +424,6 @@ void PacSumFinalize(Vector &states, AggregateInputData &input, Vector &result, i
 		PacSumFlushBuffer<SIGNED>(*state_ptrs[i], *state_ptrs[i], input.allocator);
 #endif
 		auto *s = state_ptrs[i]->GetState();
-#ifdef PAC_UNSAFENULL
-		if (s && s->seen_null) {
-			result_mask.SetInvalid(offset + i);
-			continue;
-		}
-#endif
 		// Check if we should return NULL based on key_hash
 		uint64_t key_hash = s ? s->key_hash : 0;
 		if (PacNoiseInNull(key_hash, mi, gen)) {
@@ -445,12 +458,21 @@ void PacSumFinalize(Vector &states, AggregateInputData &input, Vector &result, i
 // X-macro definitions for type mappings
 // ============================================================================
 // X(NAME, VALUE_T, INPUT_T, SIGNED) - for integer types
+// Note: HugeInt uses double state in approx mode, so it's excluded from this macro
+#ifndef PAC_NOAPPROX
+#define PAC_INT_TYPES_SIGNED                                                                                           \
+	X(TinyInt, int64_t, int8_t, true)                                                                                  \
+	X(SmallInt, int64_t, int16_t, true)                                                                                \
+	X(Integer, int64_t, int32_t, true)                                                                                 \
+	X(BigInt, int64_t, int64_t, true)
+#else
 #define PAC_INT_TYPES_SIGNED                                                                                           \
 	X(TinyInt, int64_t, int8_t, true)                                                                                  \
 	X(SmallInt, int64_t, int16_t, true)                                                                                \
 	X(Integer, int64_t, int32_t, true)                                                                                 \
 	X(BigInt, int64_t, int64_t, true)                                                                                  \
 	X(HugeInt, hugeint_t, hugeint_t, true)
+#endif
 
 #define PAC_INT_TYPES_UNSIGNED                                                                                         \
 	X(UTinyInt, uint64_t, uint8_t, false)                                                                              \
@@ -562,6 +584,15 @@ idx_t PacSumIntStateSize(const AggregateFunction &) {
 
 void PacSumIntInitialize(const AggregateFunction &, data_ptr_t state_p) {
 	memset(state_p, 0, sizeof(ScatterIntState<true>));
+#ifndef PAC_NOAPPROX
+	// For approx mode, set max_level_used to -1 (no levels have received data yet)
+	// This applies when PAC_NOBUFFERING is set (state is directly PacSumIntState)
+	// When buffering is enabled, wrapper's EnsureState handles this for the inner state
+#ifdef PAC_NOBUFFERING
+	auto &state = *reinterpret_cast<ScatterIntState<true> *>(state_p);
+	state.max_level_used = -1;
+#endif
+#endif
 }
 
 idx_t PacSumDoubleStateSize(const AggregateFunction &) {
@@ -604,10 +635,17 @@ static AggregateFunction GetPacSumAggregate(PhysicalType type) {
 		                         PacSumCombineSigned, PacSumFinalizeSigned, FunctionNullHandling::DEFAULT_NULL_HANDLING,
 		                         PacSumUpdateBigInt);
 	case PhysicalType::INT128:
+#ifndef PAC_NOAPPROX
+		return AggregateFunction("pac_sum", {LogicalType::UBIGINT, LogicalType::HUGEINT}, LogicalType::HUGEINT,
+		                         PacSumDoubleStateSize, PacSumDoubleInitialize, PacSumScatterUpdateHugeIntDouble,
+		                         PacSumCombineDoubleWrapper, PacSumFinalizeDoubleToHugeint,
+		                         FunctionNullHandling::DEFAULT_NULL_HANDLING, PacSumUpdateHugeIntDouble);
+#else
 		return AggregateFunction("pac_sum", {LogicalType::UBIGINT, LogicalType::HUGEINT}, LogicalType::HUGEINT,
 		                         PacSumIntStateSize, PacSumIntInitialize, PacSumScatterUpdateHugeInt,
 		                         PacSumCombineSigned, PacSumFinalizeSigned, FunctionNullHandling::DEFAULT_NULL_HANDLING,
 		                         PacSumUpdateHugeInt);
+#endif
 	default:
 		throw InternalException("Unsupported physical type for pac_sum decimal");
 	}
@@ -650,10 +688,17 @@ void RegisterPacSumFunctions(ExtensionLoader &loader) {
 	AddFcn(fcn_set, LogicalType::UBIGINT, LogicalType::HUGEINT, PacSumIntStateSize, PacSumIntInitialize,
 	       PacSumScatterUpdateUBigInt, PacSumCombineUnsigned, PacSumFinalizeUnsigned, PacSumUpdateUBigInt);
 
-	// HUGEINT: use int state, return HUGEINT (matches DuckDB's sum behavior)
+	// HUGEINT: uses double state with finalize converting back to hugeint in approx mode (default),
+	// uses int state with exact cascading when PAC_NOAPPROX (can handle hugeint in probabilistic_total128)
+#ifndef PAC_NOAPPROX
+	AddFcn(fcn_set, LogicalType::HUGEINT, LogicalType::HUGEINT, PacSumDoubleStateSize, PacSumDoubleInitialize,
+	       PacSumScatterUpdateHugeIntDouble, PacSumCombineDoubleWrapper, PacSumFinalizeDoubleToHugeint,
+	       PacSumUpdateHugeIntDouble);
+#else
 	AddFcn(fcn_set, LogicalType::HUGEINT, LogicalType::HUGEINT, PacSumIntStateSize, PacSumIntInitialize,
 	       PacSumScatterUpdateHugeInt, PacSumCombineSigned, PacSumFinalizeSigned, PacSumUpdateHugeInt);
-	// UHUGEINT: DuckDB's sum returns DOUBLE for uhugeint, so we do too
+#endif
+	// UHUGEINT: DuckDB's sum returns DOUBLE for uhugeint, so we do too (uses double state always)
 	AddFcn(fcn_set, LogicalType::UHUGEINT, LogicalType::DOUBLE, PacSumDoubleStateSize, PacSumDoubleInitialize,
 	       PacSumScatterUpdateUHugeInt, PacSumCombineDoubleWrapper, PacSumFinalizeDoubleWrapper, PacSumUpdateUHugeInt);
 
@@ -776,10 +821,16 @@ void RegisterPacSumCountersFunctions(ExtensionLoader &loader) {
 	               PacSumScatterUpdateUBigInt, PacSumCombineUnsigned, PacSumFinalizeCountersUnsigned,
 	               PacSumUpdateUBigInt);
 
-	// HUGEINT
+	// HUGEINT - uses double state in approx mode (same as UHUGEINT)
+#ifndef PAC_NOAPPROX
+	AddCountersFcn(counters_set, LogicalType::HUGEINT, PacSumDoubleStateSize, PacSumDoubleInitialize,
+	               PacSumScatterUpdateHugeIntDouble, PacSumCombineDoubleWrapper, PacSumFinalizeCountersDouble,
+	               PacSumUpdateHugeIntDouble);
+#else
 	AddCountersFcn(counters_set, LogicalType::HUGEINT, PacSumIntStateSize, PacSumIntInitialize,
 	               PacSumScatterUpdateHugeInt, PacSumCombineSigned, PacSumFinalizeCountersSigned, PacSumUpdateHugeInt);
-	// UHUGEINT (uses double state)
+#endif
+	// UHUGEINT (uses double state always)
 	AddCountersFcn(counters_set, LogicalType::UHUGEINT, PacSumDoubleStateSize, PacSumDoubleInitialize,
 	               PacSumScatterUpdateUHugeInt, PacSumCombineDoubleWrapper, PacSumFinalizeCountersDouble,
 	               PacSumUpdateUHugeInt);
@@ -795,533 +846,17 @@ void RegisterPacSumCountersFunctions(ExtensionLoader &loader) {
 	loader.RegisterFunction(counters_set);
 }
 
-// ============================================================================
-// PAC_SUM_APPROX / PAC_AVG_APPROX: 16-bit cascading counter implementation
-// ============================================================================
-// This is a real approximate implementation using 15 levels of 16-bit counters.
-// Each level k covers bits 8k to 8k+15 with 8-bit overlap between adjacent levels.
-// Values are shifted right by 8*k bits before being added to level k counters.
-// Lower bits are discarded with statistical rounding compensation.
-// Precision loss is bounded: worst case ~1% (7 significant bits), typical <0.1%.
-
-// Scatter state type for approx (wrapper around inner state)
-template <bool SIGNED>
-using ApproxScatterState = PacSumApproxIntStateWrapper<SIGNED>;
-
-// Batch update function: add multiple values to the approximate state
-// First accumulates shifted values per level, then checks cascades, then does SWAR
-template <bool SIGNED>
-static inline
-void PacSumApproxUpdateInternal(PacSumApproxIntState<SIGNED> &state, const uint64_t key_hash, const int64_t value) {
-#ifdef PAC_APPROX_PROFILE
-	g_approx_update_count.fetch_add(1, std::memory_order_relaxed);
-#endif
-	state.key_hash |= key_hash;
-	int level = PacSumApproxIntState<SIGNED>::GetLevel(value);
-	uint64_t shift = level << 3;
-	int64_t shifted_val = value >> shift ;
-	shifted_val += (1 & state.exact_count & (value >> (shift-1))); // correct loss of carry bit in 50% of a major 1
-	state.exact_count++;
-#ifdef PAC_APPROX_PROFILE
-		g_approx_level_update_count[level].fetch_add(1, std::memory_order_relaxed);
-#endif
-	if (level > state.max_level_used) {
-		state.max_level_used = level;
-	}
-	// Check cascades and update exact_totals for each level
-	constexpr int32_t OVERFLOW_THRESHOLD = SIGNED ? 4095 : 8191;
-	constexpr int32_t UNDERFLOW_THRESHOLD = SIGNED ? -4096 : 0;
-
-	int32_t new_total = state.exact_total[level] + static_cast<int32_t>(shifted_val);
-	if (new_total > OVERFLOW_THRESHOLD || new_total < UNDERFLOW_THRESHOLD) {
-#ifdef PAC_APPROX_PROFILE
-			g_approx_cascade_count[level].fetch_add(1, std::memory_order_relaxed);
-#endif
-		state.Cascade(level);
-		state.exact_total[level] = shifted_val;
-	} else {
-		state.exact_total[level] = new_total;
-	}
-	AddToTotalsSWAR<int16_t, uint16_t, PAC_APPROX_SWAR_MASK>(state.levels[level], shifted_val, key_hash);
-}
-
-
-// ============================================================================
-// Buffering for pac_sum_approx - improves cache locality
-// ============================================================================
-
-// FlushBuffer - flushes src's buffer into dst's inner state
-// To flush into self, pass same wrapper for both src and dst
-template <bool SIGNED>
-inline void PacSumApproxFlushBuffer(ApproxScatterState<SIGNED> &src, ApproxScatterState<SIGNED> &dst,
-                                    ArenaAllocator &a) {
-	idx_t cnt = src.n_buffered & ApproxScatterState<SIGNED>::BUF_MASK;
-	if (cnt > 0) {
-		auto &dst_inner = *dst.EnsureState(a);
-		for(idx_t i=0; i< cnt; i++) {
-			PacSumApproxUpdateInternal<SIGNED>(dst_inner, src.hash_buf[i], src.val_buf[i]);
-		}
-		src.n_buffered &= ~ApproxScatterState<SIGNED>::BUF_MASK;
-	}
-}
-
-// Buffered update - buffers values until buffer is full, then flushes all at once
-template <bool SIGNED>
-AUTOVECTORIZE inline void PacSumApproxUpdateOne(ApproxScatterState<SIGNED> &agg, uint64_t key_hash, int64_t value,
-                                                ArenaAllocator &a) {
-	agg.exact_count++;
-	idx_t cnt = agg.n_buffered & ApproxScatterState<SIGNED>::BUF_MASK;
-	if (DUCKDB_UNLIKELY(cnt == ApproxScatterState<SIGNED>::BUF_SIZE)) {
-		// Buffer full - flush all buffered values plus the new one
-		auto &dst = *agg.EnsureState(a);
-		for(idx_t i=0; i< ApproxScatterState<SIGNED>::BUF_SIZE; i++) {
-			PacSumApproxUpdateInternal<SIGNED>(dst, agg.hash_buf[i], agg.val_buf[i]);
-		}
-		PacSumApproxUpdateInternal<SIGNED>(dst, key_hash, value);
-		agg.n_buffered &= ~ApproxScatterState<SIGNED>::BUF_MASK;
-	} else {
-		// Buffer not full - just add to buffer
-		agg.val_buf[cnt] = value;
-		agg.hash_buf[cnt] = key_hash;
-		agg.n_buffered++;
-	}
-}
-
-// Batch update from vectors (uses buffering for better cache locality)
-template <bool SIGNED, class INPUT_TYPE>
-static void PacSumApproxUpdate(Vector inputs[], data_ptr_t state_p, idx_t count, ArenaAllocator &allocator,
-                               uint64_t query_hash) {
-	auto &wrapper = *reinterpret_cast<ApproxScatterState<SIGNED> *>(state_p);
-
-	UnifiedVectorFormat hash_data, value_data;
-	inputs[0].ToUnifiedFormat(count, hash_data);
-	inputs[1].ToUnifiedFormat(count, value_data);
-	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
-	auto values = UnifiedVectorFormat::GetData<INPUT_TYPE>(value_data);
-
-	if (hash_data.validity.AllValid() && value_data.validity.AllValid()) {
-		for (idx_t i = 0; i < count; i++) {
-			auto h_idx = hash_data.sel->get_index(i);
-			auto v_idx = value_data.sel->get_index(i);
-			PacSumApproxUpdateOne<SIGNED>(wrapper, hashes[h_idx] ^ query_hash, static_cast<int64_t>(values[v_idx]),
-			                              allocator);
-		}
-	} else {
-		for (idx_t i = 0; i < count; i++) {
-			auto h_idx = hash_data.sel->get_index(i);
-			auto v_idx = value_data.sel->get_index(i);
-			if (!hash_data.validity.RowIsValid(h_idx) || !value_data.validity.RowIsValid(v_idx)) {
-				continue;
-			}
-			PacSumApproxUpdateOne<SIGNED>(wrapper, hashes[h_idx] ^ query_hash, static_cast<int64_t>(values[v_idx]),
-			                              allocator);
-		}
-	}
-}
-
-// Scatter update for GROUP BY (uses buffering for better cache locality)
-template <bool SIGNED, class INPUT_TYPE>
-static void PacSumApproxScatterUpdate(Vector inputs[], Vector &states, idx_t count, ArenaAllocator &allocator,
-                                      uint64_t query_hash) {
-	UnifiedVectorFormat hash_data, value_data, sdata;
-	inputs[0].ToUnifiedFormat(count, hash_data);
-	inputs[1].ToUnifiedFormat(count, value_data);
-	states.ToUnifiedFormat(count, sdata);
-
-	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
-	auto values = UnifiedVectorFormat::GetData<INPUT_TYPE>(value_data);
-	auto state_ptrs = UnifiedVectorFormat::GetData<ApproxScatterState<SIGNED> *>(sdata);
-
-	for (idx_t i = 0; i < count; i++) {
-		auto h_idx = hash_data.sel->get_index(i);
-		auto v_idx = value_data.sel->get_index(i);
-		if (!hash_data.validity.RowIsValid(h_idx) || !value_data.validity.RowIsValid(v_idx)) {
-			continue;
-		}
-		auto wrapper = state_ptrs[sdata.sel->get_index(i)];
-		PacSumApproxUpdateOne<SIGNED>(*wrapper, hashes[h_idx] ^ query_hash, static_cast<int64_t>(values[v_idx]),
-		                              allocator);
-	}
-}
-
-// Combine two approximate states
-template <bool SIGNED>
-static void PacSumApproxCombine(Vector &src, Vector &dst, idx_t count, ArenaAllocator &allocator) {
-	auto src_wrappers = FlatVector::GetData<ApproxScatterState<SIGNED> *>(src);
-	auto dst_wrappers = FlatVector::GetData<ApproxScatterState<SIGNED> *>(dst);
-
-	for (idx_t i = 0; i < count; i++) {
-		// Flush src's buffer into dst (not into src - avoids allocation in src)
-		PacSumApproxFlushBuffer<SIGNED>(*src_wrappers[i], *dst_wrappers[i], allocator);
-
-		auto *s = src_wrappers[i]->GetState();
-		if (!s) {
-			// Merge exact_count from wrapper (buffer was flushed, inner state may not exist)
-			dst_wrappers[i]->exact_count += src_wrappers[i]->exact_count;
-			continue;
-		}
-
-		auto *d = dst_wrappers[i]->EnsureState(allocator);
-		d->key_hash |= s->key_hash;
-		d->exact_count += s->exact_count;
-		// Also merge wrapper's exact_count
-		dst_wrappers[i]->exact_count += src_wrappers[i]->exact_count;
-
-		// Track max level used across both states
-		if (s->max_level_used > d->max_level_used) {
-			d->max_level_used = s->max_level_used;
-		}
-
-		// Combine each level (only up to max_level_used)
-		for (int k = 0; k <= s->max_level_used; k++) {
-			// Check if combining exact_totals would overflow (using 3-bit margin for 16-bit counters)
-			int32_t new_total = d->exact_total[k] + s->exact_total[k];
-			constexpr int32_t OVERFLOW_THRESHOLD = SIGNED ? 4095 : 8191;
-			constexpr int32_t UNDERFLOW_THRESHOLD = SIGNED ? -4096 : 0;
-
-			if (new_total > OVERFLOW_THRESHOLD || new_total < UNDERFLOW_THRESHOLD) {
-				// Cascade dst first, then add src
-				d->Cascade(k);
-				d->exact_total[k] = s->exact_total[k];
-			} else {
-				d->exact_total[k] = new_total;
-			}
-
-			// Add counters (SWAR layout: 16 uint64_t elements per level)
-			for (int j = 0; j < PAC_APPROX_SWAR_ELEMENTS; j++) {
-				d->levels[k][j] += s->levels[k][j];
-			}
-		}
-	}
-}
-
-// Finalize for pac_sum_approx and pac_avg_approx
-template <bool SIGNED, bool DIVIDE_BY_COUNT, typename RESULT_TYPE>
-static void PacApproxFinalize(Vector &states, AggregateInputData &input, Vector &result, idx_t count, idx_t offset) {
-	auto state_ptrs = FlatVector::GetData<ApproxScatterState<SIGNED> *>(states);
-	auto data = FlatVector::GetData<RESULT_TYPE>(result);
-	auto &result_mask = FlatVector::Validity(result);
-
-	uint64_t seed = input.bind_data ? input.bind_data->Cast<PacBindData>().seed : std::random_device {}();
-	std::mt19937_64 gen(seed);
-	double mi = input.bind_data ? input.bind_data->Cast<PacBindData>().mi : 128.0;
-	double scale_divisor = input.bind_data ? input.bind_data->Cast<PacBindData>().scale_divisor : 1.0;
-
-	for (idx_t i = 0; i < count; i++) {
-		PacSumApproxFlushBuffer<SIGNED>(*state_ptrs[i], *state_ptrs[i], input.allocator);
-		auto *s = state_ptrs[i]->GetState();
-
-		uint64_t key_hash = s ? s->key_hash : 0;
-		if (PacNoiseInNull(key_hash, mi, gen)) {
-			result_mask.SetInvalid(offset + i);
-			continue;
-		}
-		double buf[64];
-		if (s) {
-			s->Flush();
-			s->GetTotalsAsDouble(buf);
-		} else {
-			memset(buf, 0, sizeof(buf));
-		}
-		if (DIVIDE_BY_COUNT) {
-			uint64_t total_count = state_ptrs[i]->exact_count;
-			if (total_count > 0) {
-				double divisor = static_cast<double>(total_count) * scale_divisor;
-				for (int j = 0; j < 64; j++) {
-					buf[j] /= divisor;
-				}
-			}
-		}
-		data[offset + i] = FromDouble<RESULT_TYPE>(PacNoisySampleFrom64Counters(buf, mi, gen, true, ~key_hash));
-	}
-}
-
-// State size and initialization
-static idx_t PacSumApproxStateSize(const AggregateFunction &) {
-	return sizeof(ApproxScatterState<true>); // signed/unsigned have same size
-}
-
-static void PacSumApproxInitialize(const AggregateFunction &, data_ptr_t state_p) {
-	memset(state_p, 0, sizeof(ApproxScatterState<true>));
-	// Note: inner state's max_level_used will be initialized to -1 when EnsureState allocates it
-}
-
-// Generate update functions via X-macros
-#define PAC_APPROX_INT_TYPES_SIGNED                                                                                    \
-	X(TinyInt, int8_t, true)                                                                                           \
-	X(SmallInt, int16_t, true)                                                                                         \
-	X(Integer, int32_t, true)                                                                                          \
-	X(BigInt, int64_t, true)
-
-#define PAC_APPROX_INT_TYPES_UNSIGNED                                                                                  \
-	X(UTinyInt, uint8_t, false)                                                                                        \
-	X(USmallInt, uint16_t, false)                                                                                      \
-	X(UInteger, uint32_t, false)                                                                                       \
-	X(UBigInt, uint64_t, false)
-
-#define X(NAME, INPUT_T, SIGNED)                                                                                       \
-	void PacSumApproxUpdate##NAME(Vector inputs[], AggregateInputData &aggr, idx_t, data_ptr_t state_p, idx_t count) { \
-		PacSumApproxUpdate<SIGNED, INPUT_T>(inputs, state_p, count, aggr.allocator,                                    \
-		                                    aggr.bind_data->Cast<PacBindData>().query_hash);                           \
-	}                                                                                                                  \
-	void PacSumApproxScatterUpdate##NAME(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states,             \
-	                                     idx_t count) {                                                                \
-		PacSumApproxScatterUpdate<SIGNED, INPUT_T>(inputs, states, count, aggr.allocator,                              \
-		                                           aggr.bind_data->Cast<PacBindData>().query_hash);                    \
-	}
-PAC_APPROX_INT_TYPES_SIGNED
-PAC_APPROX_INT_TYPES_UNSIGNED
-#undef X
-
-// Combine wrappers
-void PacSumApproxCombineSigned(Vector &src, Vector &dst, AggregateInputData &aggr, idx_t count) {
-	PacSumApproxCombine<true>(src, dst, count, aggr.allocator);
-}
-void PacSumApproxCombineUnsigned(Vector &src, Vector &dst, AggregateInputData &aggr, idx_t count) {
-	PacSumApproxCombine<false>(src, dst, count, aggr.allocator);
-}
-
-// Finalize wrappers - PacApproxFinalize<SIGNED, DIVIDE_BY_COUNT, RESULT_TYPE>
-void PacSumApproxFinalizeSigned(Vector &states, AggregateInputData &input, Vector &result, idx_t count, idx_t offset) {
-	PacApproxFinalize<true, false, hugeint_t>(states, input, result, count, offset);
-}
-void PacSumApproxFinalizeUnsigned(Vector &states, AggregateInputData &input, Vector &result, idx_t count,
-                                  idx_t offset) {
-	PacApproxFinalize<false, false, hugeint_t>(states, input, result, count, offset);
-}
-void PacAvgApproxFinalizeSigned(Vector &states, AggregateInputData &input, Vector &result, idx_t count, idx_t offset) {
-	PacApproxFinalize<true, true, double>(states, input, result, count, offset);
-}
-void PacAvgApproxFinalizeUnsigned(Vector &states, AggregateInputData &input, Vector &result, idx_t count,
-                                  idx_t offset) {
-	PacApproxFinalize<false, true, double>(states, input, result, count, offset);
-}
-
-// Helper to register both 2-param and 3-param versions for pac_sum_approx
-static void AddApproxFcn(AggregateFunctionSet &set, const LogicalType &value_type, const LogicalType &result_type,
-                         aggregate_update_t scatter, aggregate_combine_t combine, aggregate_finalize_t finalize,
-                         aggregate_simple_update_t update) {
-	set.AddFunction(AggregateFunction("pac_sum_approx", {LogicalType::UBIGINT, value_type}, result_type,
-	                                  PacSumApproxStateSize, PacSumApproxInitialize, scatter, combine, finalize,
-	                                  FunctionNullHandling::DEFAULT_NULL_HANDLING, update, PacSumBind));
-	set.AddFunction(AggregateFunction("pac_sum_approx", {LogicalType::UBIGINT, value_type, LogicalType::DOUBLE},
-	                                  result_type, PacSumApproxStateSize, PacSumApproxInitialize, scatter, combine,
-	                                  finalize, FunctionNullHandling::DEFAULT_NULL_HANDLING, update, PacSumBind));
-}
-
-// Helper to get the right pac_sum_approx AggregateFunction for a given physical type
-static AggregateFunction GetPacSumApproxAggregate(PhysicalType type) {
-	switch (type) {
-	case PhysicalType::INT16:
-		return AggregateFunction("pac_sum_approx", {LogicalType::UBIGINT, LogicalType::SMALLINT}, LogicalType::HUGEINT,
-		                         PacSumApproxStateSize, PacSumApproxInitialize, PacSumApproxScatterUpdateSmallInt,
-		                         PacSumApproxCombineSigned, PacSumApproxFinalizeSigned,
-		                         FunctionNullHandling::DEFAULT_NULL_HANDLING, PacSumApproxUpdateSmallInt);
-	case PhysicalType::INT32:
-		return AggregateFunction("pac_sum_approx", {LogicalType::UBIGINT, LogicalType::INTEGER}, LogicalType::HUGEINT,
-		                         PacSumApproxStateSize, PacSumApproxInitialize, PacSumApproxScatterUpdateInteger,
-		                         PacSumApproxCombineSigned, PacSumApproxFinalizeSigned,
-		                         FunctionNullHandling::DEFAULT_NULL_HANDLING, PacSumApproxUpdateInteger);
-	case PhysicalType::INT64:
-		return AggregateFunction("pac_sum_approx", {LogicalType::UBIGINT, LogicalType::BIGINT}, LogicalType::HUGEINT,
-		                         PacSumApproxStateSize, PacSumApproxInitialize, PacSumApproxScatterUpdateBigInt,
-		                         PacSumApproxCombineSigned, PacSumApproxFinalizeSigned,
-		                         FunctionNullHandling::DEFAULT_NULL_HANDLING, PacSumApproxUpdateBigInt);
-	case PhysicalType::INT128:
-		return AggregateFunction("pac_sum_approx", {LogicalType::UBIGINT, LogicalType::HUGEINT}, LogicalType::HUGEINT,
-		                         PacSumDoubleStateSize, PacSumDoubleInitialize, PacSumScatterUpdateHugeIntDouble,
-		                         PacSumCombineDoubleWrapper, PacSumFinalizeDoubleToHugeint,
-		                         FunctionNullHandling::DEFAULT_NULL_HANDLING, PacSumUpdateHugeIntDouble);
-	default:
-		throw InternalException("Unsupported physical type for pac_sum_approx decimal");
-	}
-}
-
-// Dynamic dispatch for DECIMAL
-static unique_ptr<FunctionData> BindDecimalPacSumApprox(ClientContext &ctx, AggregateFunction &function,
-                                                        vector<unique_ptr<Expression>> &args) {
-	auto decimal_type = args[1]->return_type;
-	function = GetPacSumApproxAggregate(decimal_type.InternalType());
-	function.name = "pac_sum_approx";
-	function.arguments[1] = decimal_type;
-	function.return_type = LogicalType::DECIMAL(Decimal::MAX_WIDTH_DECIMAL, DecimalType::GetScale(decimal_type));
-	return PacSumBind(ctx, function, args);
-}
-
-void RegisterPacSumApproxFunctions(ExtensionLoader &loader) {
-	AggregateFunctionSet fcn_set("pac_sum_approx");
-
-	// Signed integers
-	AddApproxFcn(fcn_set, LogicalType::TINYINT, LogicalType::HUGEINT, PacSumApproxScatterUpdateTinyInt,
-	             PacSumApproxCombineSigned, PacSumApproxFinalizeSigned, PacSumApproxUpdateTinyInt);
-	AddApproxFcn(fcn_set, LogicalType::BOOLEAN, LogicalType::HUGEINT, PacSumApproxScatterUpdateTinyInt,
-	             PacSumApproxCombineSigned, PacSumApproxFinalizeSigned, PacSumApproxUpdateTinyInt);
-	AddApproxFcn(fcn_set, LogicalType::SMALLINT, LogicalType::HUGEINT, PacSumApproxScatterUpdateSmallInt,
-	             PacSumApproxCombineSigned, PacSumApproxFinalizeSigned, PacSumApproxUpdateSmallInt);
-	AddApproxFcn(fcn_set, LogicalType::INTEGER, LogicalType::HUGEINT, PacSumApproxScatterUpdateInteger,
-	             PacSumApproxCombineSigned, PacSumApproxFinalizeSigned, PacSumApproxUpdateInteger);
-	AddApproxFcn(fcn_set, LogicalType::BIGINT, LogicalType::HUGEINT, PacSumApproxScatterUpdateBigInt,
-	             PacSumApproxCombineSigned, PacSumApproxFinalizeSigned, PacSumApproxUpdateBigInt);
-
-	// Unsigned integers
-	AddApproxFcn(fcn_set, LogicalType::UTINYINT, LogicalType::HUGEINT, PacSumApproxScatterUpdateUTinyInt,
-	             PacSumApproxCombineUnsigned, PacSumApproxFinalizeUnsigned, PacSumApproxUpdateUTinyInt);
-	AddApproxFcn(fcn_set, LogicalType::USMALLINT, LogicalType::HUGEINT, PacSumApproxScatterUpdateUSmallInt,
-	             PacSumApproxCombineUnsigned, PacSumApproxFinalizeUnsigned, PacSumApproxUpdateUSmallInt);
-	AddApproxFcn(fcn_set, LogicalType::UINTEGER, LogicalType::HUGEINT, PacSumApproxScatterUpdateUInteger,
-	             PacSumApproxCombineUnsigned, PacSumApproxFinalizeUnsigned, PacSumApproxUpdateUInteger);
-	AddApproxFcn(fcn_set, LogicalType::UBIGINT, LogicalType::HUGEINT, PacSumApproxScatterUpdateUBigInt,
-	             PacSumApproxCombineUnsigned, PacSumApproxFinalizeUnsigned, PacSumApproxUpdateUBigInt);
-
-	// HUGEINT: uses double state (like non-approx float/double) with finalize converting to hugeint
-	fcn_set.AddFunction(AggregateFunction("pac_sum_approx", {LogicalType::UBIGINT, LogicalType::HUGEINT},
-	                                      LogicalType::HUGEINT, PacSumDoubleStateSize, PacSumDoubleInitialize,
-	                                      PacSumScatterUpdateHugeIntDouble, PacSumCombineDoubleWrapper,
-	                                      PacSumFinalizeDoubleToHugeint, FunctionNullHandling::DEFAULT_NULL_HANDLING,
-	                                      PacSumUpdateHugeIntDouble, PacSumBind));
-	fcn_set.AddFunction(AggregateFunction("pac_sum_approx", {LogicalType::UBIGINT, LogicalType::HUGEINT, LogicalType::DOUBLE},
-	                                      LogicalType::HUGEINT, PacSumDoubleStateSize, PacSumDoubleInitialize,
-	                                      PacSumScatterUpdateHugeIntDouble, PacSumCombineDoubleWrapper,
-	                                      PacSumFinalizeDoubleToHugeint, FunctionNullHandling::DEFAULT_NULL_HANDLING,
-	                                      PacSumUpdateHugeIntDouble, PacSumBind));
-
-	// DECIMAL: dynamic dispatch based on decimal width
-	fcn_set.AddFunction(AggregateFunction(
-	    {LogicalType::UBIGINT, LogicalTypeId::DECIMAL}, LogicalTypeId::DECIMAL, nullptr, nullptr, nullptr, nullptr,
-	    nullptr, FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr, BindDecimalPacSumApprox));
-	fcn_set.AddFunction(AggregateFunction(
-	    {LogicalType::UBIGINT, LogicalTypeId::DECIMAL, LogicalType::DOUBLE}, LogicalTypeId::DECIMAL, nullptr, nullptr,
-	    nullptr, nullptr, nullptr, FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr, BindDecimalPacSumApprox));
-
-	loader.RegisterFunction(fcn_set);
-}
-
-// Helper to register both 2-param and 3-param versions for pac_avg_approx
-static void AddAvgApproxFcn(AggregateFunctionSet &set, const LogicalType &value_type, aggregate_update_t scatter,
-                            aggregate_combine_t combine, aggregate_finalize_t finalize,
-                            aggregate_simple_update_t update) {
-	set.AddFunction(AggregateFunction("pac_avg_approx", {LogicalType::UBIGINT, value_type}, LogicalType::DOUBLE,
-	                                  PacSumApproxStateSize, PacSumApproxInitialize, scatter, combine, finalize,
-	                                  FunctionNullHandling::DEFAULT_NULL_HANDLING, update, PacSumBind));
-	set.AddFunction(AggregateFunction("pac_avg_approx", {LogicalType::UBIGINT, value_type, LogicalType::DOUBLE},
-	                                  LogicalType::DOUBLE, PacSumApproxStateSize, PacSumApproxInitialize, scatter,
-	                                  combine, finalize, FunctionNullHandling::DEFAULT_NULL_HANDLING, update,
-	                                  PacSumBind));
-}
-
-void PacAvgFinalizeSignedDouble(Vector &, AggregateInputData &, Vector &, idx_t, idx_t);
-void PacAvgFinalizeUnsignedDouble(Vector &, AggregateInputData &, Vector &r, idx_t, idx_t);
-
-// Helper to get the right pac_avg_approx AggregateFunction for a given physical type
-static AggregateFunction GetPacAvgApproxAggregate(PhysicalType type) {
-	switch (type) {
-	case PhysicalType::INT16:
-		return AggregateFunction("pac_avg_approx", {LogicalType::UBIGINT, LogicalType::SMALLINT}, LogicalType::DOUBLE,
-		                         PacSumApproxStateSize, PacSumApproxInitialize, PacSumApproxScatterUpdateSmallInt,
-		                         PacSumApproxCombineSigned, PacAvgApproxFinalizeSigned,
-		                         FunctionNullHandling::DEFAULT_NULL_HANDLING, PacSumApproxUpdateSmallInt);
-	case PhysicalType::INT32:
-		return AggregateFunction("pac_avg_approx", {LogicalType::UBIGINT, LogicalType::INTEGER}, LogicalType::DOUBLE,
-		                         PacSumApproxStateSize, PacSumApproxInitialize, PacSumApproxScatterUpdateInteger,
-		                         PacSumApproxCombineSigned, PacAvgApproxFinalizeSigned,
-		                         FunctionNullHandling::DEFAULT_NULL_HANDLING, PacSumApproxUpdateInteger);
-	case PhysicalType::INT64:
-		return AggregateFunction("pac_avg_approx", {LogicalType::UBIGINT, LogicalType::BIGINT}, LogicalType::DOUBLE,
-		                         PacSumApproxStateSize, PacSumApproxInitialize, PacSumApproxScatterUpdateBigInt,
-		                         PacSumApproxCombineSigned, PacAvgApproxFinalizeSigned,
-		                         FunctionNullHandling::DEFAULT_NULL_HANDLING, PacSumApproxUpdateBigInt);
-	case PhysicalType::INT128:
-		return AggregateFunction("pac_avg_approx", {LogicalType::UBIGINT, LogicalType::HUGEINT}, LogicalType::DOUBLE,
-		                         PacSumDoubleStateSize, PacSumDoubleInitialize, PacSumScatterUpdateHugeIntDouble,
-		                         PacSumCombineDoubleWrapper, PacAvgFinalizeSignedDouble,
-		                         FunctionNullHandling::DEFAULT_NULL_HANDLING, PacSumUpdateHugeIntDouble);
-	default:
-		throw InternalException("Unsupported physical type for pac_avg_approx decimal");
-	}
-}
-
-// Dynamic dispatch for DECIMAL pac_avg_approx
-static unique_ptr<FunctionData> BindDecimalPacAvgApprox(ClientContext &ctx, AggregateFunction &function,
-                                                        vector<unique_ptr<Expression>> &args) {
-	auto decimal_type = args[1]->return_type;
-	function = GetPacAvgApproxAggregate(decimal_type.InternalType());
-	function.name = "pac_avg_approx";
-	function.arguments[1] = decimal_type;
-	function.return_type = LogicalType::DOUBLE;
-
-	// Compute scale_divisor = 10^scale for DECIMAL types
-	uint8_t scale = DecimalType::GetScale(decimal_type);
-	double scale_divisor = std::pow(10.0, static_cast<double>(scale));
-
-	// Get mi and seed
-	double mi = 128.0;
-	if (args.size() >= 3) {
-		if (!args[2]->IsFoldable()) {
-			throw InvalidInputException("pac_avg_approx: mi parameter must be a constant");
-		}
-		auto mi_val = ExpressionExecutor::EvaluateScalar(ctx, *args[2]);
-		mi = mi_val.GetValue<double>();
-		if (mi < 0.0) {
-			throw InvalidInputException("pac_avg_approx: mi must be >= 0");
-		}
-	}
-	uint64_t seed = std::random_device {}();
-	Value pac_seed_val;
-	if (ctx.TryGetCurrentSetting("pac_seed", pac_seed_val) && !pac_seed_val.IsNull()) {
-		seed = uint64_t(pac_seed_val.GetValue<int64_t>());
-	}
-	return make_uniq<PacBindData>(mi, seed, scale_divisor);
-}
-
-void RegisterPacAvgApproxFunctions(ExtensionLoader &loader) {
-	AggregateFunctionSet fcn_set("pac_avg_approx");
-
-	// Signed integers
-	AddAvgApproxFcn(fcn_set, LogicalType::TINYINT, PacSumApproxScatterUpdateTinyInt, PacSumApproxCombineSigned,
-	                PacAvgApproxFinalizeSigned, PacSumApproxUpdateTinyInt);
-	AddAvgApproxFcn(fcn_set, LogicalType::BOOLEAN, PacSumApproxScatterUpdateTinyInt, PacSumApproxCombineSigned,
-	                PacAvgApproxFinalizeSigned, PacSumApproxUpdateTinyInt);
-	AddAvgApproxFcn(fcn_set, LogicalType::SMALLINT, PacSumApproxScatterUpdateSmallInt, PacSumApproxCombineSigned,
-	                PacAvgApproxFinalizeSigned, PacSumApproxUpdateSmallInt);
-	AddAvgApproxFcn(fcn_set, LogicalType::INTEGER, PacSumApproxScatterUpdateInteger, PacSumApproxCombineSigned,
-	                PacAvgApproxFinalizeSigned, PacSumApproxUpdateInteger);
-	AddAvgApproxFcn(fcn_set, LogicalType::BIGINT, PacSumApproxScatterUpdateBigInt, PacSumApproxCombineSigned,
-	                PacAvgApproxFinalizeSigned, PacSumApproxUpdateBigInt);
-
-	// Unsigned integers
-	AddAvgApproxFcn(fcn_set, LogicalType::UTINYINT, PacSumApproxScatterUpdateUTinyInt, PacSumApproxCombineUnsigned,
-	                PacAvgApproxFinalizeUnsigned, PacSumApproxUpdateUTinyInt);
-	AddAvgApproxFcn(fcn_set, LogicalType::USMALLINT, PacSumApproxScatterUpdateUSmallInt, PacSumApproxCombineUnsigned,
-	                PacAvgApproxFinalizeUnsigned, PacSumApproxUpdateUSmallInt);
-	AddAvgApproxFcn(fcn_set, LogicalType::UINTEGER, PacSumApproxScatterUpdateUInteger, PacSumApproxCombineUnsigned,
-	                PacAvgApproxFinalizeUnsigned, PacSumApproxUpdateUInteger);
-	AddAvgApproxFcn(fcn_set, LogicalType::UBIGINT, PacSumApproxScatterUpdateUBigInt, PacSumApproxCombineUnsigned,
-	                PacAvgApproxFinalizeUnsigned, PacSumApproxUpdateUBigInt);
-
-	// HUGEINT: uses double state (like non-approx float/double)
-	fcn_set.AddFunction(AggregateFunction("pac_avg_approx", {LogicalType::UBIGINT, LogicalType::HUGEINT},
-	                                      LogicalType::DOUBLE, PacSumDoubleStateSize, PacSumDoubleInitialize,
-	                                      PacSumScatterUpdateHugeIntDouble, PacSumCombineDoubleWrapper,
-	                                      PacAvgFinalizeSignedDouble, FunctionNullHandling::DEFAULT_NULL_HANDLING,
-	                                      PacSumUpdateHugeIntDouble, PacSumBind));
-	fcn_set.AddFunction(AggregateFunction("pac_avg_approx", {LogicalType::UBIGINT, LogicalType::HUGEINT, LogicalType::DOUBLE},
-	                                      LogicalType::DOUBLE, PacSumDoubleStateSize, PacSumDoubleInitialize,
-	                                      PacSumScatterUpdateHugeIntDouble, PacSumCombineDoubleWrapper,
-	                                      PacAvgFinalizeUnsignedDouble, FunctionNullHandling::DEFAULT_NULL_HANDLING,
-	                                      PacSumUpdateHugeIntDouble, PacSumBind));
-
-	// DECIMAL: dynamic dispatch based on decimal width
-	fcn_set.AddFunction(AggregateFunction(
-	    {LogicalType::UBIGINT, LogicalTypeId::DECIMAL}, LogicalType::DOUBLE, nullptr, nullptr, nullptr, nullptr,
-	    nullptr, FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr, BindDecimalPacAvgApprox));
-	fcn_set.AddFunction(AggregateFunction(
-	    {LogicalType::UBIGINT, LogicalTypeId::DECIMAL, LogicalType::DOUBLE}, LogicalType::DOUBLE, nullptr, nullptr,
-	    nullptr, nullptr, nullptr, FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr, BindDecimalPacAvgApprox));
-
-	loader.RegisterFunction(fcn_set);
-}
 // Explicit template instantiations for pac_avg (with DIVIDE_BY_COUNT=true)
-// These use the full wrapper type names to match what pac_avg.cpp calls
+#ifdef PAC_NOBUFFERING
+// Without buffering, use raw state types
+template void PacSumFinalize<PacSumDoubleState, double, true, true>(Vector &states, AggregateInputData &input,
+                                                                    Vector &result, idx_t count, idx_t offset);
+template void PacSumFinalize<PacSumIntState<true>, double, true, true>(Vector &states, AggregateInputData &input,
+                                                                       Vector &result, idx_t count, idx_t offset);
+template void PacSumFinalize<PacSumIntState<false>, double, false, true>(Vector &states, AggregateInputData &input,
+                                                                         Vector &result, idx_t count, idx_t offset);
+#else
+// With buffering, use wrapper type names to match what pac_avg.cpp calls
 template void PacSumFinalize<PacSumDoubleStateWrapper, double, true, true>(Vector &states, AggregateInputData &input,
                                                                            Vector &result, idx_t count, idx_t offset);
 template void PacSumFinalize<PacSumIntStateWrapper<true>, double, true, true>(Vector &states, AggregateInputData &input,
@@ -1339,5 +874,6 @@ template void PacSumFlushBuffer<false, PacSumIntStateWrapper<false>>(PacSumIntSt
                                                                      PacSumIntStateWrapper<false> &, ArenaAllocator &);
 template void PacSumFlushBuffer<true, PacSumDoubleStateWrapper>(PacSumDoubleStateWrapper &, PacSumDoubleStateWrapper &,
                                                                 ArenaAllocator &);
+#endif
 
 } // namespace duckdb

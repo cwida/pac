@@ -179,9 +179,6 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RegisterPacSumFunctions(loader);
 	RegisterPacSumCountersFunctions(loader);
 	RegisterPacAvgFunctions(loader);
-	// Register pac_sum_approx/pac_avg_approx aggregate functions (approximate with 16-bit counters)
-	RegisterPacSumApproxFunctions(loader);
-	RegisterPacAvgApproxFunctions(loader);
 	RegisterPacAvgCountersFunctions(loader);
 	RegisterPacCountFunctions(loader);
 	RegisterPacCountCountersFunctions(loader);

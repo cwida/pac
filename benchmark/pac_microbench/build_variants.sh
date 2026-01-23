@@ -3,11 +3,12 @@
 # Each variant is built to a separate binary for benchmarking
 #
 # Consolidated binary names (aggregate-agnostic):
-#   default       - default cascading/banking/buffering (all optimizations on)
+#   default       - default cascading/banking/buffering (all optimizations on, approx sum)
 #   nobuffering   - disable input buffering (lazy allocation)
 #   noboundopt    - disable bound optimization (only affects min/max)
-#   nocascading   - disable cascading (count, sum/avg) 
+#   nocascading   - disable cascading (count, sum/avg)
 #   nosimd        - nocascading with simd-unfriendly update kernels and auto-vectorization disabled
+#   noapprox      - disable approximate sum algorithm, use exact cascading
 
 set -e
 
@@ -27,6 +28,7 @@ CONFIGS=(
     "nobuffering:-DPAC_NOBUFFERING"
     "nocascading:-DPAC_NOCASCADING"
     "nosimd:-DPAC_NOCASCADING -DPAC_NOSIMD -fno-vectorize -fno-slp-vectorize"
+    "noapprox:-DPAC_NOAPPROX"
 )
 
 # Get config name from "name:flags" string
