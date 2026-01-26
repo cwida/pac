@@ -5,10 +5,16 @@
 #ifndef PAC_MIN_MAX_HPP
 #define PAC_MIN_MAX_HPP
 
-// benchmarking defines that disable certain optimizations
-//#define PAC_NOBUFFERING 1
-//#define PAC_NOBOUNDOPT 1
-//#define PAC_NOSIMD 1
+// benchmarking defines that disable certain optimizations (and some flags imply others)
+// #define PAC_NOBUFFERING 1 // to disable the buffering optimization.
+// #define PAC_NOBOUNDOPT 1 // to disable global bound optimization.
+// #define PAC_NOSIMD 1 // to get the IF..THEN SIMD-unfriendly aggregate computation kernel
+#ifdef PAC_NOSIMD
+#define PAC_NOCASCADING 1
+#endif
+#ifdef PAC_NOCASCADING
+#define PAC_EXACTSUM 1
+#endif
 
 // PAC_GODBOLT mode: cpp -DPAC_GODBOLT -P -E -w src/include/pac_min_max.hpp
 // Isolates the SIMD kernel for Godbolt analysis (-P removes line markers)
@@ -43,7 +49,7 @@ void RegisterPacMaxCountersFunctions(ExtensionLoader &loader);
 // this is called BOUNDOPT
 //
 // the state directly keeps TYPE probabilistic totals[64] (no cascading with smaller types)
-// we tried cascading, but it does not help much, and usually BOUNDSOP means that most
+// we tried cascading, but it does not help much, and usually BOUNDOPT means that most
 // aggregations actually do not need to do an actual MIN/MAX and do not touch the array,
 // hence optimizing its size does not reduce the footprint much, and for code
 // simplicity it was removed.
@@ -51,12 +57,6 @@ void RegisterPacMaxCountersFunctions(ExtensionLoader &loader);
 // In order to keep the size of the states low, it is more important to delay the state
 // allocation until multiple values have been received (buffering). Processing a buffer
 // rather than individual values reduces cache misses and increases chances for SIMD.
-//
-// While we predicate the counting and SWAR-optimize it, we provide a naive IF..THEN baseline that is SIMD-unfriendly.
-//
-// Define PAC_NOBUFFERING to disable the buffering optimization.
-// Define PAC_NOBOUNDOPT to disable global bound optimization.
-// Define PAC_NOSIMD to get the IF..THEN SIMD-unfriendly aggergate computation kernel
 #endif
 #ifndef PAC_GODBOLT
 static constexpr uint16_t BOUND_RECOMPUTE_INTERVAL = 2048;

@@ -67,32 +67,14 @@ AUTOVECTORIZE inline void // main worker function for probabilistically adding o
 PacSumUpdateOneInternal(PacSumIntState<SIGNED> &state, uint64_t key_hash, typename PacSumIntState<SIGNED>::T64 value,
                         ArenaAllocator &allocator) {
 	state.key_hash |= key_hash;
-#if !defined(PAC_NOAPPROX)
+#ifndef PAC_EXACTSUM
 	// APPROX ALGORITHM: route by bit position, shift value
-	int level = PacSumIntState<SIGNED>::GetLevel(static_cast<int64_t>(value));
-	uint64_t shift = level << 3;
+	// 16-bit counters with 4-bit level shift
+	uint64_t abs_val = SIGNED && value < 0 ? static_cast<uint64_t>(-value) : static_cast<uint64_t>(value);
+	int level = PacSumIntState<SIGNED>::GetLevel(static_cast<int64_t>(abs_val));
+	uint64_t shift = level << 2; // multiply level by 4
 	int64_t shifted_val = static_cast<int64_t>(value) >> shift;
-	// Rounding compensation: add 1 in 50% of cases when bit being truncated is set
-	// Use key_hash bit 0 for random selection (count is tracked in wrapper, not here)
-	shifted_val += (1 & key_hash & (static_cast<int64_t>(value) >> (shift - 1)));
-
-	// Ensure level is allocated (also allocates levels 0 to level+4)
-	state.EnsureLevelAllocated(allocator, level);
-
-	if (level > state.max_level_used) {
-		state.max_level_used = static_cast<int8_t>(level);
-	}
-
-	constexpr int32_t OVERFLOW_THRESHOLD = SIGNED ? 4095 : 8191;
-	constexpr int32_t UNDERFLOW_THRESHOLD = SIGNED ? -4096 : 0;
-	int32_t new_total = state.exact_total[level] + static_cast<int32_t>(shifted_val);
-
-	if (new_total > OVERFLOW_THRESHOLD || new_total < UNDERFLOW_THRESHOLD) {
-		state.Cascade(level, allocator);
-		state.exact_total[level] = static_cast<int32_t>(shifted_val);
-	} else {
-		state.exact_total[level] = new_total;
-	}
+	state.AddToExactTotal(level, static_cast<int32_t>(shifted_val), allocator);
 	AddToTotalsSWAR<int16_t, uint16_t, PAC_APPROX_SWAR_MASK>(state.levels[level], shifted_val, key_hash);
 #elif defined(PAC_NOCASCADING)
 	AddToTotalsSimple(state.probabilistic_total128, value, key_hash); // directly add the value to the final total
@@ -308,23 +290,21 @@ AUTOVECTORIZE static void PacSumCombineInt(Vector &src, Vector &dst, idx_t count
 		}
 		auto *d = d_wrapper->EnsureState(allocator);
 		d->key_hash |= s->key_hash;
-#if !defined(PAC_NOAPPROX)
+#ifndef PAC_EXACTSUM
 		// APPROX COMBINE: merge levels from src into dst
 		d->exact_count += s->exact_count;
-		if (s->max_level_used > d->max_level_used) {
-			d->max_level_used = s->max_level_used;
-		}
 
 		// Combine each level up to src's max_level_used (only allocated levels)
 		for (int k = 0; k <= s->max_level_used; k++) {
 			if (!s->levels[k]) {
-				continue; // src level not allocated, skip
+				continue;
 			}
 			// Ensure dst level is allocated
 			d->EnsureLevelAllocated(allocator, k);
 
-			constexpr int32_t OVERFLOW_THRESHOLD = SIGNED ? 4095 : 8191;
-			constexpr int32_t UNDERFLOW_THRESHOLD = SIGNED ? -4096 : 0;
+			// 16-bit counters: threshold must match counter width
+			constexpr int32_t OVERFLOW_THRESHOLD = SIGNED ? 32767 : 65535;
+			constexpr int32_t UNDERFLOW_THRESHOLD = SIGNED ? -32768 : 0;
 			int32_t new_total = d->exact_total[k] + s->exact_total[k];
 
 			if (new_total > OVERFLOW_THRESHOLD || new_total < UNDERFLOW_THRESHOLD) {
@@ -335,8 +315,10 @@ AUTOVECTORIZE static void PacSumCombineInt(Vector &src, Vector &dst, idx_t count
 			}
 
 			// Add counters (SWAR layout: 16 uint64_t elements per level)
+			uint64_t *src_level = s->levels[k];
+			uint64_t *dst_level = d->levels[k];
 			for (int j = 0; j < PAC_APPROX_SWAR_ELEMENTS; j++) {
-				d->levels[k][j] += s->levels[k][j];
+				dst_level[j] += src_level[j];
 			}
 		}
 #elif defined(PAC_NOCASCADING)
@@ -374,7 +356,7 @@ AUTOVECTORIZE static void PacSumCombineInt(Vector &src, Vector &dst, idx_t count
 		CombineLevel(s->probabilistic_total64, d->probabilistic_total64, 64);
 		CombineLevel(s->probabilistic_total128, d->probabilistic_total128, 64);
 #endif
-#ifdef PAC_NOAPPROX
+#ifdef PAC_EXACTSUM
 		d->exact_count += s->exact_count;
 #endif
 	}
@@ -459,7 +441,7 @@ void PacSumFinalize(Vector &states, AggregateInputData &input, Vector &result, i
 // ============================================================================
 // X(NAME, VALUE_T, INPUT_T, SIGNED) - for integer types
 // Note: HugeInt uses double state in approx mode, so it's excluded from this macro
-#ifndef PAC_NOAPPROX
+#ifndef PAC_EXACTSUM
 #define PAC_INT_TYPES_SIGNED                                                                                           \
 	X(TinyInt, int64_t, int8_t, true)                                                                                  \
 	X(SmallInt, int64_t, int16_t, true)                                                                                \
@@ -584,13 +566,14 @@ idx_t PacSumIntStateSize(const AggregateFunction &) {
 
 void PacSumIntInitialize(const AggregateFunction &, data_ptr_t state_p) {
 	memset(state_p, 0, sizeof(ScatterIntState<true>));
-#ifndef PAC_NOAPPROX
+#ifndef PAC_EXACTSUM
 	// For approx mode, set max_level_used to -1 (no levels have received data yet)
 	// This applies when PAC_NOBUFFERING is set (state is directly PacSumIntState)
 	// When buffering is enabled, wrapper's EnsureState handles this for the inner state
 #ifdef PAC_NOBUFFERING
 	auto &state = *reinterpret_cast<ScatterIntState<true> *>(state_p);
 	state.max_level_used = -1;
+	state.inline_level_idx = -1;
 #endif
 #endif
 }
@@ -635,7 +618,7 @@ static AggregateFunction GetPacSumAggregate(PhysicalType type) {
 		                         PacSumCombineSigned, PacSumFinalizeSigned, FunctionNullHandling::DEFAULT_NULL_HANDLING,
 		                         PacSumUpdateBigInt);
 	case PhysicalType::INT128:
-#ifndef PAC_NOAPPROX
+#ifndef PAC_EXACTSUM
 		return AggregateFunction("pac_sum", {LogicalType::UBIGINT, LogicalType::HUGEINT}, LogicalType::HUGEINT,
 		                         PacSumDoubleStateSize, PacSumDoubleInitialize, PacSumScatterUpdateHugeIntDouble,
 		                         PacSumCombineDoubleWrapper, PacSumFinalizeDoubleToHugeint,
@@ -688,13 +671,13 @@ void RegisterPacSumFunctions(ExtensionLoader &loader) {
 	AddFcn(fcn_set, LogicalType::UBIGINT, LogicalType::HUGEINT, PacSumIntStateSize, PacSumIntInitialize,
 	       PacSumScatterUpdateUBigInt, PacSumCombineUnsigned, PacSumFinalizeUnsigned, PacSumUpdateUBigInt);
 
-	// HUGEINT: uses double state with finalize converting back to hugeint in approx mode (default),
-	// uses int state with exact cascading when PAC_NOAPPROX (can handle hugeint in probabilistic_total128)
-#ifndef PAC_NOAPPROX
+	// HUGEINT: uses double state with finalize converting back to hugeint in approx sum mode (default),
+#ifndef PAC_EXACTSUM
 	AddFcn(fcn_set, LogicalType::HUGEINT, LogicalType::HUGEINT, PacSumDoubleStateSize, PacSumDoubleInitialize,
 	       PacSumScatterUpdateHugeIntDouble, PacSumCombineDoubleWrapper, PacSumFinalizeDoubleToHugeint,
 	       PacSumUpdateHugeIntDouble);
 #else
+	// uses int state with exact cascading when PAC_EXACTSUM (can handle hugeint in probabilistic_total128)
 	AddFcn(fcn_set, LogicalType::HUGEINT, LogicalType::HUGEINT, PacSumIntStateSize, PacSumIntInitialize,
 	       PacSumScatterUpdateHugeInt, PacSumCombineSigned, PacSumFinalizeSigned, PacSumUpdateHugeInt);
 #endif
@@ -822,7 +805,7 @@ void RegisterPacSumCountersFunctions(ExtensionLoader &loader) {
 	               PacSumUpdateUBigInt);
 
 	// HUGEINT - uses double state in approx mode (same as UHUGEINT)
-#ifndef PAC_NOAPPROX
+#ifndef PAC_EXACTSUM
 	AddCountersFcn(counters_set, LogicalType::HUGEINT, PacSumDoubleStateSize, PacSumDoubleInitialize,
 	               PacSumScatterUpdateHugeIntDouble, PacSumCombineDoubleWrapper, PacSumFinalizeCountersDouble,
 	               PacSumUpdateHugeIntDouble);

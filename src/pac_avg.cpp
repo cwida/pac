@@ -112,7 +112,7 @@ static AggregateFunction GetPacAvgAggregate(PhysicalType type) {
 		                         PacSumCombineSigned, PacAvgFinalizeSignedDouble,
 		                         FunctionNullHandling::DEFAULT_NULL_HANDLING, PacSumUpdateBigInt);
 	case PhysicalType::INT128:
-#ifndef PAC_NOAPPROX
+#ifndef PAC_EXACTSUM
 		return AggregateFunction("pac_avg", {LogicalType::UBIGINT, LogicalType::HUGEINT}, LogicalType::DOUBLE,
 		                         PacSumDoubleStateSize, PacSumDoubleInitialize, PacSumScatterUpdateHugeIntDouble,
 		                         PacSumCombineDoubleWrapper, PacAvgFinalizeDouble,
@@ -203,7 +203,7 @@ void RegisterPacAvgFunctions(ExtensionLoader &loader) {
 	          PacSumCombineUnsigned, PacAvgFinalizeUnsignedDouble, PacSumUpdateUBigInt);
 
 	// HUGEINT - uses double state in approx mode
-#ifndef PAC_NOAPPROX
+#ifndef PAC_EXACTSUM
 	AddAvgFcn(fcn_set, LogicalType::HUGEINT, PacSumDoubleStateSize, PacSumDoubleInitialize,
 	          PacSumScatterUpdateHugeIntDouble, PacSumCombineDoubleWrapper, PacAvgFinalizeDouble,
 	          PacSumUpdateHugeIntDouble);
@@ -275,7 +275,7 @@ void RegisterPacAvgCountersFunctions(ExtensionLoader &loader) {
 	               PacSumCombineUnsigned, PacAvgFinalizeCountersUnsignedDouble, PacSumUpdateUBigInt);
 
 	// HUGEINT - uses double state in approx mode
-#ifndef PAC_NOAPPROX
+#ifndef PAC_EXACTSUM
 	AddCountersFcn(LogicalType::HUGEINT, PacSumDoubleStateSize, PacSumDoubleInitialize,
 	               PacSumScatterUpdateHugeIntDouble, PacSumCombineDoubleWrapper, PacAvgFinalizeCountersDouble,
 	               PacSumUpdateHugeIntDouble);

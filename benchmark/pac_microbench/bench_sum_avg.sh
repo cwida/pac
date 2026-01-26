@@ -11,9 +11,9 @@
 #   - standard: DuckDB's native SUM (baseline)
 #   - default: PAC SUM with all optimizations (buffering, approx cascading)
 #   - nobuffering: PAC SUM without input buffering (grouped tests only)
-#   - nocascading: PAC SUM without cascading (direct to largest type)
+#   - exactsum: PAC SUM with exact cascading su (without the approximation optimization)
+#   - nocascading: PAC SUM without cascading (direct to largest type -- implies exactsum)
 #   - nosimd: PAC SUM nocascading with simd-unfriendly update kernel and auto-vectorization disabled
-#   - noapprox: PAC SUM with exact cascading (non-approximate algorithm)
 
 set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -22,10 +22,10 @@ source "$SCRIPT_DIR/common.sh"
 RESULTS_FILE="$RESULTS_DIR/sum_avg_$(date +%Y%m%d_%H%M%S).csv"
 
 # Variants for ungrouped tests (eageralloc/nobuffering don't affect ungrouped)
-UNGROUPED_VARIANTS=(standard default nobuffering noapprox) # nocascading nosimd)
+UNGROUPED_VARIANTS=(standard default nobuffering exactsum nocascading nosimd)
 
 # Variants for grouped tests (includes allocation/buffering variants)
-GROUPED_VARIANTS=(standard default nobuffering nocascading noapprox)
+GROUPED_VARIANTS=(standard default nobuffering exactsum nocascading)
 
 # Get binary for variant
 get_binary() {
@@ -62,8 +62,8 @@ done
 echo "test,aggregate,variant,rows_m,groups,dtype,wall_sec,agg_sec,wall_times,agg_times" > "$RESULTS_FILE"
 
 # Data views and their sizes
-DATA_VIEWS=(data1 data10 data100)
-DATA_SIZES_M=(10 100 1000)
+DATA_VIEWS=(data1 data10) # data100)
+DATA_SIZES_M=(10 100) # 1000)
 
 # Sequential group columns and their cardinalities
 SEQ_GROUP_COLS=(grp_10 grp_1000 grp_100000 grp_10000000)

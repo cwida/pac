@@ -5,10 +5,16 @@
 #ifndef PAC_COUNT_HPP
 #define PAC_COUNT_HPP
 
-// benchmarking defines that disable certain optimizations
-// #define PAC_NOBUFFERING 1
-// #define PAC_NOCASCADING 1
-// #define PAC_NOSIMD 1
+// benchmarking defines that disable certain optimizations (and some flags imply others)
+// #define PAC_NOBUFFERING 1 // to disable the buffering optimization.
+// #define PAC_NOCASCADING 1 // to disable the pre-aggregation in a uint8_t level
+// #define PAC_NOSIMD 1 // to get the IF..THEN SIMD-unfriendly aggregate computation kernel
+#ifdef PAC_NOSIMD
+#define PAC_NOCASCADING 1
+#endif
+#ifdef PAC_NOCASCADING
+#define PAC_EXACTSUM 1
+#endif
 
 // PAC_GODBOLT mode: cpp -DPAC_GODBOLT -P -E -w  src/include/pac_count.hpp
 // Isolates the SIMD kernel for Godbolt analysis (-P removes line markers)
@@ -60,21 +66,11 @@ void RegisterPacCountCountersFunctions(ExtensionLoader &);
 // In order to keep the size of the states low, it is more important to delay the state
 // allocation until multiple values have been received (buffering). Processing a buffer
 // rather than individual values reduces cache misses and increases chances for SIMD
-//
-// While we predicate the counting and SWAR-optimize it, we provide a naive IF..THEN baseline that is SIMD-unfriendly
-//
-// Define PAC_NOBUFFERING to disable the buffering optimization.
-// Define PAC_NOCASCADING to disable the pre-aggregation in a uint8_t level
-// Define PAC_NOSIMD to get the IF..THEN SIMD-unfriendly aggergate computation kernel
-#endif
-
-#if defined(PAC_NOSIMD) && !defined(PAC_NOCASCADING)
-PAC_NOSIMD only makes sense in combination with PAC_NOCASCADING
 #endif
 
 #ifndef PAC_GODBOLT
-    template <typename S> // forward template declaration
-    static inline void PacCountUpdateOne(S &agg, uint64_t hash, ArenaAllocator &a);
+template <typename S> // forward template declaration
+static inline void PacCountUpdateOne(S &agg, uint64_t hash, ArenaAllocator &a);
 #endif
 
 // SWAR-optimized state
