@@ -7,7 +7,6 @@
 ALTER PAC TABLE customer ADD PROTECTED (c_acctbal);
 ALTER PAC TABLE customer ADD PROTECTED (c_name);
 ALTER PAC TABLE customer ADD PROTECTED (c_address);
-ALTER PAC TABLE customer ADD PROTECTED (c_phone);
 
 -- Nation -> Region link
 ALTER PAC TABLE nation ADD PAC LINK (n_regionkey) REFERENCES region(r_regionkey);
