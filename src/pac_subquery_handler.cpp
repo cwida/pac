@@ -29,7 +29,38 @@ static ColumnBinding EnsureColumnFlowsThrough(LogicalOperator *target_op, Logica
 	// First, get the column's type from source
 	auto col_index = source_get.GetColumnIds()[source_col_proj_idx];
 	out_type = source_get.GetColumnType(col_index);
-	ColumnBinding source_binding(source_get.table_index, source_col_proj_idx);
+
+	// Determine the correct output binding for the source_get
+	// When projection_ids is non-empty, bindings use projection_ids values
+	// When projection_ids is empty, bindings are sequential [0, 1, 2, ...]
+	idx_t output_col_idx;
+	if (source_get.projection_ids.empty()) {
+		output_col_idx = source_col_proj_idx;
+	} else {
+		// Find the projection_id that corresponds to source_col_proj_idx
+		// projection_ids[i] = j means "the i-th output column comes from column_ids[j]"
+		// We need to find i where projection_ids[i] == source_col_proj_idx
+		output_col_idx = DConstants::INVALID_INDEX;
+		for (idx_t i = 0; i < source_get.projection_ids.size(); i++) {
+			if (source_get.projection_ids[i] == source_col_proj_idx) {
+				output_col_idx = source_get.projection_ids[i]; // Use the projection_id value as binding
+				break;
+			}
+		}
+		if (output_col_idx == DConstants::INVALID_INDEX) {
+			// Column is in column_ids but not in projection_ids - we need to add it
+#ifdef DEBUG
+			Printer::Print("EnsureColumnFlowsThrough: Column at position " + std::to_string(source_col_proj_idx) +
+			               " not in projection_ids, adding it");
+#endif
+			source_get.projection_ids.push_back(source_col_proj_idx);
+			output_col_idx = source_col_proj_idx; // The binding uses the projection_id value
+			// Resolve types to update the types vector
+			source_get.ResolveOperatorTypes();
+		}
+	}
+
+	ColumnBinding source_binding(source_get.table_index, output_col_idx);
 
 	// Find path from target_op down to source_get and ensure column flows through
 	std::function<ColumnBinding(LogicalOperator *)> ensure_flow = [&](LogicalOperator *op) -> ColumnBinding {

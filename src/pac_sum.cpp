@@ -20,7 +20,6 @@ using ScatterIntState = PacSumIntStateWrapper<SIGNED>;
 using ScatterDoubleState = PacSumDoubleStateWrapper;
 #endif
 
-
 // ============================================================================
 // Inner state update functions (work directly on PacSumIntState/PacSumDoubleState)
 // ============================================================================
@@ -503,8 +502,17 @@ void PacSumFinalizeDoubleToHugeint(Vector &states, AggregateInputData &input, Ve
 
 unique_ptr<FunctionData> // Bind function for pac_sum with optional mi parameter (must be constant)
 PacSumBind(ClientContext &ctx, AggregateFunction &, vector<unique_ptr<Expression>> &args) {
-	double mi = 128.0; // default
-	if (args.size() >= 3) {
+	// Check if pac_mi is explicitly set by the user - if so, use it and don't allow override
+	double mi = 128.0;
+	bool mi_from_setting = false;
+	Value pac_mi_val;
+	if (ctx.TryGetCurrentSetting("pac_mi", pac_mi_val) && !pac_mi_val.IsNull()) {
+		mi = pac_mi_val.GetValue<double>();
+		mi_from_setting = true;
+	}
+
+	// Only allow override from function argument if pac_mi was not explicitly set
+	if (!mi_from_setting && args.size() >= 3) {
 		if (!args[2]->IsFoldable()) {
 			throw InvalidInputException("pac_sum: mi parameter must be a constant");
 		}
@@ -634,7 +642,7 @@ void RegisterPacSumFunctions(ExtensionLoader &loader) {
 	AddFcn(fcn_set, LogicalType::UBIGINT, LogicalType::HUGEINT, PacSumIntStateSize, PacSumIntInitialize,
 	       PacSumScatterUpdateUBigInt, PacSumCombineUnsigned, PacSumFinalizeUnsigned, PacSumUpdateUBigInt);
 
-	// HUGEINT: uses double state with finalize converting back to hugeint in approx sum mode (default),
+	// HUGEINT: uses double state with finalize converting back to hugeint in approx mode (default),
 #ifndef PAC_EXACTSUM
 	AddFcn(fcn_set, LogicalType::HUGEINT, LogicalType::HUGEINT, PacSumDoubleStateSize, PacSumDoubleInitialize,
 	       PacSumScatterUpdateHugeIntDouble, PacSumCombineDoubleWrapper, PacSumFinalizeDoubleToHugeint,

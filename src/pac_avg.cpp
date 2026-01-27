@@ -144,8 +144,17 @@ static unique_ptr<FunctionData> BindDecimalPacAvg(ClientContext &ctx, AggregateF
 	double scale_divisor = std::pow(10.0, static_cast<double>(scale));
 
 	// Get mi and seed (same as PacSumBind)
+	// Check if pac_mi is explicitly set by the user - if so, use it and don't allow override
 	double mi = 128.0;
-	if (args.size() >= 3) {
+	bool mi_from_setting = false;
+	Value pac_mi_val;
+	if (ctx.TryGetCurrentSetting("pac_mi", pac_mi_val) && !pac_mi_val.IsNull()) {
+		mi = pac_mi_val.GetValue<double>();
+		mi_from_setting = true;
+	}
+
+	// Only allow override from function argument if pac_mi was not explicitly set
+	if (!mi_from_setting && args.size() >= 3) {
 		if (!args[2]->IsFoldable()) {
 			throw InvalidInputException("pac_avg: mi parameter must be a constant");
 		}

@@ -23,12 +23,21 @@
 
 namespace duckdb {
 
+static bool IsPacAggregate(const string &func) {
+	static const std::unordered_set<string> pac_aggs = {
+	    "pac_sum",          "pac_count",          "pac_avg",          "pac_min",          "pac_max",
+	    "pac_sum_counters", "pac_count_counters", "pac_avg_counters", "pac_min_counters", "pac_max_counters"};
+	string lower_func = func;
+	std::transform(lower_func.begin(), lower_func.end(), lower_func.begin(), ::tolower);
+	return pac_aggs.count(lower_func) > 0;
+}
+
 static bool IsAllowedAggregate(const string &func) {
 	static const std::unordered_set<string> allowed = {"sum", "sum_no_overflow", "count", "count_star", "avg", "min",
 	                                                   "max"};
 	string lower_func = func;
 	std::transform(lower_func.begin(), lower_func.end(), lower_func.begin(), ::tolower);
-	return allowed.count(lower_func) > 0;
+	return allowed.count(lower_func) > 0 || IsPacAggregate(lower_func);
 }
 
 static bool ContainsDisallowedJoin(const LogicalOperator &op) {
@@ -105,6 +114,164 @@ static bool ContainsAggregation(const LogicalOperator &op) {
 		}
 	}
 	return false;
+}
+
+// Helper: Get all table names that are scanned in a subtree (stops at subquery boundaries)
+static void GetScannedTablesInScope(const LogicalOperator &op, std::unordered_set<string> &tables) {
+	if (op.type == LogicalOperatorType::LOGICAL_GET) {
+		auto &get = op.Cast<LogicalGet>();
+		auto table_entry = get.GetTable();
+		if (table_entry) {
+			tables.insert(table_entry->name);
+		}
+	}
+
+	// Stop at subquery boundaries
+	if (op.type == LogicalOperatorType::LOGICAL_DELIM_JOIN) {
+		// Only traverse left child (main query)
+		if (!op.children.empty() && op.children[0]) {
+			GetScannedTablesInScope(*op.children[0], tables);
+		}
+		return;
+	}
+
+	if (op.type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN || op.type == LogicalOperatorType::LOGICAL_ANY_JOIN) {
+		auto &join = op.Cast<LogicalJoin>();
+		if (join.join_type == JoinType::SINGLE || join.join_type == JoinType::MARK) {
+			// Only traverse left child (main query)
+			if (!op.children.empty() && op.children[0]) {
+				GetScannedTablesInScope(*op.children[0], tables);
+			}
+			return;
+		}
+	}
+
+	// Traverse children
+	for (auto &child : op.children) {
+		GetScannedTablesInScope(*child, tables);
+	}
+}
+
+// Helper: Check if PAC aggregates in a subtree are properly joined with PU/FK path tables
+// This recursively checks each aggregate scope and validates PAC aggregates
+// Returns true if PAC aggregates were found in the query
+static bool CheckPacAggregatesHaveProperJoins(const LogicalOperator &op, const PACCompatibilityResult &compat_result,
+                                              const vector<string> &all_pu_tables) {
+	bool found_pac_aggregate = false;
+
+	// If this is an aggregate node, check if it contains PAC aggregates
+	if (op.type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+		auto &aggr = op.Cast<LogicalAggregate>();
+
+		// Check if this aggregate contains any PAC aggregates
+		bool has_pac_aggregate = false;
+		bool has_regular_aggregate = false;
+
+		for (auto &expr : aggr.expressions) {
+			if (expr && expr->IsAggregate()) {
+				auto &ag = expr->Cast<BoundAggregateExpression>();
+				if (IsPacAggregate(ag.function.name)) {
+					has_pac_aggregate = true;
+					found_pac_aggregate = true;
+				} else if (IsAllowedAggregate(ag.function.name)) {
+					has_regular_aggregate = true;
+				}
+			}
+		}
+
+		// If this aggregate has PAC aggregates, check that it's joined with PU or FK path tables
+		if (has_pac_aggregate) {
+			// Get all tables scanned in this aggregate's scope (below the aggregate)
+			std::unordered_set<string> scanned_tables;
+			for (auto &child : op.children) {
+				GetScannedTablesInScope(*child, scanned_tables);
+			}
+
+			// Check if any PU table is scanned
+			bool has_pu_table = false;
+			for (auto &pu : all_pu_tables) {
+				if (scanned_tables.find(pu) != scanned_tables.end()) {
+					has_pu_table = true;
+					break;
+				}
+			}
+
+			// If no PU table is directly scanned, check if any scanned table has an FK path to a PU
+			bool has_fk_to_pu = false;
+			if (!has_pu_table) {
+				for (auto &table : scanned_tables) {
+					// Check if this table has an FK path to any PU
+					auto it = compat_result.fk_paths.find(table);
+					if (it != compat_result.fk_paths.end() && !it->second.empty()) {
+						// The FK path should lead to a PU table (last element in the path)
+						const string &target_table = it->second.back();
+						for (auto &pu : all_pu_tables) {
+							if (target_table == pu) {
+								has_fk_to_pu = true;
+								break;
+							}
+						}
+						if (has_fk_to_pu) {
+							break;
+						}
+					}
+				}
+			}
+
+			// PAC aggregate is valid if:
+			// 1. PU table is directly scanned, OR
+			// 2. A scanned table has an FK path to the PU
+			if (!has_pu_table && !has_fk_to_pu) {
+				throw InvalidInputException(
+				    "PAC rewrite: PAC aggregates (pac_sum, pac_count, etc.) must be joined with the privacy unit table "
+				    "or a table that has a foreign key path to the privacy unit");
+			}
+		}
+
+		// If this aggregate has regular aggregates wrapping PAC results, check children for PAC aggregates
+		// This handles cases like COUNT(...) on top of a subquery with pac_count(...)
+		if (has_regular_aggregate) {
+			// Recursively check children - they might contain PAC aggregates in subqueries
+			for (auto &child : op.children) {
+				if (CheckPacAggregatesHaveProperJoins(*child, compat_result, all_pu_tables)) {
+					found_pac_aggregate = true;
+				}
+			}
+		}
+	}
+
+	// Handle subquery boundaries - check each subquery independently
+	if (op.type == LogicalOperatorType::LOGICAL_DELIM_JOIN) {
+		// Check both main query (left) and subquery (right)
+		for (auto &child : op.children) {
+			if (CheckPacAggregatesHaveProperJoins(*child, compat_result, all_pu_tables)) {
+				found_pac_aggregate = true;
+			}
+		}
+		return found_pac_aggregate;
+	}
+
+	if (op.type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN || op.type == LogicalOperatorType::LOGICAL_ANY_JOIN) {
+		auto &join = op.Cast<LogicalJoin>();
+		if (join.join_type == JoinType::SINGLE || join.join_type == JoinType::MARK) {
+			// Check both main query (left) and subquery (right)
+			for (auto &child : op.children) {
+				if (CheckPacAggregatesHaveProperJoins(*child, compat_result, all_pu_tables)) {
+					found_pac_aggregate = true;
+				}
+			}
+			return found_pac_aggregate;
+		}
+	}
+
+	// Recurse into children for non-aggregate operators
+	for (auto &child : op.children) {
+		if (CheckPacAggregatesHaveProperJoins(*child, compat_result, all_pu_tables)) {
+			found_pac_aggregate = true;
+		}
+	}
+
+	return found_pac_aggregate;
 }
 
 // Helper: Find the operator in the plan that produces a given table_index
@@ -927,6 +1094,25 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 			ReplanGuard guard(optimizer_info);
 			ReplanWithoutOptimizers(context, context.GetCurrentQuery(), plan);
 			CheckOutputColumnsNotFromPU(*plan, *plan, result.scanned_pu_tables, tables_with_protected_columns);
+		}
+
+		// Check that PAC aggregates are properly joined with PU or FK path tables
+		// This validates that pac_sum, pac_count, etc. have access to the privacy unit
+		// Returns true if PAC aggregates were found
+		bool has_pac_aggregates = false;
+		if (!all_privacy_units.empty()) {
+			has_pac_aggregates = CheckPacAggregatesHaveProperJoins(*plan, result, all_privacy_units);
+		}
+
+		// If the query already has PAC aggregates with proper joins, don't trigger rewrite
+		// The query is already using PAC functions correctly, so allow it as-is
+		if (has_pac_aggregates) {
+#ifdef DEBUG
+			Printer::Print("PAC compatibility check: Query has PAC aggregates with proper joins - allowing as-is");
+#endif
+			// Return empty result to skip PAC compilation
+			result.eligible_for_rewrite = false;
+			return result;
 		}
 	}
 

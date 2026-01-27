@@ -172,6 +172,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 	db.config.AddExtensionOption("pac_conservative_mode",
 	                             "throw errors for unsupported operators (when false, skip PAC compilation)",
 	                             LogicalType::BOOLEAN, Value::BOOLEAN(true));
+	// Add option to set the maximum influence (mi) parameter for PAC aggregates
+	// No default value - when not set, function argument or hardcoded default (128.0) is used
+	// When explicitly set by user, it overrides any function argument
+	db.config.AddExtensionOption("pac_mi", "mutual information (mi) parameter for PAC aggregates", LogicalType::DOUBLE);
 
 	// Register pac_aggregate function(s)
 	RegisterPacAggregateFunctions(loader);
