@@ -5,17 +5,29 @@ namespace duckdb {
 
 static unique_ptr<FunctionData> PacCountBind(ClientContext &ctx, AggregateFunction &func,
                                              vector<unique_ptr<Expression>> &args) {
+	// Check if pac_mi is explicitly set by the user - if so, use it and don't allow override
 	double mi = 128.0;
-	for (idx_t i = 1; i < args.size(); i++) {
-		auto &arg = args[i];
-		if (arg->IsFoldable() && (arg->return_type.IsNumeric() || arg->return_type.id() == LogicalTypeId::UNKNOWN)) {
-			auto val = ExpressionExecutor::EvaluateScalar(ctx, *arg);
-			if (val.type().IsNumeric()) {
-				mi = val.GetValue<double>();
-				if (mi < 0.0) {
-					throw InvalidInputException("pac_count: mi must be >= 0");
+	bool mi_from_setting = false;
+	Value pac_mi_val;
+	if (ctx.TryGetCurrentSetting("pac_mi", pac_mi_val) && !pac_mi_val.IsNull()) {
+		mi = pac_mi_val.GetValue<double>();
+		mi_from_setting = true;
+	}
+
+	// Only allow override from function argument if pac_mi was not explicitly set
+	if (!mi_from_setting) {
+		for (idx_t i = 1; i < args.size(); i++) {
+			auto &arg = args[i];
+			if (arg->IsFoldable() &&
+			    (arg->return_type.IsNumeric() || arg->return_type.id() == LogicalTypeId::UNKNOWN)) {
+				auto val = ExpressionExecutor::EvaluateScalar(ctx, *arg);
+				if (val.type().IsNumeric()) {
+					mi = val.GetValue<double>();
+					if (mi < 0.0) {
+						throw InvalidInputException("pac_count: mi must be >= 0");
+					}
+					break;
 				}
-				break;
 			}
 		}
 	}
