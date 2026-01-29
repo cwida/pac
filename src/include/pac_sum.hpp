@@ -692,6 +692,58 @@ template <bool SIGNED>
 void PacSumFlushBuffer(PacSumDoubleStateWrapper &src, PacSumDoubleStateWrapper &dst, ArenaAllocator &a);
 #endif
 
+// ============================================================================
+// Double-sided mode helpers (used by pac_sum and pac_avg finalization)
+// ============================================================================
+#ifndef PAC_SIGNEDSUM
+// For int states: cast to unsigned before Flush (uses unsigned counters in Cascade)
+template <class State>
+inline typename std::enable_if<!std::is_same<typename State::State, PacSumDoubleState>::value>::type
+FlushPosState(typename State::State *pos, ArenaAllocator &allocator) {
+	reinterpret_cast<PacSumIntState<false> *>(pos)->Flush(allocator);
+}
+// For double states: call directly (no cast needed)
+template <class State>
+inline typename std::enable_if<std::is_same<typename State::State, PacSumDoubleState>::value>::type
+FlushPosState(typename State::State *pos, ArenaAllocator &allocator) {
+	pos->Flush(allocator);
+}
+
+// For int states: cast to unsigned for GetTotalsAsDouble
+template <class State>
+inline typename std::enable_if<!std::is_same<typename State::State, PacSumDoubleState>::value>::type
+GetPosStateTotals(typename State::State *pos, double *buf) {
+	reinterpret_cast<PacSumIntState<false> *>(pos)->GetTotalsAsDouble(buf);
+}
+// For double states: call directly
+template <class State>
+inline typename std::enable_if<std::is_same<typename State::State, PacSumDoubleState>::value>::type
+GetPosStateTotals(typename State::State *pos, double *buf) {
+	pos->GetTotalsAsDouble(buf);
+}
+
+// For signed int states: subtract neg_state totals from buf
+template <class State, bool SIGNED>
+inline typename std::enable_if<SIGNED && !std::is_same<typename State::State, PacSumDoubleState>::value>::type
+SubtractNegStateTotals(State *wrapper, double *buf, uint64_t &key_hash, ArenaAllocator &allocator) {
+	if (auto *neg = wrapper->GetNegState()) {
+		double neg_buf[64] = {0};
+		neg->Flush(allocator);
+		neg->GetTotalsAsDouble(neg_buf);
+		key_hash |= neg->key_hash;
+		for (int j = 0; j < 64; j++) {
+			buf[j] -= neg_buf[j];
+		}
+	}
+}
+// For unsigned int states or double states: no-op
+template <class State, bool SIGNED>
+inline typename std::enable_if<!SIGNED || std::is_same<typename State::State, PacSumDoubleState>::value>::type
+SubtractNegStateTotals(State *, double *, uint64_t &, ArenaAllocator &) {
+	// No neg_state for unsigned types or double states
+}
+#endif
+
 // Size and initialize functions
 idx_t PacSumIntStateSize(const AggregateFunction &);
 void PacSumIntInitialize(const AggregateFunction &, data_ptr_t state_p);

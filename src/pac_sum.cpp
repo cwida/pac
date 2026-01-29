@@ -461,56 +461,6 @@ AUTOVECTORIZE static void PacSumCombineDouble(Vector &src, Vector &dst, idx_t co
 	}
 }
 
-#ifndef PAC_SIGNEDSUM
-// SFINAE helpers for double-sided mode finalization
-// For int states: cast pos_state to unsigned for GetTotalsAsDouble
-template <class State>
-typename std::enable_if<!std::is_same<typename State::State, PacSumDoubleState>::value>::type
-GetPosStateTotals(typename State::State *pos, double *buf) {
-	reinterpret_cast<PacSumIntState<false> *>(pos)->GetTotalsAsDouble(buf);
-}
-// For double states: call directly
-template <class State>
-typename std::enable_if<std::is_same<typename State::State, PacSumDoubleState>::value>::type
-GetPosStateTotals(typename State::State *pos, double *buf) {
-	pos->GetTotalsAsDouble(buf);
-}
-
-// For int states: cast to unsigned before Flush (uses unsigned counters in Cascade)
-template <class State>
-typename std::enable_if<!std::is_same<typename State::State, PacSumDoubleState>::value>::type
-FlushPosState(typename State::State *pos, ArenaAllocator &allocator) {
-	reinterpret_cast<PacSumIntState<false> *>(pos)->Flush(allocator);
-}
-// For double states: call directly (no cast needed)
-template <class State>
-typename std::enable_if<std::is_same<typename State::State, PacSumDoubleState>::value>::type
-FlushPosState(typename State::State *pos, ArenaAllocator &allocator) {
-	pos->Flush(allocator);
-}
-
-// For signed int states: subtract neg_state totals
-template <class State, bool SIGNED>
-typename std::enable_if<SIGNED && !std::is_same<typename State::State, PacSumDoubleState>::value>::type
-SubtractNegStateTotals(State *wrapper, double *buf, uint64_t &key_hash, ArenaAllocator &allocator) {
-	if (auto *neg = wrapper->GetNegState()) {
-		double neg_buf[64] = {0};
-		neg->Flush(allocator);
-		neg->GetTotalsAsDouble(neg_buf);
-		key_hash |= neg->key_hash;
-		for (int j = 0; j < 64; j++) {
-			buf[j] -= neg_buf[j];
-		}
-	}
-}
-// For unsigned int states or double states: no-op
-template <class State, bool SIGNED>
-typename std::enable_if<!SIGNED || std::is_same<typename State::State, PacSumDoubleState>::value>::type
-SubtractNegStateTotals(State *, double *, uint64_t &, ArenaAllocator &) {
-	// No neg_state for unsigned types or double states
-}
-#endif
-
 // Unified Finalize for both int and double states
 template <class State, class ACC_TYPE, bool SIGNED, bool DIVIDE_BY_COUNT>
 void PacSumFinalize(Vector &states, AggregateInputData &input, Vector &result, idx_t count, idx_t offset) {
@@ -880,8 +830,17 @@ static void PacSumFinalizeCounters(Vector &states, AggregateInputData &input, Ve
 
 		double *dst = &child_data[i * 64];
 		if (s) {
+#ifndef PAC_SIGNEDSUM
+			// Double-sided mode: use SFINAE helpers
+			FlushPosState<State>(s, input.allocator);
+			GetPosStateTotals<State>(s, dst);
+			// For signed int states, subtract neg_state counters element-wise
+			uint64_t dummy_key_hash = 0;
+			SubtractNegStateTotals<State, SIGNED>(state_ptrs[i], dst, dummy_key_hash, input.allocator);
+#else
 			s->Flush(input.allocator);
-			s->GetTotalsAsDouble(dst); // write directly to destination
+			s->GetTotalsAsDouble(dst);
+#endif
 		} else {
 			memset(dst, 0, 64 * sizeof(double));
 		}

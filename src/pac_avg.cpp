@@ -56,8 +56,16 @@ static void PacAvgFinalizeCounters(Vector &states, AggregateInputData &input, Ve
 		list_entries[offset + i].length = 64;
 
 		if (s) {
+#ifndef PAC_SIGNEDSUM
+			// Double-sided mode: use helpers from pac_sum.hpp
+			FlushPosState<State>(s, input.allocator);
+			GetPosStateTotals<State>(s, buf);
+			uint64_t dummy_key_hash = 0;
+			SubtractNegStateTotals<State, SIGNED>(state_ptrs[i], buf, dummy_key_hash, input.allocator);
+#else
 			s->Flush(input.allocator);
 			s->GetTotalsAsDouble(buf);
+#endif
 		} else {
 			memset(buf, 0, sizeof(buf));
 		}
