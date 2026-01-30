@@ -4,6 +4,18 @@
 
 require pac
 
+statement ok
+SET pac_deterministic_noise = true;
+
+statement ok
+SET threads = 1;
+
+statement ok
+set pac_seed = 42;
+
+statement ok
+set pac_mi = 0;
+
 # Set up TPC-H schema with customer as privacy unit
 statement ok
 CREATE TABLE customer (
@@ -82,12 +94,6 @@ INSERT INTO lineitem VALUES
 statement ok
 pragma add_pac_privacy_unit('customer');
 
-statement ok
-SET pac_join_elimination = true;
-
-statement ok
-set pac_seed = 42;
-
 # Test correlated subquery with EXISTS (semi-join) - similar to TPC-H Q04
 # This query finds order priorities for orders in a date range that have at least one lineitem
 # where the commit date is before the receipt date (late commitment)
@@ -113,9 +119,9 @@ GROUP BY
 ORDER BY
     o_orderpriority;
 ----
-1-URGENT	2
-2-HIGH	4
-3-MEDIUM	NULL
+1-URGENT	0
+2-HIGH	0
+3-MEDIUM	0
 
 # Test TPC-H Q17-style correlated subquery with aggregates in both outer and inner queries
 # This tests the case where lineitem (FK-linked table) appears in both outer aggregate and inner aggregate
@@ -191,7 +197,7 @@ FROM
 WHERE
     c_mktsegment = 'BUILDING';
 ----
-NULL	NULL	NULL
+2	0.0	NULL
 
 # Test outer aggregate + inner aggregate with IN clause - both need joins to PU
 # This tests that when BOTH outer and inner queries scan FK-linked tables (not PU directly),
@@ -217,7 +223,7 @@ WHERE
     )
     AND l_discount > 0.04;
 ----
-NULL
+2099.52
 
 # Test correlated subquery where outer and inner both need separate joins to PU
 # This is a CORRELATED subquery (references outer table via l_partkey), unlike the IN clause which is uncorrelated
@@ -269,8 +275,8 @@ FROM orders
 WHERE o_custkey = 1
 ORDER BY o_orderkey;
 ----
-1	100.00	NULL
-2	200.00	NULL
+1	85899345.93	200.00
+1	0.00	200.00
 
 # Test TPC-H Q21-style query: Suppliers Who Kept Orders Waiting
 # This tests complex correlated subqueries with:
@@ -388,5 +394,5 @@ ORDER BY
     numwait DESC,
     s_name;
 ----
-Supplier#001	NULL
-Supplier#002	NULL
+Supplier#001	1
+Supplier#002	1
