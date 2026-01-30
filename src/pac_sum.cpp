@@ -37,7 +37,7 @@ PacSumUpdateOneInternal(PacSumIntState<SIGNED> &state, uint64_t key_hash, typena
 	uint64_t shift = level << 2; // multiply level by 4
 	int64_t shifted_val = static_cast<int64_t>(value) >> shift;
 	state.AddToExactTotal(level, static_cast<int32_t>(shifted_val), allocator);
-	AddToTotalsSWAR<int16_t, uint16_t, PAC_APPROX_SWAR_MASK>(state.levels[level], shifted_val, key_hash);
+	AddToTotalsSWAR<int16_t, uint16_t, PAC_APPROX_SWAR_MASK>(state.u.levels[level], shifted_val, key_hash);
 #elif defined(PAC_NOCASCADING)
 	AddToTotalsSimple(state.probabilistic_total128, value, key_hash); // directly add the value to the final total
 #else
@@ -422,12 +422,12 @@ AUTOVECTORIZE static void PacSumCombineInt(Vector &src, Vector &dst, idx_t count
 			auto *s_neg = src_wrapper[i]->GetNegState();
 			if (s_neg) {
 				auto *d_neg = d_wrapper->GetNegState();
-				if (d_neg) {
+#ifndef PAC_NOBUFFERING
+				if (!d_neg) {                     // if we buffer, states are arena-allocated and we can steal them
+					d_wrapper->neg_state = s_neg; // dst has no neg_state yet - just take src's pointer
+				} else
+#endif
 					d_neg->CombineFrom(s_neg, allocator);
-				} else {
-					// dst has no neg_state yet - just take src's pointer
-					d_wrapper->neg_state = s_neg;
-				}
 			}
 		}
 #endif

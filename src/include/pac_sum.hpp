@@ -5,10 +5,11 @@
 #ifndef PAC_SUM_HPP
 #define PAC_SUM_HPP
 
+// the default implementation is a simd-friendly (16-bits) approximate, dual-unsigned, buffering, sum.
 // benchmarking defines that disable certain optimizations (some imply the other)
 // #define PAC_SIGNEDSUM 1 // to disable the use of an extra unsigned negative sum for negative values.
 // #define PAC_NOBUFFERING 1 // to disable the buffering optimization.
-// #define PAC_EXACTSUM 1 // to use exact cascading instead of the approximate algorithm (approximate is default)
+// #define PAC_EXACTSUM 1 // to use exact cascading instead of the approximate algorithm
 // #define PAC_NOCASCADING 1 // to disable multi-level cascading from small into wider types (aggregate in final type)
 // #define PAC_NOSIMD 1 // to get the IF..THEN SIMD-unfriendly aggregate computation kernel
 #ifdef PAC_NOSIMD
@@ -50,27 +51,32 @@ void RegisterPacSumCountersFunctions(ExtensionLoader &loader);
 // Update: for each (key_hash, value), add value to sums[i] if bit i of key_hash is set
 // Finalize: compute the PAC-noised sum from the 64 counters
 //
-// We keep sub-total[64] in multiple data types, from small to large, and try to handle
-// most summing in the smallest possible data-type. Because, we can do the 64 sums with
-// auto-vectorization. (Rather than naive FOR(i=0;i<64;i++) IF (keybit[i]) total[i]+=val
+// Rather than naive FOR(i=0;i<64;i++) IF (keybit[i]) total[i]+=val
 // we rewrite into SIMD-friendly multiplication FOR(i=0;i<64;i++) total[i]+=keybit[i]*val),
 //
 // mimicking what DuckDB's SUM() normally does, we have the following cases:
 // 1) integers: PAC_SUM(key_hash, HUGEINT | [U](BIG||SMALL|TINY)INT) -> HUGEINT
-//    EXACTSUM: keep sub-total8/16/32/64/128_t probabilistic_total, sum each value in smallest total that fits.
+// CASCADING EXACTSUM: keep sub-total8/16/32/64/128_t probabilistic_total, sum each value in smallest total that fits.
 //              We ensure "things fit" by flushing probabilistic_totalX into the next wider total before it overflows,
 //              and by only allowing values to be added to probabilistic_totalX if they have the highest bX bits unset,
 //              so we can at least add 2^b values before we need to flush (b8=3, b16=5, b32=6, b64=8).
 //              In Combine() we combine the levels of src and dst states, either by moving them from src to dst (if dst
 //              did not have that level yet), or by summing them. In Finalize() the noised result is computed from the
 //              sum of all allocated levels.
-// APPROX (DEFAULT): only uses 16-bits counters in 25 lazily allocated levels, staggered by 4 bits (112 bits covered)
+// APPROX (NEW!): only uses 16-bits counters in 25 lazily allocated levels, staggered by 4 bits (112 bits covered)
 //              We sum into the highest level, such that the highest set bit in value is 4 positions clear from its max.
 //              This means at least 16, and on average >32, such values can be summed before overflow could happen.
 //              On overflow, all 16 bits are filled, the major 12 are added to the next counter and we reset to 0.
 //              This ensures a max error of 1/4096 (2^12) = 0.025% in the sum totals, which is comfortable for PAC.
 //              Because 25 level pointers is a largish array (200 bytes) that is often quite empty, we to use this space
 //              for storing the first set of 16-bits counters (128 bytes) as long as only small (<9) levels are used.
+//
+// NEGATIVE VALUES: we now treat negative values differently: we negate them and put them in a second sum
+//             only at Finalize, the negative sum is subtracted from the positivie sum.
+//             This has two benefits: (i) it is numerically stabler (ii) unsigned sums have one more bit of precision
+//             The extra negative sum may duplicate the memory usage. But in many cases, signed database columns
+//             only contain positive values. And we allocate the negative sum lazily. So now we get unsigned perfomance
+//             on signed data. This optimization can be disabled with PAC_SIGNEDSUM.
 //
 // 2) floating: PAC_SUM(key_hash, (FLOAT|DOUBLE)) -> DOUBLE
 //              Accumulates directly into double[64] total using AddToTotalsSimple (ARM).
@@ -209,13 +215,13 @@ struct PacSumIntState {
 	// Exact subtotal at each level - tracks cumulative sum for overflow detection
 	int32_t exact_total[PAC_APPROX_NUM_LEVELS];
 
-	union { // inline allocation optimization uses union to ensure it also works on 32-bits platforms
+	union LevelStorage { // inline allocation optimization uses union to ensure it also works on 32-bits platforms
 		uint64_t *levels[PAC_APPROX_NUM_LEVELS]; // motivation: this is quite an array: 25*8bytes = 200 bytes
 		struct {                                 // try to reuse the back 128 bytes for the first allocated level
 			void *_dummy[9];                     // do this only if allocated levels < 9
 			uint64_t inline_level[PAC_APPROX_SWAR_ELEMENTS]; // 128 bytes + 9*8 = 200
 		};
-	};
+	} u;
 
 	// Get the level index for a value based on its highest set bit
 	// For 16-bit counters with 4-bit shift: shifted_val = value >> (level * 4) should fit in ~12 bits
@@ -229,20 +235,20 @@ struct PacSumIntState {
 		if (k >= 9 && inline_level_idx >= 0) {
 			uint64_t *ext = // Need level >= 9 and have inline level? Copy it out first
 			    reinterpret_cast<uint64_t *>(allocator.Allocate(PAC_APPROX_SWAR_ELEMENTS * sizeof(uint64_t)));
-			memcpy(ext, inline_level, PAC_APPROX_SWAR_ELEMENTS * sizeof(uint64_t));
-			levels[inline_level_idx] = ext;
+			memcpy(ext, u.inline_level, PAC_APPROX_SWAR_ELEMENTS * sizeof(uint64_t));
+			u.levels[inline_level_idx] = ext;
 			inline_level_idx = -1;
-			// Clear inline_level area so levels[9..24] read as nullptr
-			memset(inline_level, 0, PAC_APPROX_SWAR_ELEMENTS * sizeof(uint64_t));
+			// Clear u.inline_level area so u.levels[9..24] read as nullptr
+			memset(u.inline_level, 0, PAC_APPROX_SWAR_ELEMENTS * sizeof(uint64_t));
 		}
 		// ok, now  allocate
 		if (k < 9 && inline_level_idx < 0) { // Use inline if k < 9 and not yet used
-			levels[k] = inline_level;
-			memset(inline_level, 0, PAC_APPROX_SWAR_ELEMENTS * sizeof(uint64_t));
+			u.levels[k] = u.inline_level;
+			memset(u.inline_level, 0, PAC_APPROX_SWAR_ELEMENTS * sizeof(uint64_t));
 			inline_level_idx = static_cast<int8_t>(k);
 		} else {
-			levels[k] = reinterpret_cast<uint64_t *>(allocator.Allocate(PAC_APPROX_SWAR_ELEMENTS * sizeof(uint64_t)));
-			memset(levels[k], 0, PAC_APPROX_SWAR_ELEMENTS * sizeof(uint64_t));
+			u.levels[k] = reinterpret_cast<uint64_t *>(allocator.Allocate(PAC_APPROX_SWAR_ELEMENTS * sizeof(uint64_t)));
+			memset(u.levels[k], 0, PAC_APPROX_SWAR_ELEMENTS * sizeof(uint64_t));
 		}
 	}
 
@@ -279,19 +285,19 @@ struct PacSumIntState {
 	using CounterT = typename std::conditional<SIGNED, int16_t, uint16_t>::type;
 
 	void Cascade(int k, ArenaAllocator &allocator) {
-		if (k >= PAC_APPROX_NUM_LEVELS - 1 || !levels[k]) {
+		if (k >= PAC_APPROX_NUM_LEVELS - 1 || !u.levels[k]) {
 			return;
 		}
 		int32_t cascade_amount = exact_total[k] >> PAC_APPROX_LEVEL_SHIFT;
 		AddToExactTotal(k + 1, cascade_amount, allocator);
 
-		CounterT *src = reinterpret_cast<CounterT *__restrict__>(levels[k]);
-		CounterT *dst = reinterpret_cast<CounterT *__restrict__>(levels[k + 1]);
+		CounterT *src = reinterpret_cast<CounterT *__restrict__>(u.levels[k]);
+		CounterT *dst = reinterpret_cast<CounterT *__restrict__>(u.levels[k + 1]);
 
 		for (int j = 0; j < 64; j++) {
 			dst[j] += static_cast<CounterT>(src[j] >> PAC_APPROX_LEVEL_SHIFT);
 		}
-		memset(levels[k], 0, PAC_APPROX_SWAR_ELEMENTS * sizeof(uint64_t));
+		memset(u.levels[k], 0, PAC_APPROX_SWAR_ELEMENTS * sizeof(uint64_t));
 		exact_total[k] = 0;
 	}
 
@@ -312,7 +318,7 @@ struct PacSumIntState {
 			return;
 		}
 		double scale = static_cast<double>(1ULL << (PAC_APPROX_LEVEL_SHIFT * max_level_used));
-		const CounterT *counters = reinterpret_cast<const CounterT *>(levels[max_level_used]);
+		const CounterT *counters = reinterpret_cast<const CounterT *>(u.levels[max_level_used]);
 		for (int j = 0; j < 64; j++) {
 			int swar_idx = (j % 16) * 4 + (j / 16);
 			dst[j] = static_cast<double>(counters[swar_idx]) * scale;
@@ -326,18 +332,19 @@ struct PacSumIntState {
 		key_hash |= src->key_hash;
 		exact_count += src->exact_count;
 		for (int k = 0; k <= src->max_level_used; k++) {
-			if (!src->levels[k])
+			if (!src->u.levels[k])
 				continue;
-			if (k > max_level_used) {
-				// Can only steal src's pointer if it's arena-allocated (not inline storage).
-				// Inline storage is part of src's struct and becomes invalid when src is freed.
-				bool src_uses_inline = (k == src->inline_level_idx);
-				if (!src_uses_inline && (k < 9 || max_level_used >= 9)) {
-					levels[k] = src->levels[k];
-					exact_total[k] = src->exact_total[k];
-					max_level_used = k;
-					continue;
-				}
+			if (k > max_level_used) { // dst does not have this yet. Try to steal from src
+#ifdef PAC_NOBUFFERING
+				// can only steal src's pointer if it's arena-allocated (not inline storage).
+				if (k != src->inline_level_idx)         // without buffering, the SumState is not arena-allocated
+#endif
+					if (k < 9 || max_level_used >= 9) { // beware not to mess up dst inline storage
+						u.levels[k] = src->u.levels[k];
+						exact_total[k] = src->exact_total[k];
+						max_level_used = k;
+						continue;
+					}
 				EnsureLevelAllocated(allocator, k);
 			}
 			constexpr int32_t THRESHOLD = SIGNED ? 32767 : 65535;
@@ -348,8 +355,8 @@ struct PacSumIntState {
 			} else {
 				exact_total[k] = new_total;
 			}
-			uint64_t *src_level = src->levels[k];
-			uint64_t *dst_level = levels[k];
+			uint64_t *src_level = src->u.levels[k];
+			uint64_t *dst_level = u.levels[k];
 			for (int j = 0; j < PAC_APPROX_SWAR_ELEMENTS; j++) {
 				dst_level[j] += src_level[j];
 			}

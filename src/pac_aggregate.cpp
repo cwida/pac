@@ -95,13 +95,6 @@ double PacNoisySampleFrom64Counters(const double counters[64], double mi, std::m
                                     bool use_deterministic_noise, uint64_t is_null) {
 	D_ASSERT(~is_null != 0); // at least one bit must be valid
 
-	// mi=0 means no noise - return 2*counter[0] directly (no RNG consumption)
-	// Factor of 2 accounts for the missing random counter yJ term
-	// Note: pac_sum_approx/pac_avg_approx override this with mean-based logic
-	if (mi == 0.0) {
-		return 2.0 * counters[0];
-	}
-
 	// Compact the counters array, removing entries where is_null bit is set
 	vector<double> vals;
 	vals.reserve(64);
@@ -109,6 +102,13 @@ double PacNoisySampleFrom64Counters(const double counters[64], double mi, std::m
 		if (!((is_null >> i) & 1)) {
 			vals.push_back(counters[i]);
 		}
+	}
+
+	// mi=0 means no noise - return 2*counter[0] directly (no RNG consumption)
+	// Factor of 2 accounts for the missing random counter yJ term
+	// Note: pac_sum_approx/pac_avg_approx override this with mean-based logic
+	if (mi == 0.0) {
+		return 2.0 * vals[0];
 	}
 	int N = static_cast<int>(vals.size());
 
