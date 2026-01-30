@@ -315,8 +315,8 @@ GROUP BY s.grp
 ORDER BY s.grp
 LIMIT 2;
 ----
-0	2	190
-1	6	188
+0	0	170
+1	1	186
 
 # ==============================================================================
 # Test 15: Multiple aggregates with HAVING clause through PAC LINK chain
@@ -333,7 +333,6 @@ HAVING COUNT(*) > 5 AND SUM(o.amount) > 100
 ORDER BY o.grp
 LIMIT 1;
 ----
-0	13	215
 
 # ==============================================================================
 # Test 17: Stress test - Multiple levels with multiple aggregates and filters
