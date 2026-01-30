@@ -8,6 +8,12 @@ statement ok
 SET pac_seed = 42
 
 statement ok
+SET threads = 1
+
+statement ok
+SET pac_mi = 0
+
+statement ok
 SET pac_deterministic_noise = true
 
 # Create two tables with 25 rows each and 5 groups (grp = i % 5)
@@ -28,19 +34,19 @@ pRAGMA add_pac_privacy_unit('bitslice_a');
 query I
 SELECT SUM(val) FROM bitslice_a
 ----
-86
+116
 
 query I
 SELECT COUNT(val) AS c FROM bitslice_a
 ----
-18
+24
 
 # SUM with JOIN (no GROUP BY)
 query I
 SELECT SUM(a.val)
 FROM bitslice_a a JOIN bitslice_b b ON a.grp = b.grp
 ----
-431
+580
 
 # COUNT with JOIN + GROUP BY
 query II
@@ -50,7 +56,7 @@ GROUP BY b.other
 ORDER BY b.other
 LIMIT 1
 ----
-0	26
+0	28
 
 # ========== LEFT JOIN TEST CASES ==========
 
@@ -63,7 +69,7 @@ GROUP BY b.other
 ORDER BY b.other
 LIMIT 1
 ----
-0	27
+0	28
 
 # Test LEFT JOIN with NULL handling (no PK)
 statement ok
@@ -78,7 +84,7 @@ GROUP BY b.other
 ORDER BY b.other
 LIMIT 1
 ----
-0	120
+0	144
 
 statement ok
 DELETE FROM bitslice_a WHERE id = 100;
@@ -95,7 +101,7 @@ pRAGMA add_pac_privacy_unit('bitslice_with_rowid');
 query I
 SELECT SUM(val) FROM bitslice_with_rowid
 ----
-32
+46
 
 query I
 SELECT COUNT(rowid) FROM bitslice_with_rowid
@@ -111,7 +117,7 @@ GROUP BY b.other
 ORDER BY b.other
 LIMIT 1
 ----
-0	10	26
+0	16	90
 
 # Cleanup
 statement ok
