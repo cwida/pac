@@ -72,10 +72,10 @@ void RegisterPacSumCountersFunctions(ExtensionLoader &loader);
 //              for storing the first set of 16-bits counters (128 bytes) as long as only small (<9) levels are used.
 //
 // NEGATIVE VALUES: we now treat negative values differently: we negate them and put them in a second sum
-//             only at Finalize, the negative sum is subtracted from the positivie sum.
+//             only at Finalize, the negative sum is subtracted from the positive sum.
 //             This has two benefits: (i) it is numerically stabler (ii) unsigned sums have one more bit of precision
 //             The extra negative sum may duplicate the memory usage. But in many cases, signed database columns
-//             only contain positive values. And we allocate the negative sum lazily. So now we get unsigned perfomance
+//             only contain positive values. And we allocate the negative sum lazily. So now we get unsigned performance
 //             on signed data. This optimization can be disabled with PAC_SIGNEDSUM.
 //
 // 2) floating: PAC_SUM(key_hash, (FLOAT|DOUBLE)) -> DOUBLE
