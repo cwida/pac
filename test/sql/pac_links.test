@@ -172,8 +172,8 @@ LIMIT 1;
 # ==============================================================================
 
 # Verify EXPLAIN shows pac_sum in the optimized logical plan
-# statement ok
-# SET explain_output='optimized_only';
+statement ok
+SET explain_output='optimized_only';
 #
 # query II
 # EXPLAIN SELECT grp, SUM(quantity) FROM order_items
@@ -200,7 +200,7 @@ LIMIT 1;
 # Test 8: Complex - Multiple correlated subqueries with deep PAC LINK chains
 # ==============================================================================
 
-query III
+query II
 EXPLAIN SELECT
     o.grp,
     SUM(o.amount) as total_amount,
@@ -212,6 +212,7 @@ ORDER BY o.grp, o.id
 LIMIT 2;
 ----
 logical_opt	<REGEX>:.*pac_sum.*
+
 # 0	6	124
 # 0	12	148
 
