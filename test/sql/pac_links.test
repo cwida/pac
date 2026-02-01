@@ -201,7 +201,7 @@ LIMIT 1;
 # ==============================================================================
 
 query III
-SELECT
+EXPLAIN SELECT
     o.grp,
     SUM(o.amount) as total_amount,
     (SELECT SUM(oi.quantity) FROM order_items oi WHERE oi.order_id = o.id) as item_sum
@@ -211,8 +211,9 @@ HAVING SUM(o.amount) > 5
 ORDER BY o.grp, o.id
 LIMIT 2;
 ----
-0	6	124
-0	12	148
+logical_opt	<REGEX>:.*pac_sum.*
+# 0	6	124
+# 0	12	148
 
 # ==============================================================================
 # Test 9: Extreme - Aggregation on deepest table in chain (shipments)
