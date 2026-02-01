@@ -171,9 +171,20 @@ LIMIT 1;
 # Test 7: Subquery with PAC LINK chain
 # ==============================================================================
 
-# CI Debug: On AMD Ubuntu, this test gets 420 (exact) instead of 360 (PAC).
-# 420 = exact sum, 360 = PAC-transformed sum with noise.
-# If result is 420, PAC rewriter is not triggering (check PAC metadata setup).
+# CI Debug: On AMD64 Ubuntu, PAC compilation is not triggering at all.
+# The EXPLAIN should show 'pac_sum' but it shows regular 'sum'.
+# This suggests PAC metadata is not being loaded/registered properly.
+
+# Verify PAC metadata was registered for these tables
+query I
+SELECT COUNT(*) FROM pac_get_metadata('order_items');
+----
+1
+
+query I
+SELECT COUNT(*) FROM pac_get_metadata('orders');
+----
+1
 
 # Verify EXPLAIN shows pac_sum in the optimized logical plan
 statement ok
