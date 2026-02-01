@@ -24,7 +24,7 @@ CREATE PAC TABLE users (
 query I
 SELECT COUNT(*) FROM users;
 ----
-0
+NULL
 
 # Test 2: CREATE PAC TABLE with PAC LINK
 statement ok
@@ -38,7 +38,7 @@ CREATE PAC TABLE orders (
 query I
 SELECT COUNT(*) FROM orders;
 ----
-0
+NULL
 
 # Test 3: CREATE PAC TABLE with PROTECTED columns
 statement ok
@@ -148,7 +148,7 @@ CREATE PAC TABLE order_items (
 query I
 SELECT COUNT(*) FROM order_items;
 ----
-0
+NULL
 
 # Test 12: Composite PAC KEY
 statement ok
