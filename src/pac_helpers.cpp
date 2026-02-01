@@ -484,8 +484,8 @@ FindForeignKeyBetween(ClientContext &context, const vector<string> &privacy_unit
 			string tbl = tbl_name.substr(dot_pos + 1);
 			auto entry = catalog.GetEntry(context, CatalogType::TABLE_ENTRY, schema, tbl, OnEntryNotFound::RETURN_NULL);
 			if (entry)
-				return tbl;  // return unqualified table name
-			return tbl_name; // fallback to original
+				return StringUtil::Lower(tbl);  // return unqualified table name, normalized to lowercase
+			return StringUtil::Lower(tbl_name); // fallback to original, normalized
 		}
 		// Non-qualified: walk the search path; if found return unqualified table name
 		CatalogSearchPath path(context);
@@ -493,12 +493,12 @@ FindForeignKeyBetween(ClientContext &context, const vector<string> &privacy_unit
 			auto entry = catalog.GetEntry(context, CatalogType::TABLE_ENTRY, entry_path.schema, tbl_name,
 			                              OnEntryNotFound::RETURN_NULL);
 			if (entry)
-				return tbl_name; // already unqualified
+				return StringUtil::Lower(tbl_name); // already unqualified, normalized to lowercase
 		}
-		return tbl_name; // fallback
+		return StringUtil::Lower(tbl_name); // fallback, normalized to lowercase
 	};
 
-	// canonicalize privacy units (use unqualified names)
+	// canonicalize privacy units (use unqualified names, normalized to lowercase)
 	std::unordered_set<string> privacy_set;
 	for (auto &pu : privacy_units) {
 		privacy_set.insert(ResolveQualified(pu));
@@ -508,7 +508,7 @@ FindForeignKeyBetween(ClientContext &context, const vector<string> &privacy_unit
 
 	for (auto &start : table_names) {
 		string start_name = ResolveQualified(start);
-		// BFS queue of unqualified table names
+		// BFS queue of unqualified table names (all lowercase)
 		std::queue<string> q;
 		std::unordered_set<string> visited;
 		std::unordered_map<string, string> parent;
@@ -526,7 +526,7 @@ FindForeignKeyBetween(ClientContext &context, const vector<string> &privacy_unit
 			auto fks = FindForeignKeys(context, cur);
 			for (auto &p : fks) {
 				string neighbor = p.first; // referenced table name (unqualified now)
-				string neighbor_name = ResolveQualified(neighbor);
+				string neighbor_name = StringUtil::Lower(ResolveQualified(neighbor)); // normalize to lowercase
 				if (visited.find(neighbor_name) != visited.end()) {
 					continue;
 				}

@@ -171,21 +171,6 @@ LIMIT 1;
 # Test 7: Subquery with PAC LINK chain
 # ==============================================================================
 
-# CI Debug: On AMD64 Ubuntu, PAC compilation is not triggering at all.
-# The EXPLAIN should show 'pac_sum' but it shows regular 'sum'.
-# This suggests PAC metadata is not being loaded/registered properly.
-
-# Verify PAC metadata was registered for these tables
-query I
-SELECT COUNT(*) FROM pac_get_metadata('order_items');
-----
-1
-
-query I
-SELECT COUNT(*) FROM pac_get_metadata('orders');
-----
-1
-
 # Verify EXPLAIN shows pac_sum in the optimized logical plan
 statement ok
 SET explain_output='optimized_only';

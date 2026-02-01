@@ -136,7 +136,7 @@ unique_ptr<LogicalOperator> CreateLogicalJoin(const PACCompatibilityResult &chec
 				auto *left_pac_metadata = metadata_mgr.GetTableMetadata(left_table_name);
 				if (left_pac_metadata) {
 					for (auto &link : left_pac_metadata->links) {
-						if (link.referenced_table == right_table_name && link.local_columns == left_fk_cols &&
+						if (StringUtil::Lower(link.referenced_table) == StringUtil::Lower(right_table_name) && link.local_columns == left_fk_cols &&
 						    !link.referenced_columns.empty()) {
 							right_cols = link.referenced_columns;
 							break;
@@ -163,7 +163,7 @@ unique_ptr<LogicalOperator> CreateLogicalJoin(const PACCompatibilityResult &chec
 					auto *right_pac_metadata = metadata_mgr.GetTableMetadata(right_table_name);
 					if (right_pac_metadata) {
 						for (auto &link : right_pac_metadata->links) {
-							if (link.referenced_table == left_table_name && link.local_columns == right_fk_cols &&
+							if (StringUtil::Lower(link.referenced_table) == StringUtil::Lower(left_table_name) && link.local_columns == right_fk_cols &&
 							    !link.referenced_columns.empty()) {
 								left_cols = link.referenced_columns;
 								break;

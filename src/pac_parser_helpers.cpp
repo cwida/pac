@@ -406,7 +406,7 @@ bool PACParserExtension::ParseAlterTableAddPAC(const string &query, string &stri
 				for (const auto &existing_link : metadata.links) {
 					if (existing_link.local_columns == link.local_columns) {
 						// Check if it's exactly the same link (same target table and columns)
-						if (existing_link.referenced_table == link.referenced_table &&
+						if (StringUtil::Lower(existing_link.referenced_table) == StringUtil::Lower(link.referenced_table) &&
 						    existing_link.referenced_columns == link.referenced_columns) {
 							// This is the exact same link - skip it (idempotent)
 							continue;
@@ -421,7 +421,7 @@ bool PACParserExtension::ParseAlterTableAddPAC(const string &query, string &stri
 				bool link_exists = false;
 				for (const auto &existing_link : metadata.links) {
 					if (existing_link.local_columns == link.local_columns &&
-					    existing_link.referenced_table == link.referenced_table &&
+					    StringUtil::Lower(existing_link.referenced_table) == StringUtil::Lower(link.referenced_table) &&
 					    existing_link.referenced_columns == link.referenced_columns) {
 						link_exists = true;
 						break;

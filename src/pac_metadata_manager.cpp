@@ -42,25 +42,30 @@ PACMetadataManager &PACMetadataManager::Get() {
 /**
  * AddOrUpdateTable: Adds a new table's metadata or updates existing metadata
  *
- * @param table_name - Name of the table
+ * @param table_name - Name of the table (will be normalized to lowercase)
  * @param metadata - Metadata for the table
  *
  * This function is thread-safe and locks the metadata map during the operation.
+ * Table names are normalized to lowercase for case-insensitive lookups.
  */
 void PACMetadataManager::AddOrUpdateTable(const string &table_name, const PACTableMetadata &metadata) {
 	std::lock_guard<std::mutex> lock(metadata_mutex);
-	table_metadata[table_name] = metadata;
+	string normalized_name = StringUtil::Lower(table_name);
+	table_metadata[normalized_name] = metadata;
 }
 
 /**
  * GetTableMetadata: Retrieves metadata for a table
  *
- * @param table_name - Name of the table
+ * @param table_name - Name of the table (will be normalized to lowercase)
  * @return Pointer to the table metadata, or nullptr if not found
+ *
+ * Table names are normalized to lowercase for case-insensitive lookups.
  */
 const PACTableMetadata *PACMetadataManager::GetTableMetadata(const string &table_name) const {
 	std::lock_guard<std::mutex> lock(metadata_mutex);
-	auto it = table_metadata.find(table_name);
+	string normalized_name = StringUtil::Lower(table_name);
+	auto it = table_metadata.find(normalized_name);
 	if (it != table_metadata.end()) {
 		return &it->second;
 	}
@@ -70,12 +75,15 @@ const PACTableMetadata *PACMetadataManager::GetTableMetadata(const string &table
 /**
  * HasMetadata: Checks if metadata exists for a table
  *
- * @param table_name - Name of the table
+ * @param table_name - Name of the table (will be normalized to lowercase)
  * @return True if metadata exists, false otherwise
+ *
+ * Table names are normalized to lowercase for case-insensitive lookups.
  */
 bool PACMetadataManager::HasMetadata(const string &table_name) const {
 	std::lock_guard<std::mutex> lock(metadata_mutex);
-	return table_metadata.find(table_name) != table_metadata.end();
+	string normalized_name = StringUtil::Lower(table_name);
+	return table_metadata.find(normalized_name) != table_metadata.end();
 }
 
 /**
@@ -96,13 +104,15 @@ vector<string> PACMetadataManager::GetAllTableNames() const {
 /**
  * RemoveTable: Removes a table's metadata
  *
- * @param table_name - Name of the table
+ * @param table_name - Name of the table (will be normalized to lowercase)
  *
  * This function is thread-safe and locks the metadata map during the operation.
+ * Table names are normalized to lowercase for case-insensitive lookups.
  */
 void PACMetadataManager::RemoveTable(const string &table_name) {
 	std::lock_guard<std::mutex> lock(metadata_mutex);
-	table_metadata.erase(table_name);
+	string normalized_name = StringUtil::Lower(table_name);
+	table_metadata.erase(normalized_name);
 }
 
 /**

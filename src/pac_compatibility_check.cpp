@@ -392,7 +392,7 @@ static std::pair<string, string> GetProtectedColumnInfo(LogicalOperator &root, c
 	auto *table_metadata = metadata_mgr.GetTableMetadata(table_entry->name);
 	if (table_metadata && !table_metadata->protected_columns.empty()) {
 		for (auto &protected_col : table_metadata->protected_columns) {
-			if (col_name == protected_col) {
+			if (StringUtil::Lower(col_name) == StringUtil::Lower(protected_col)) {
 				return {table_entry->name, col_name};
 			}
 		}
@@ -552,7 +552,7 @@ static void CheckOutputColumnsNotProtected(LogicalOperator &current_op, LogicalO
 				for (const auto &col_idx : column_ids) {
 					string col_name = get.GetColumnName(col_idx);
 					for (auto &protected_col : table_metadata->protected_columns) {
-						if (col_name == protected_col) {
+						if (StringUtil::Lower(col_name) == StringUtil::Lower(protected_col)) {
 							throw InvalidInputException(
 							    "PAC rewrite: protected column '%s.%s' can only be accessed inside aggregate "
 							    "functions (e.g., SUM, COUNT, AVG, MIN, MAX)",
