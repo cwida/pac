@@ -7,6 +7,9 @@
 require pac
 
 statement ok
+PRAGMA clear_pac_metadata;
+
+statement ok
 SET pac_seed = 42
 
 statement ok

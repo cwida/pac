@@ -2,6 +2,11 @@
 # description: Test PAC categorical queries - outer queries that compare against inner PAC aggregates
 # group: [sql]
 
+require pac
+
+statement ok
+PRAGMA clear_pac_metadata;
+
 # Categorical queries are queries where:
 # - An inner subquery contains a PAC aggregate (e.g., pac_sum, pac_count)
 # - The outer query compares the aggregate result without its own aggregate
@@ -11,8 +16,6 @@
 # - Inner PAC aggregate returns all 64 counters (pac_*_counters variant)
 # - Comparison becomes pac_gt/pac_lt/etc. returning a 64-bit mask
 # - Final selection uses pac_select() for probabilistic filtering
-
-require pac
 
 # ============================================================================
 # Schema Setup - TPC-H style schema with customer as privacy unit

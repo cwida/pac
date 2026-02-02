@@ -4,6 +4,9 @@
 
 require pac
 
+statement ok
+PRAGMA clear_pac_metadata;
+
 # Set deterministic seed for cross-CPU reproducibility
 statement ok
 SET pac_seed = 42

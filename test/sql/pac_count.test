@@ -5,6 +5,9 @@
 require pac
 
 statement ok
+PRAGMA clear_pac_metadata;
+
+statement ok
 PRAGMA enable_verification
 
 # Set deterministic seed for cross-CPU reproducibility
