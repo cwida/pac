@@ -242,13 +242,20 @@ void PopulateGetsFromFKPath(const PACCompatibilityResult &check, vector<string> 
 	std::unordered_set<string> unique_target_pus;
 	std::unordered_set<string> all_tables_in_paths;
 
-	// Use the first FK path's start table as the start_table_out
-	auto first_it = check.fk_paths.begin();
-	start_table_out = first_it->first;
+	// Sort fk_paths keys for deterministic behavior across platforms
+	// (unordered_map iteration order is not guaranteed)
+	vector<string> sorted_fk_path_keys;
+	for (auto &kv : check.fk_paths) {
+		sorted_fk_path_keys.push_back(kv.first);
+	}
+	std::sort(sorted_fk_path_keys.begin(), sorted_fk_path_keys.end());
+
+	// Use the first (sorted) FK path's start table as the start_table_out
+	start_table_out = sorted_fk_path_keys[0];
 
 	// Iterate through all FK paths to collect all tables and target PUs
-	for (auto &kv : check.fk_paths) {
-		auto &fk_path = kv.second;
+	for (auto &key : sorted_fk_path_keys) {
+		auto &fk_path = check.fk_paths.at(key);
 		if (fk_path.empty()) {
 			continue;
 		}

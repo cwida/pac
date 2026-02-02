@@ -690,33 +690,173 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 					                        fk_table_with_pu_reference);
 				}
 
+				// IMPORTANT: Before adding the join chain to this connecting table,
+				// check if its columns are actually accessible from the plan root.
+				// If the connecting table is in the right branch of a SEMI/ANTI join,
+				// any columns we add via joins won't be able to propagate to the aggregate.
+				// In that case, we need to find an accessible table and add the FULL join chain there.
+				if (!AreTableColumnsAccessible(plan.get(), connecting_table_idx)) {
+#ifdef DEBUG
+					Printer::Print("ModifyPlanWithoutPU: Connecting table #" + std::to_string(connecting_table_idx) +
+					               " (" + connecting_table_name +
+					               ") columns are NOT accessible - looking for accessible alternative");
+#endif
+					// Find an accessible table in the FK path and add the full join chain from there
+					bool found_accessible_alternative = false;
+
+					// Search all scanned tables for one that is accessible and has an FK path to the PU
+					// IMPORTANT: We must check ALL FK paths, not just the single fk_path parameter,
+					// because accessible tables might have their own FK paths (e.g., shipments -> order_items -> orders
+					// -> users)
+					for (auto &scanned_table : check.scanned_non_pu_tables) {
+						// Skip the connecting table itself - we already know it's not accessible
+						if (scanned_table == connecting_table_name) {
+							continue;
+						}
+
+						// Check if this table has its own FK path to the PU
+						auto scanned_fk_path_it = check.fk_paths.find(scanned_table);
+						if (scanned_fk_path_it == check.fk_paths.end() || scanned_fk_path_it->second.empty()) {
+							continue; // This table has no FK path to PU
+						}
+						const vector<string> &scanned_fk_path = scanned_fk_path_it->second;
+
+						// Find all instances of this table and check if any is accessible
+						vector<unique_ptr<LogicalOperator> *> table_nodes;
+						FindAllNodesByTable(&plan, scanned_table, table_nodes);
+
+						for (auto *table_node : table_nodes) {
+							auto &table_get = table_node->get()->Cast<LogicalGet>();
+							// Skip if this is actually the same node as our connecting table
+							if (table_get.table_index == connecting_table_idx) {
+								continue;
+							}
+							if (AreTableColumnsAccessible(plan.get(), table_get.table_index)) {
+								// Found an accessible table with its own FK path
+								// Build the full join chain from this table to the FK table with PU reference
+								vector<string> full_tables_to_add;
+								bool found_start = false;
+								bool found_end = false;
+
+								// Use this table's own FK path to build the join chain
+								for (auto &path_table : scanned_fk_path) {
+									if (path_table == scanned_table) {
+										found_start = true;
+										continue; // Skip the starting table itself
+									}
+									if (found_start && !found_end) {
+										full_tables_to_add.push_back(path_table);
+										if (path_table == fk_table_with_pu_reference) {
+											found_end = true;
+										}
+									}
+								}
+
+								if (full_tables_to_add.empty())
+									continue;
+
+#ifdef DEBUG
+								Printer::Print("ModifyPlanWithoutPU: Found accessible table " + scanned_table + " #" +
+								               std::to_string(table_get.table_index) + " - adding full join chain:");
+								for (auto &t : full_tables_to_add) {
+									Printer::Print("  - " + t);
+								}
+#endif
+								// Create the full join chain
+								unique_ptr<LogicalOperator> current_node = (*table_node)->Copy(input.context);
+								auto local_idx = GetNextTableIndex(plan);
+								idx_t fk_table_idx = DConstants::INVALID_INDEX;
+
+								for (auto &table_to_add : full_tables_to_add) {
+									auto it = check.table_metadata.find(table_to_add);
+									if (it == check.table_metadata.end()) {
+										throw InternalException("PAC compiler: missing table metadata for table: " +
+										                        table_to_add);
+									}
+
+									auto table_get_new = CreateLogicalGet(input.context, plan, table_to_add, local_idx);
+
+									if (table_to_add == fk_table_with_pu_reference) {
+										fk_table_idx = local_idx;
+									}
+
+									auto join = CreateLogicalJoin(check, input.context, std::move(current_node),
+									                              std::move(table_get_new));
+									current_node = std::move(join);
+									local_idx++;
+								}
+
+								if (fk_table_idx != DConstants::INVALID_INDEX) {
+									connecting_table_to_orders_table[table_get.table_index] = fk_table_idx;
+								}
+
+								ReplaceNode(plan, *table_node, current_node);
+								found_accessible_alternative = true;
+								break;
+							}
+						}
+
+						if (found_accessible_alternative)
+							break;
+					}
+
+					if (found_accessible_alternative) {
+						continue; // Move to next connecting table instance
+					}
+
+#ifdef DEBUG
+					Printer::Print("ModifyPlanWithoutPU: No accessible alternative found - skipping this instance");
+#endif
+					continue;
+				}
+
 				// Create joins for all intermediate tables
-				unique_ptr<LogicalOperator> current_node = (*target_ref)->Copy(input.context);
+				// IMPORTANT: Use tables_to_add (NOT tables_to_join_for_instance) - this contains the path
+				// from connecting_table to fk_table_with_pu_reference that we computed above
+				unique_ptr<LogicalOperator> existing_node = (*target_ref)->Copy(input.context);
+
+				// Create fresh LogicalGet nodes for this instance
 				auto local_idx = GetNextTableIndex(plan);
-				idx_t fk_table_idx = DConstants::INVALID_INDEX;
+				std::unordered_map<string, unique_ptr<LogicalGet>> local_get_map;
 
-				for (auto &table_to_add : tables_to_add) {
-					auto it = check.table_metadata.find(table_to_add);
+				for (auto &table : tables_to_add) {
+					auto it = check.table_metadata.find(table);
 					if (it == check.table_metadata.end()) {
-						throw InternalException("PAC compiler: missing table metadata for table: " + table_to_add);
+						throw InternalException("PAC compiler: missing table metadata for table: " + table);
+					}
+					vector<string> pks = it->second.pks;
+					auto get = CreateLogicalGet(input.context, plan, table, local_idx);
+
+					// Remember the table index of the FK table for this instance
+					if (table == fk_table_with_pu_reference) {
+						connecting_table_to_orders_table[connecting_table_idx] = local_idx;
 					}
 
-					auto table_get = CreateLogicalGet(input.context, plan, table_to_add, local_idx);
-
-					if (table_to_add == fk_table_with_pu_reference) {
-						fk_table_idx = local_idx;
-					}
-
-					auto join = CreateLogicalJoin(check, input.context, std::move(current_node), std::move(table_get));
-					current_node = std::move(join);
+					local_get_map[table] = std::move(get);
 					local_idx++;
 				}
 
-				if (fk_table_idx != DConstants::INVALID_INDEX) {
-					connecting_table_to_orders_table[connecting_table_idx] = fk_table_idx;
+				unique_ptr<LogicalOperator> final_join;
+				for (size_t i = 0; i < tables_to_add.size(); ++i) {
+					auto &tbl_name = tables_to_add[i];
+					unique_ptr<LogicalGet> right_op = std::move(local_get_map[tbl_name]);
+					if (!right_op) {
+						throw InternalException("PAC compiler: failed to transfer ownership of LogicalGet for " +
+						                        tbl_name);
+					}
+
+					if (i == 0) {
+						auto join =
+						    CreateLogicalJoin(check, input.context, std::move(existing_node), std::move(right_op));
+						final_join = std::move(join);
+					} else {
+						auto join = CreateLogicalJoin(check, input.context, std::move(final_join), std::move(right_op));
+						final_join = std::move(join);
+					}
 				}
 
-				ReplaceNode(plan, *target_ref, current_node);
+				// Replace this instance with the join chain
+				ReplaceNode(plan, *target_ref, final_join);
 			}
 		}
 	}
