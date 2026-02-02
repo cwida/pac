@@ -1,6 +1,10 @@
 #ifndef PAC_AGGREGATE_HPP
 #define PAC_AGGREGATE_HPP
 
+// IMPORTANT: Standard library headers that use std:: types must be included
+// BEFORE duckdb.hpp on Windows MSVC to avoid namespace conflicts
+#include <random>
+
 #include "duckdb.hpp"
 
 // Enable AVX2 vectorization for functions that get this preappended (useful for x86, harmless for arm)
