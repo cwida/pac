@@ -20,6 +20,11 @@
 
 namespace duckdb {
 
+// Helper function to generate a random seed - implementation
+uint64_t PacGenerateRandomSeed() {
+	return std::random_device {}();
+}
+
 // ============================================================================
 // NOTE: pac_count implementation was moved to src/pac_count.cpp / src/include/pac_count.hpp.
 // The noisy-sample computation used by multiple aggregates is kept here and exported.

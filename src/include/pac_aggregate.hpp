@@ -2,9 +2,6 @@
 #define PAC_AGGREGATE_HPP
 
 #include "duckdb.hpp"
-
-// IMPORTANT: Standard library headers like <random> must be included AFTER
-// duckdb.hpp on Windows MSVC to avoid namespace conflicts
 #include <random>
 
 // Enable AVX2 vectorization for functions that get this preappended (useful for x86, harmless for arm)
@@ -72,6 +69,10 @@ static inline bool PacNoisedSelect(uint64_t key_hash, uint64_t rnd) {
 // Probability = popcount(key_hash) / 64. If mi==0, returns deterministic bit 0.
 bool PacNoiseInNull(uint64_t key_hash, double mi, std::mt19937_64 &gen);
 
+// Helper function to generate a random seed (defined in pac_aggregate.cpp)
+// This avoids including <random> in the header for std::random_device
+uint64_t PacGenerateRandomSeed();
+
 // Bind data used by PAC aggregates to carry the `mi` parameter.
 struct PacBindData : public FunctionData {
 	double mi;
@@ -79,10 +80,10 @@ struct PacBindData : public FunctionData {
 	uint64_t query_hash;          // XOR'd with key_hash to randomize and avoid hash(0)==0 issue
 	double scale_divisor;         // for DECIMAL pac_avg: divide result by 10^scale (default 1.0)
 	bool use_deterministic_noise; // if true, use platform-agnostic Box-Muller noise generation
-	explicit PacBindData(double mi_val, uint64_t seed_val = std::random_device {}(), double scale_div = 1.0,
-	                     bool use_det_noise = false)
-	    : mi(mi_val), seed(seed_val), query_hash(mi_val ? (seed_val ^ PAC_MAGIC_HASH) + seed_val : 0),
-	      scale_divisor(scale_div), use_deterministic_noise(use_det_noise) {
+	explicit PacBindData(double mi_val, uint64_t seed_val = 0, double scale_div = 1.0, bool use_det_noise = false)
+	    : mi(mi_val), seed(seed_val ? seed_val : PacGenerateRandomSeed()),
+	      query_hash(mi_val ? (seed ^ PAC_MAGIC_HASH) + seed : 0), scale_divisor(scale_div),
+	      use_deterministic_noise(use_det_noise) {
 	}
 	unique_ptr<FunctionData> Copy() const override {
 		auto copy = make_uniq<PacBindData>(mi, seed, scale_divisor, use_deterministic_noise);
