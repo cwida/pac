@@ -329,24 +329,29 @@ struct PacSumIntState {
 
 	// Combine another state into this one (used in Combine phase)
 	void CombineFrom(PacSumIntState *src, ArenaAllocator &allocator) {
-		if (!src)
+		if (!src) {
 			return;
+		}
 		key_hash |= src->key_hash;
 		exact_count += src->exact_count;
 		for (int k = 0; k <= src->max_level_used; k++) {
-			if (!src->u.levels[k])
+			if (!src->u.levels[k]) {
 				continue;
+			}
 			if (k > max_level_used) { // dst does not have this yet. Try to steal from src
 #ifdef PAC_NOBUFFERING
 				// can only steal src's pointer if it's arena-allocated (not inline storage).
-				if (k != src->inline_level_idx)         // without buffering, the SumState is not arena-allocated
+				if (k != src->inline_level_idx) {       // without buffering, the SumState is not arena-allocated
 #endif
 					if (k < 9 || max_level_used >= 9) { // beware not to mess up dst inline storage
 						u.levels[k] = src->u.levels[k];
 						exact_total[k] = src->exact_total[k];
-						max_level_used = k;
+						max_level_used = static_cast<int8_t>(k);
 						continue;
 					}
+#ifdef PAC_NOBUFFERING
+				}
+#endif
 				EnsureLevelAllocated(allocator, k);
 			}
 			constexpr int32_t THRESHOLD = SIGNED ? 32767 : 65535;

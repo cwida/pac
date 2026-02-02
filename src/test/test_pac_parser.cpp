@@ -4,8 +4,8 @@
 #include "include/test_pac_parser.hpp"
 #include "parser/pac_parser.hpp"
 #include <fstream>
-#include <sstream>
 #include <iostream>
+#include <sstream>
 
 namespace duckdb {
 
@@ -543,6 +543,12 @@ void TestPACParser::RunAllTests() {
 	          << "\n";
 	TestAlterTablePACParsing();
 	std::cout << "PASSED: TestAlterTablePACParsing"
+	          << "\n";
+
+	std::cout << "Running TestCompositeKeyParsing..."
+	          << "\n";
+	TestCompositeKeyParsing();
+	std::cout << "PASSED: TestCompositeKeyParsing"
 	          << "\n";
 
 	std::cout << "Running TestRegexPatterns..."

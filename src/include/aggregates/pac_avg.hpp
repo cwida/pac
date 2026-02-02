@@ -24,7 +24,7 @@ void PacAvgFinalizeUnsignedDouble(Vector &states, AggregateInputData &input, Vec
 // (These are defined in pac_sum.cpp but only needed by pac_avg.cpp)
 // ============================================================================
 
-// Size and initialize functions
+// Size and initialize functions - these still use old AggregateFunction signature
 idx_t PacSumIntStateSize(const AggregateFunction &);
 void PacSumIntInitialize(const AggregateFunction &, data_ptr_t state_p);
 idx_t PacSumDoubleStateSize(const AggregateFunction &);

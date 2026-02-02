@@ -27,7 +27,7 @@ struct AggregateHashResult {
 
 	AggregateHashResult() : success(false) {
 	}
-	AggregateHashResult(unique_ptr<Expression> expr) : hash_expr(std::move(expr)), success(true) {
+	explicit AggregateHashResult(unique_ptr<Expression> expr) : hash_expr(std::move(expr)), success(true) {
 	}
 };
 

@@ -111,7 +111,7 @@ struct PacBindData : public FunctionData {
 	bool use_deterministic_noise; // if true, use platform-agnostic Box-Muller noise generation
 	explicit PacBindData(double mi_val, uint64_t seed_val = 0, double scale_div = 1.0, bool use_det_noise = false)
 	    : mi(mi_val), seed(seed_val ? seed_val : PacGenerateRandomSeed()),
-	      query_hash(mi_val ? (seed ^ PAC_MAGIC_HASH) + seed : 0), scale_divisor(scale_div),
+	      query_hash((mi_val > 0.0) ? ((seed ^ PAC_MAGIC_HASH) + seed) : 0), scale_divisor(scale_div),
 	      use_deterministic_noise(use_det_noise) {
 	}
 	unique_ptr<FunctionData> Copy() const override {

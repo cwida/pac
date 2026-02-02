@@ -7,11 +7,10 @@
 #include "duckdb/function/aggregate_function.hpp"
 
 #include <random>
-#define _USE_MATH_DEFINES // for M_PI on MSVC
-#include <cmath>
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
+#include <cmath>
 #include <cstring>
 #include <type_traits>
 #include <limits>
@@ -89,7 +88,7 @@ static inline double DeterministicNormalSample(std::mt19937_64 &gen, bool &has_s
 // PacNoiseInNull: probabilistically returns true based on bit count in key_hash
 // Probability = popcount(key_hash) / 64. If mi==0, only return NULL when key_hash==0 (no values seen)
 bool PacNoiseInNull(uint64_t key_hash, double mi, std::mt19937_64 &gen) {
-	return mi ? PacNoisedSelect(~key_hash, gen()) : !key_hash;
+	return (mi > 0.0) ? PacNoisedSelect(~key_hash, gen()) : (key_hash == 0);
 }
 
 // Finalize: compute noisy sample from the 64 counters (works on double array)
