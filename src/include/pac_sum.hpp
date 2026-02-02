@@ -34,12 +34,12 @@ using int32_t = signed int;
 using uint64_t = unsigned long long;
 using int64_t = signed long long;
 #else
-// IMPORTANT: Standard library headers must be included BEFORE duckdb.hpp
-// on Windows MSVC to avoid namespace conflicts
-#include <atomic>
-
 #include "duckdb.hpp"
 #include "pac_aggregate.hpp"
+
+// IMPORTANT: Standard library headers must be included AFTER duckdb.hpp
+// on Windows MSVC to avoid namespace conflicts
+#include <atomic>
 
 namespace duckdb {
 void RegisterPacSumFunctions(ExtensionLoader &loader);
