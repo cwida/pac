@@ -890,6 +890,8 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 	for (auto &kv : scan_counts) {
 		scanned_tables.push_back(kv.first);
 	}
+	// Sort for deterministic behavior across platforms (unordered_map iteration order is not guaranteed)
+	std::sort(scanned_tables.begin(), scanned_tables.end());
 
 	// Record scanned tables that are NOT configured PAC tables
 	// This is needed for the compiler to correctly identify present tables
@@ -899,6 +901,8 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 			result.scanned_non_pu_tables.push_back(kv.first);
 		}
 	}
+	// Sort for deterministic behavior across platforms
+	std::sort(result.scanned_non_pu_tables.begin(), result.scanned_non_pu_tables.end());
 
 	// Discover tables with PROTECTED columns in PAC metadata
 	// These tables are treated as implicit privacy units
@@ -918,6 +922,9 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 			}
 		}
 	}
+	// Sort for deterministic behavior across platforms
+	std::sort(tables_with_protected_columns.begin(), tables_with_protected_columns.end());
+	std::sort(result.scanned_pu_tables.begin(), result.scanned_pu_tables.end());
 
 	// Also check tables reachable via PAC LINKs for protected columns
 	// (FindForeignKeys already includes PAC LINKs, but we need to find protected columns

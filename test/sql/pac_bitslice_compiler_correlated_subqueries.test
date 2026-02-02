@@ -404,5 +404,5 @@ ORDER BY
     numwait DESC,
     s_name;
 ----
-Supplier#001	1
-Supplier#002	1
+Supplier#001	2
+Supplier#002	0

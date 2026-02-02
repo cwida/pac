@@ -550,15 +550,112 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 				}
 
 				// IMPORTANT: If the connecting table IS the FK table with PU reference,
-				// we don't need to add any joins - just map it to itself for hash generation
+				// we need to check if its columns are actually accessible.
+				// If blocked by SEMI/ANTI join, we need to find an accessible table and add a join.
 				if (connecting_table_name == fk_table_with_pu_reference) {
-					connecting_table_to_orders_table[connecting_table_idx] = connecting_table_idx;
+					// Check if this table's columns are accessible
+					if (AreTableColumnsAccessible(plan.get(), connecting_table_idx)) {
+						// Columns are accessible - no join needed
+						connecting_table_to_orders_table[connecting_table_idx] = connecting_table_idx;
+#ifdef DEBUG
+						Printer::Print(
+						    "ModifyPlanWithoutPU: Connecting table #" + std::to_string(connecting_table_idx) + " (" +
+						    connecting_table_name +
+						    ") IS the FK table with PU reference and columns are accessible, no join needed");
+#endif
+						continue; // Skip to next connecting table instance
+					}
 #ifdef DEBUG
 					Printer::Print("ModifyPlanWithoutPU: Connecting table #" + std::to_string(connecting_table_idx) +
 					               " (" + connecting_table_name +
-					               ") IS the FK table with PU reference, no join needed");
+					               ") IS the FK table but columns are NOT accessible (blocked by SEMI/ANTI join)");
 #endif
-					continue; // Skip to next connecting table instance
+					// Columns are NOT accessible - we need to find an accessible table that has
+					// a PAC LINK (FK) to the blocked FK table, and add a join from there.
+					// Search in ALL scanned tables for tables that have FK to the blocked table.
+					bool found_accessible_alternative = false;
+
+					// Build list of all scanned tables to search
+					vector<string> all_scanned_tables;
+					all_scanned_tables.insert(all_scanned_tables.end(), gets_present.begin(), gets_present.end());
+					all_scanned_tables.insert(all_scanned_tables.end(), check.scanned_non_pu_tables.begin(),
+					                          check.scanned_non_pu_tables.end());
+
+					for (auto &present_table : all_scanned_tables) {
+						if (present_table == fk_table_with_pu_reference) {
+							continue; // Skip the blocked table itself
+						}
+
+						// Check if this present table has an FK to the blocked FK table
+						auto it = check.table_metadata.find(present_table);
+						if (it == check.table_metadata.end()) {
+							continue;
+						}
+
+						bool has_fk_to_blocked = false;
+						for (auto &fk : it->second.fks) {
+							if (fk.first == fk_table_with_pu_reference) {
+								has_fk_to_blocked = true;
+								break;
+							}
+						}
+
+						if (!has_fk_to_blocked) {
+							continue;
+						}
+
+						// Found a table with FK to the blocked table - check if it's accessible
+						vector<unique_ptr<LogicalOperator> *> table_nodes;
+						FindAllNodesByTable(&plan, present_table, table_nodes);
+
+						for (auto *table_node : table_nodes) {
+							auto &table_get = table_node->get()->Cast<LogicalGet>();
+							if (AreTableColumnsAccessible(plan.get(), table_get.table_index)) {
+								// Found an accessible table with FK to the blocked FK table
+								// Add a join from this table to the FK table
+#ifdef DEBUG
+								Printer::Print("ModifyPlanWithoutPU: Found accessible table " + present_table + " #" +
+								               std::to_string(table_get.table_index) +
+								               " with FK to blocked table - adding join to " +
+								               fk_table_with_pu_reference);
+#endif
+								unique_ptr<LogicalOperator> current_node = (*table_node)->Copy(input.context);
+								auto local_idx = GetNextTableIndex(plan);
+
+								// Create a join to the FK table
+								auto new_get =
+								    CreateLogicalGet(input.context, plan, fk_table_with_pu_reference, local_idx);
+								idx_t fk_table_idx = local_idx;
+
+								auto join = CreateLogicalJoin(check, input.context, std::move(current_node),
+								                              std::move(new_get));
+
+								// Map the accessible table to the new FK table instance
+								connecting_table_to_orders_table[table_get.table_index] = fk_table_idx;
+
+								ReplaceNode(plan, *table_node, join);
+								found_accessible_alternative = true;
+								break;
+							}
+						}
+
+						if (found_accessible_alternative) {
+							break;
+						}
+					}
+
+					if (found_accessible_alternative) {
+						continue; // Move to next connecting table instance
+					}
+
+					// If still not found, this connecting table instance simply cannot be used
+					// for PAC transformation - skip it (don't throw an exception, as other
+					// code paths may handle this aggregate differently)
+#ifdef DEBUG
+					Printer::Print("ModifyPlanWithoutPU: No accessible alternative found for blocked FK table " +
+					               fk_table_with_pu_reference + " - skipping this connecting table instance");
+#endif
+					continue;
 				}
 
 				// Build list of tables we need to join to reach fk_table_with_pu_reference
@@ -989,20 +1086,91 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 		if (candidate_conn_tables.size() == 1) {
 			orders_table_idx = connecting_table_to_orders_table[candidate_conn_tables[0]];
 		} else {
-			// Multiple candidates - we need to find which one is in the aggregate's direct path
-			// The heuristic: try each candidate's orders table and see which one can be propagated
-			// The correct one will be accessible without going through DELIM_GET
+			// Multiple candidates - collect all possible orders table indices
+			// We'll try each one and use the first where propagation actually succeeds
+			vector<idx_t> candidate_orders_tables;
 			for (auto conn_table_idx : candidate_conn_tables) {
 				idx_t ord_table_idx = connecting_table_to_orders_table[conn_table_idx];
-
-				// Try to find the orders table - if it's directly accessible (not through DELIM_GET),
-				// we can use it
-				// Simple heuristic: the orders table with the SMALLER index is likely the outer one
-				// For correlated subqueries, outer tables have smaller indices than inner tables
-				if (orders_table_idx == DConstants::INVALID_INDEX || ord_table_idx < orders_table_idx) {
-					orders_table_idx = ord_table_idx;
-				}
+				candidate_orders_tables.push_back(ord_table_idx);
 			}
+			// Sort by table index (smaller indices first - outer query tables)
+			std::sort(candidate_orders_tables.begin(), candidate_orders_tables.end());
+			// Remove duplicates
+			candidate_orders_tables.erase(std::unique(candidate_orders_tables.begin(), candidate_orders_tables.end()),
+			                              candidate_orders_tables.end());
+
+#ifdef DEBUG
+			Printer::Print("ModifyPlanWithoutPU: Trying " + std::to_string(candidate_orders_tables.size()) +
+			               " candidate orders tables for aggregate");
+#endif
+
+			// Try each candidate until propagation succeeds
+			bool found_working_table = false;
+			for (auto test_ord_idx : candidate_orders_tables) {
+				vector<unique_ptr<LogicalOperator> *> test_nodes;
+				FindAllNodesByTableIndex(&plan, test_ord_idx, test_nodes);
+				if (test_nodes.empty())
+					continue;
+
+				auto &test_get = test_nodes[0]->get()->Cast<LogicalGet>();
+
+				// Get FK columns for this table
+				vector<string> test_fk_cols;
+				auto test_table_ptr = test_get.GetTable();
+				if (test_table_ptr) {
+					auto it = check.table_metadata.find(test_table_ptr->name);
+					if (it != check.table_metadata.end()) {
+						for (auto &fk : it->second.fks) {
+							for (auto &pu : privacy_units) {
+								if (fk.first == pu) {
+									test_fk_cols = fk.second;
+									break;
+								}
+							}
+							if (!test_fk_cols.empty())
+								break;
+						}
+					}
+				}
+				if (test_fk_cols.empty())
+					continue;
+
+				// Ensure FK columns are projected
+				bool proj_ok = true;
+				for (auto &fk_col : test_fk_cols) {
+					if (EnsureProjectedColumn(test_get, fk_col) == DConstants::INVALID_INDEX) {
+						proj_ok = false;
+						break;
+					}
+				}
+				if (!proj_ok)
+					continue;
+
+				// Try to propagate - this will return nullptr if blocked by DELIM_JOIN etc.
+				auto test_hash = BuildXorHashFromPKs(input, test_get, test_fk_cols);
+				auto test_result = PropagatePKThroughProjections(*plan, test_get, std::move(test_hash), target_agg);
+
+				if (test_result) {
+#ifdef DEBUG
+					Printer::Print("ModifyPlanWithoutPU: Propagation succeeded for orders table #" +
+					               std::to_string(test_ord_idx));
+#endif
+					ModifyAggregatesWithPacFunctions(input, target_agg, test_result);
+					found_working_table = true;
+					break;
+				}
+#ifdef DEBUG
+				Printer::Print("ModifyPlanWithoutPU: Propagation failed for orders table #" +
+				               std::to_string(test_ord_idx) + ", trying next candidate");
+#endif
+			}
+
+			if (found_working_table) {
+				continue; // Move to next aggregate - this one is handled
+			}
+
+			// No candidate worked - use first one (will likely fail in the code below)
+			orders_table_idx = candidate_orders_tables.empty() ? DConstants::INVALID_INDEX : candidate_orders_tables[0];
 		}
 
 		if (orders_table_idx == DConstants::INVALID_INDEX) {
@@ -1226,7 +1394,51 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 		auto base_hash_expr = BuildXorHashFromPKs(input, orders_get, fk_cols);
 		auto hash_input_expr = PropagatePKThroughProjections(*plan, orders_get, std::move(base_hash_expr), target_agg);
 
-		// Skip if no direct path found - this can happen for nested aggregates that operate
+		// If propagation failed (e.g., blocked by DELIM_JOIN with RIGHT_SEMI), try AddColumnToDelimJoin
+		// This handles cases where the FK table is accessible but its columns can't be propagated
+		// directly through the operator chain due to semi/anti join semantics
+		if (!hash_input_expr) {
+#ifdef DEBUG
+			Printer::Print("ModifyPlanWithoutPU: Direct propagation failed for orders table #" +
+			               std::to_string(orders_table_idx) + ", trying AddColumnToDelimJoin fallback");
+#endif
+			// Try to add FK columns via DELIM_JOIN
+			vector<DelimColumnResult> delim_results;
+			bool delim_fallback_ok = true;
+			for (auto &fk_col : fk_cols) {
+				auto delim_result = AddColumnToDelimJoin(plan, orders_get, fk_col, target_agg);
+				if (!delim_result.IsValid()) {
+					delim_fallback_ok = false;
+					break;
+				}
+				delim_results.push_back(delim_result);
+			}
+
+			if (delim_fallback_ok && !delim_results.empty()) {
+				// Successfully added FK columns via DELIM_JOIN - build hash from DELIM_GET bindings
+				if (delim_results.size() == 1) {
+					auto col_ref = make_uniq<BoundColumnRefExpression>(delim_results[0].type, delim_results[0].binding);
+					hash_input_expr = input.optimizer.BindScalarFunction("hash", std::move(col_ref));
+				} else {
+					auto first_col =
+					    make_uniq<BoundColumnRefExpression>(delim_results[0].type, delim_results[0].binding);
+					unique_ptr<Expression> xor_expr = std::move(first_col);
+
+					for (size_t i = 1; i < delim_results.size(); i++) {
+						auto next_col =
+						    make_uniq<BoundColumnRefExpression>(delim_results[i].type, delim_results[i].binding);
+						xor_expr = input.optimizer.BindScalarFunction("xor", std::move(xor_expr), std::move(next_col));
+					}
+					hash_input_expr = input.optimizer.BindScalarFunction("hash", std::move(xor_expr));
+				}
+#ifdef DEBUG
+				Printer::Print("ModifyPlanWithoutPU: AddColumnToDelimJoin fallback succeeded for orders table #" +
+				               std::to_string(orders_table_idx));
+#endif
+			}
+		}
+
+		// Skip if still no hash expression - this can happen for nested aggregates that operate
 		// on already-aggregated data (e.g., avg(total) over a GROUP BY sum). These aggregates
 		// don't need PAC transformation because they consume already-protected data.
 		if (!hash_input_expr) {

@@ -454,9 +454,41 @@ bool AreTableColumnsAccessible(LogicalOperator *from_op, idx_t table_index) {
 			}
 		}
 
-		// For DELIM_JOIN, the right side (subquery) columns are also not directly accessible
-		// to operators above the join (they're correlated)
+		// For DELIM_JOIN, accessibility depends on the join type:
+		// - RIGHT_SEMI/RIGHT_ANTI: only RIGHT child columns are accessible (left is filtered out)
+		// - SEMI/ANTI: only LEFT child columns are accessible (right is filtered out)
+		// - INNER/LEFT/etc: left child columns are accessible (right side is correlated subquery)
 		if (op->type == LogicalOperatorType::LOGICAL_DELIM_JOIN) {
+			auto &delim_join = op->Cast<LogicalJoin>();
+
+			// For RIGHT_SEMI/RIGHT_ANTI, only right child columns flow through
+			if (delim_join.join_type == JoinType::RIGHT_SEMI || delim_join.join_type == JoinType::RIGHT_ANTI) {
+				// Table in left child is NOT accessible (filtered out by RIGHT_SEMI/RIGHT_ANTI)
+				if (op->children.size() >= 1 && has_table_in_subtree(op->children[0].get())) {
+					return false;
+				}
+				// Check right child (accessible side for RIGHT_SEMI/RIGHT_ANTI)
+				if (op->children.size() >= 2 && check_accessible(op->children[1].get())) {
+					return true;
+				}
+				return false;
+			}
+
+			// For SEMI/ANTI, only left child columns flow through
+			if (delim_join.join_type == JoinType::SEMI || delim_join.join_type == JoinType::ANTI) {
+				// Table in right child is NOT accessible
+				if (op->children.size() >= 2 && has_table_in_subtree(op->children[1].get())) {
+					return false;
+				}
+				// Check left child (accessible side for SEMI/ANTI)
+				if (op->children.size() >= 1 && check_accessible(op->children[0].get())) {
+					return true;
+				}
+				return false;
+			}
+
+			// For other join types (INNER, LEFT, etc.), right side is correlated subquery
+			// and left child columns are accessible
 			if (op->children.size() >= 2 && has_table_in_subtree(op->children[1].get())) {
 				// Table is in the subquery branch - columns NOT accessible from above
 				return false;

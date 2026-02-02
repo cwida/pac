@@ -10,7 +10,7 @@
 #include "duckdb/planner/operator/logical_join.hpp"
 #include "duckdb/planner/operator/logical_filter.hpp"
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
-#include "duckdb/planner/operator/logical_filter.hpp"
+#include "duckdb/planner/operator/logical_delim_get.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
 
@@ -231,15 +231,19 @@ unique_ptr<Expression> PropagatePKThroughProjections(LogicalOperator &plan, Logi
 		} else if (IsJoinWithProjectionMap(op->type)) {
 			// Handle join operators - they may have projection maps that filter columns
 			auto &join = op->Cast<LogicalJoin>();
+			bool is_delim_join = (op->type == LogicalOperatorType::LOGICAL_DELIM_JOIN);
 #ifdef DEBUG
 			Printer::Print("PropagatePKThroughProjections: Processing join (type=" +
-			               std::to_string(static_cast<int>(join.join_type)) +
-			               ", child_idx=" + std::to_string(child_idx) + ")");
+			               std::to_string(static_cast<int>(join.join_type)) + ", child_idx=" +
+			               std::to_string(child_idx) + ", op_type=" + std::to_string(static_cast<int>(op->type)) +
+			               ", is_delim_join=" + std::to_string(is_delim_join) + ")");
 #endif
 
 			// Check for incompatible join types:
 			// - RIGHT_SEMI and RIGHT_ANTI joins only output columns from the RIGHT child
 			// - If our column is on the LEFT side (child_idx=0), we cannot propagate through
+			// NOTE: This applies to DELIM_JOIN too! DELIM_JOIN with RIGHT_SEMI still only
+			// outputs columns from the right child (the subquery side)
 			if ((join.join_type == JoinType::RIGHT_SEMI || join.join_type == JoinType::RIGHT_ANTI) && child_idx == 0) {
 #ifdef DEBUG
 				Printer::Print("PropagatePKThroughProjections: Cannot propagate through RIGHT_SEMI/RIGHT_ANTI join "
@@ -255,6 +259,87 @@ unique_ptr<Expression> PropagatePKThroughProjections(LogicalOperator &plan, Logi
 				               "from right child - returning nullptr");
 #endif
 				return nullptr;
+			}
+
+			// Special handling for DELIM_JOIN from left child with INNER/LEFT join type
+			// DELIM_JOIN passes through all columns from the left child directly to its output
+			// (The duplicate_eliminated_columns is for the RIGHT/subquery side to access outer columns via DELIM_GET)
+			// So for left child propagation, we need to ensure the columns are in the left_projection_map
+			if (is_delim_join && child_idx == 0) {
+				// For DELIM_JOIN with INNER/LEFT join types, left child columns pass through
+				// But we may need to add them to the left_projection_map if not already present
+
+				// First, ensure columns are in the left_projection_map
+				for (auto &kv : binding_map) {
+					auto old_binding = kv.second;
+
+					if (!join.left_projection_map.empty()) {
+						// Check if this column is already in the projection map
+						bool found = false;
+						for (auto &proj_idx : join.left_projection_map) {
+							if (proj_idx == old_binding.column_index) {
+								found = true;
+								break;
+							}
+						}
+						if (!found) {
+							// Add to projection map
+							join.left_projection_map.push_back(old_binding.column_index);
+#ifdef DEBUG
+							Printer::Print("PropagatePKThroughProjections: Added column " +
+							               std::to_string(old_binding.column_index) +
+							               " to DELIM_JOIN left_projection_map");
+#endif
+						}
+					}
+					// If left_projection_map is empty, all columns pass through by default
+				}
+
+				// Re-resolve types to pick up any changes
+				join.ResolveOperatorTypes();
+
+				// Verify bindings are in the output
+				auto join_bindings = join.GetColumnBindings();
+				std::unordered_map<uint64_t, ColumnBinding> new_binding_map;
+
+				for (auto &kv : binding_map) {
+					auto old_binding = kv.second;
+					auto original_key = kv.first;
+
+					// Find this binding in the join's output bindings
+					bool found = false;
+					for (idx_t i = 0; i < join_bindings.size(); i++) {
+						if (join_bindings[i].table_index == old_binding.table_index &&
+						    join_bindings[i].column_index == old_binding.column_index) {
+							new_binding_map[original_key] = old_binding;
+							found = true;
+#ifdef DEBUG
+							Printer::Print("PropagatePKThroughProjections: DELIM_JOIN preserves left child binding [" +
+							               std::to_string(old_binding.table_index) + "." +
+							               std::to_string(old_binding.column_index) + "]");
+#endif
+							break;
+						}
+					}
+
+					if (!found) {
+						// Binding still not found - this can happen if the DELIM_JOIN's output
+						// doesn't include this column even after adding to projection map.
+						// This might occur with certain join types or plan structures.
+						// Keep the old binding and continue - the column should be accessible
+						// from the child operator.
+#ifdef DEBUG
+						Printer::Print("PropagatePKThroughProjections: DELIM_JOIN left child binding [" +
+						               std::to_string(old_binding.table_index) + "." +
+						               std::to_string(old_binding.column_index) +
+						               "] not found in output after adding to projection map - keeping old binding");
+#endif
+						new_binding_map[original_key] = old_binding;
+					}
+				}
+
+				binding_map = std::move(new_binding_map);
+				continue; // Skip the normal join handling below
 			}
 
 			// Determine which projection map applies based on which child the table is in
