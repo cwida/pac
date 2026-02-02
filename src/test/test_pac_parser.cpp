@@ -2,7 +2,7 @@
 // Test PAC Parser - JSON serialization and metadata management
 //
 #include "include/test_pac_parser.hpp"
-#include "../include/pac_parser.hpp"
+#include "parser/pac_parser.hpp"
 #include <fstream>
 #include <sstream>
 #include <iostream>

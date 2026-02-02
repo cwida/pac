@@ -4,7 +4,7 @@
 
 #include "duckdb.hpp"
 #include "duckdb/main/connection.hpp"
-#include "../include/pac_helpers.hpp"
+#include "../include/utils/pac_helpers.hpp"
 #include "include/test_schema_metadata.hpp"
 
 namespace duckdb {

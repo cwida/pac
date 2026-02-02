@@ -16,7 +16,6 @@
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "metadata/pac_compatibility_check.hpp"
-
 namespace duckdb {
 
 // Find the table in the FK path that has a direct FK reference to any of the privacy units
