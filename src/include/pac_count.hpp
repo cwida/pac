@@ -177,7 +177,7 @@ struct PacCountStateWrapper {
 	}
 
 	// Flush buffered hashes into dst state
-	AUTOVECTORIZE inline void FlushBufferInternal(PacCountState &dst, uint64_t *__restrict__ hash_buf, uint64_t cnt) {
+	AUTOVECTORIZE inline void FlushBufferInternal(PacCountState &dst, uint64_t *PAC_RESTRICT hash_buf, uint64_t cnt) {
 		if (cnt + dst.exact_total8 >= 255) {
 			dst.FlushLevel(); // make room
 		}

@@ -112,7 +112,7 @@ template <typename ACCUM_T, typename VALUE_T>
 AUTOVECTORIZE static inline
 #endif
     void
-    AddToTotalsSimple(ACCUM_T *__restrict__ total, VALUE_T value, uint64_t key_hash) {
+    AddToTotalsSimple(ACCUM_T *PAC_RESTRICT total, VALUE_T value, uint64_t key_hash) {
 	ACCUM_T v = static_cast<ACCUM_T>(value);
 	for (int j = 0; j < 64; j++) {
 #ifdef PAC_NOSIMD
@@ -146,7 +146,7 @@ template <typename SIGNED_T, typename UNSIGNED_T, uint64_t MASK, typename VALUE_
 AUTOVECTORIZE static inline
 #endif
     void
-    AddToTotalsSWAR(uint64_t *__restrict__ total, VALUE_T value, uint64_t key_hash) {
+    AddToTotalsSWAR(uint64_t *PAC_RESTRICT total, VALUE_T value, uint64_t key_hash) {
 	constexpr int BITS = sizeof(SIGNED_T) * 8;
 	// Cast to unsigned type to avoid sign extension, then broadcast to all lanes
 	uint64_t val_packed = static_cast<UNSIGNED_T>(static_cast<SIGNED_T>(value)) * MASK;
@@ -228,7 +228,7 @@ struct PacSumIntState {
 	// Get the level index for a value based on its highest set bit
 	// For 16-bit counters with 4-bit shift: shifted_val = value >> (level * 4) should fit in ~12 bits
 	static inline int GetLevel(int64_t abs_val) {
-		int level = ((63 - (__builtin_clzll(1 | abs_val))) - 8) >> 2;
+		int level = ((63 - pac_clzll(1 | abs_val)) - 8) >> 2;
 		return (abs_val < 4096) ? 0 : level;
 	}
 
@@ -293,8 +293,8 @@ struct PacSumIntState {
 		int32_t cascade_amount = exact_total[k] >> PAC_APPROX_LEVEL_SHIFT;
 		AddToExactTotal(k + 1, cascade_amount, allocator);
 
-		CounterT *src = reinterpret_cast<CounterT *__restrict__>(u.levels[k]);
-		CounterT *dst = reinterpret_cast<CounterT *__restrict__>(u.levels[k + 1]);
+		CounterT *src = reinterpret_cast<CounterT * PAC_RESTRICT>(u.levels[k]);
+		CounterT *dst = reinterpret_cast<CounterT * PAC_RESTRICT>(u.levels[k + 1]);
 
 		for (int j = 0; j < 64; j++) {
 			dst[j] += static_cast<CounterT>(src[j] >> PAC_APPROX_LEVEL_SHIFT);

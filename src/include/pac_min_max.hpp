@@ -372,8 +372,8 @@ struct PacMinMaxStateWrapper {
 		return s;
 	}
 
-	AUTOVECTORIZE static inline void FlushBufferInternal(State &dst, const T *__restrict__ vals,
-	                                                     const uint64_t *__restrict__ hashes, uint64_t cnt) {
+	AUTOVECTORIZE static inline void FlushBufferInternal(State &dst, const T *PAC_RESTRICT vals,
+	                                                     const uint64_t *PAC_RESTRICT hashes, uint64_t cnt) {
 		for (uint64_t i = 0; i < cnt; i++) {
 			dst.Update(hashes[i], vals[i]);
 		}

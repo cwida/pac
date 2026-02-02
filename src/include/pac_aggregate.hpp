@@ -4,6 +4,13 @@
 #include "duckdb.hpp"
 #include "duckdb/common/random_engine.hpp"
 
+// Cross-platform restrict keyword: MSVC uses __restrict, GCC/Clang use __restrict__
+#if defined(_MSC_VER)
+#define PAC_RESTRICT __restrict
+#else
+#define PAC_RESTRICT __restrict__
+#endif
+
 // Enable AVX2 vectorization for functions that get this preappended (useful for x86, harmless for arm)
 // Only use __attribute__ on x86 with GCC/Clang - MSVC doesn't support this syntax
 #if (defined(__x86_64__) || defined(__i386__)) && (defined(__GNUC__) || defined(__clang__)) && !defined(_MSC_VER)
@@ -28,10 +35,32 @@ static inline int pac_popcount64(uint64_t x) {
 	return static_cast<int>(__popcnt(static_cast<uint32_t>(x)) + __popcnt(static_cast<uint32_t>(x >> 32)));
 #endif
 }
+// Cross-platform count leading zeros for 64-bit integers
+static inline int pac_clzll(uint64_t x) {
+	unsigned long index;
+#if defined(_M_X64) || defined(_M_AMD64)
+	if (_BitScanReverse64(&index, x)) {
+		return 63 - static_cast<int>(index);
+	}
+#else
+	// Fallback for 32-bit MSVC
+	if (_BitScanReverse(&index, static_cast<uint32_t>(x >> 32))) {
+		return 31 - static_cast<int>(index);
+	}
+	if (_BitScanReverse(&index, static_cast<uint32_t>(x))) {
+		return 63 - static_cast<int>(index);
+	}
+#endif
+	return 64; // x == 0
+}
 #else
 // GCC/Clang have __builtin_popcountll
 static inline int pac_popcount64(uint64_t x) {
 	return __builtin_popcountll(x);
+}
+// GCC/Clang have __builtin_clzll
+static inline int pac_clzll(uint64_t x) {
+	return x ? __builtin_clzll(x) : 64;
 }
 #endif
 
