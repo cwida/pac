@@ -2,7 +2,7 @@
 #define PAC_AGGREGATE_HPP
 
 #include "duckdb.hpp"
-#include <random>
+#include "duckdb/common/random_engine.hpp"
 
 // Enable AVX2 vectorization for functions that get this preappended (useful for x86, harmless for arm)
 // Only use __attribute__ on x86 with GCC/Clang - MSVC doesn't support this syntax
