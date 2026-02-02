@@ -5,6 +5,9 @@
 require pac
 
 statement ok
+PRAGMA clear_pac_metadata;
+
+statement ok
 PRAGMA remove_pac_privacy_unit('t1');
 
 statement ok

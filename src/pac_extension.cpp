@@ -38,9 +38,33 @@ static void LoadPACMetadataPragma(ClientContext &context, const FunctionParamete
 	PACMetadataManager::Get().LoadFromFile(filepath);
 }
 
-// Pragma function to clear all PAC metadata
+// Pragma function to clear all PAC metadata (in-memory and file)
 static void ClearPACMetadataPragma(ClientContext &context, const FunctionParameters &parameters) {
+	// Clear in-memory metadata
 	PACMetadataManager::Get().Clear();
+
+	// Try to delete the metadata file if it exists
+	try {
+		string filepath = PACMetadataManager::GetMetadataFilePath(context);
+		if (!filepath.empty()) {
+			// Check if file exists
+			std::ifstream file_check(filepath);
+			if (file_check.good()) {
+				file_check.close();
+				// File exists, try to delete it
+				if (std::remove(filepath.c_str()) != 0) {
+					throw IOException("Failed to delete PAC metadata file: " + filepath);
+				}
+			}
+			// If file doesn't exist, do nothing (no error)
+		}
+	} catch (const IOException &e) {
+		// Re-throw IO exceptions (file deletion failures)
+		throw;
+	} catch (...) {
+		// Ignore other exceptions (e.g., can't determine file path for in-memory DB)
+		// This is fine - just clear in-memory metadata
+	}
 }
 
 static void LoadInternal(ExtensionLoader &loader) {

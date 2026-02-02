@@ -5,6 +5,9 @@
 require pac
 
 statement ok
+PRAGMA clear_pac_metadata;
+
+statement ok
 SET pac_deterministic_noise = true;
 
 statement ok
