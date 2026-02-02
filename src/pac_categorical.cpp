@@ -17,7 +17,22 @@
 #include <random>
 #include <cmath>
 
+#ifdef _MSC_VER
+#include <intrin.h>
+#endif
+
 namespace duckdb {
+
+// ============================================================================
+// Cross-platform popcount helper
+// ============================================================================
+static inline int Popcount64(uint64_t x) {
+#ifdef _MSC_VER
+	return static_cast<int>(__popcnt64(x));
+#else
+	return __builtin_popcountll(x);
+#endif
+}
 
 // ============================================================================
 // Helper: Proportional noised select
@@ -28,7 +43,7 @@ static inline bool PacNoisedSelectWithCount(uint64_t mask, uint64_t rnd, idx_t c
 	if (count == 0) {
 		return false;
 	}
-	int popcount = __builtin_popcountll(mask);
+	int popcount = Popcount64(mask);
 	// Probability = popcount / count
 	// True if random value in [0, count) < popcount
 	return (rnd % count) < static_cast<uint64_t>(popcount);
@@ -101,7 +116,7 @@ static inline uint64_t BoolListToMask(UnifiedVectorFormat &list_data, UnifiedVec
 // When mi=0: deterministic majority voting (popcount >= 32)
 static inline bool FilterFromMask(uint64_t mask, double mi, std::mt19937_64 &gen) {
 	if (mi == 0.0) {
-		return __builtin_popcountll(mask) >= 32;
+		return Popcount64(mask) >= 32;
 	} else {
 		return PacNoisedSelect(mask, gen());
 	}
