@@ -8,12 +8,15 @@
 // Created by refactoring pac_parser.cpp on 1/22/26.
 //
 
+// IMPORTANT: <regex> must be included BEFORE duckdb headers on Windows MSVC
+// because DuckDB defines its own std namespace that conflicts with <regex>
+#include <regex>
+#include <fstream>
+#include <sstream>
+
 #include "include/pac_parser.hpp"
 #include "include/pac_metadata_manager.hpp"
 #include "include/pac_metadata_serialization.hpp"
-#include <fstream>
-#include <sstream>
-#include <regex>
 
 namespace duckdb {
 

@@ -9,13 +9,16 @@
 // Created by refactoring pac_parser.cpp on 1/22/26.
 //
 
+// IMPORTANT: <regex> must be included BEFORE duckdb headers on Windows MSVC
+// because DuckDB defines its own std namespace that conflicts with <regex>
+#include <regex>
+
 #include "include/pac_parser.hpp"
 #include "include/pac_parser_helpers.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/main/database_manager.hpp"
-#include <regex>
 
 namespace duckdb {
 
