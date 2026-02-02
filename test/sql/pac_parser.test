@@ -38,7 +38,7 @@ CREATE PAC TABLE orders (
 query I
 SELECT COUNT(*) FROM orders;
 ----
-NULL
+0
 
 # Test 3: CREATE PAC TABLE with PROTECTED columns
 statement ok
@@ -53,7 +53,7 @@ CREATE PAC TABLE transactions (
 query I
 SELECT COUNT(*) FROM transactions;
 ----
-NULL
+0
 
 # Test 4: CREATE PAC TABLE with multiple PAC clauses
 statement ok
