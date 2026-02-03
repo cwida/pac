@@ -258,11 +258,10 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 						break;
 					}
 				}
-				if (!fk_table_with_pu_reference.empty())
+				if (fk_table_with_pu_reference.empty()) {
 					break;
+				}
 			}
-			if (!fk_table_with_pu_reference.empty())
-				break;
 		}
 	}
 
@@ -388,11 +387,9 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 				}
 
 				if (i == 0) {
-					auto join = CreateLogicalJoin(check, input.context, std::move(existing_node), std::move(right_op));
-					final_join = std::move(join);
+					final_join = CreateLogicalJoin(check, input.context, std::move(existing_node), std::move(right_op));
 				} else {
-					auto join = CreateLogicalJoin(check, input.context, std::move(final_join), std::move(right_op));
-					final_join = std::move(join);
+					final_join = CreateLogicalJoin(check, input.context, std::move(final_join), std::move(right_op));
 				}
 			}
 
@@ -551,7 +548,7 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 
 				// IMPORTANT: If the connecting table IS the FK table with PU reference,
 				// we need to check if its columns are actually accessible.
-				// If blocked by SEMI/ANTI join, we need to find an accessible table and add a join.
+				// If blocked by SEMI/ANTI join, we need to find an accessible table and add a join from there.
 				if (connecting_table_name == fk_table_with_pu_reference) {
 					// Check if this table's columns are accessible
 					if (AreTableColumnsAccessible(plan.get(), connecting_table_idx)) {
@@ -686,8 +683,7 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 #endif
 
 				if (tables_to_add.empty()) {
-					throw InternalException("PAC compiler: could not find path from " + connecting_table_name + " to " +
-					                        fk_table_with_pu_reference);
+					continue;
 				}
 
 				// IMPORTANT: Before adding the join chain to this connecting table,
@@ -752,8 +748,9 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 									}
 								}
 
-								if (full_tables_to_add.empty())
+								if (full_tables_to_add.empty()) {
 									continue;
+								}
 
 #ifdef DEBUG
 								Printer::Print("ModifyPlanWithoutPU: Found accessible table " + scanned_table + " #" +
@@ -796,8 +793,9 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 							}
 						}
 
-						if (found_accessible_alternative)
-							break;
+						if (found_accessible_alternative) {
+							continue; // Move to next connecting table instance
+						}
 					}
 
 					if (found_accessible_alternative) {
@@ -846,12 +844,11 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 					}
 
 					if (i == 0) {
-						auto join =
+						final_join =
 						    CreateLogicalJoin(check, input.context, std::move(existing_node), std::move(right_op));
-						final_join = std::move(join);
 					} else {
-						auto join = CreateLogicalJoin(check, input.context, std::move(final_join), std::move(right_op));
-						final_join = std::move(join);
+						final_join =
+						    CreateLogicalJoin(check, input.context, std::move(final_join), std::move(right_op));
 					}
 				}
 
@@ -1267,8 +1264,9 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 									break;
 								}
 							}
-							if (!test_fk_cols.empty())
+							if (!test_fk_cols.empty()) {
 								break;
+							}
 						}
 					}
 				}
@@ -1283,8 +1281,9 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 						break;
 					}
 				}
-				if (!proj_ok)
+				if (!proj_ok) {
 					continue;
+				}
 
 				// Try to propagate - this will return nullptr if blocked by DELIM_JOIN etc.
 				auto test_hash = BuildXorHashFromPKs(input, test_get, test_fk_cols);
@@ -1388,8 +1387,9 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 					}
 				}
 
-				if (found_direct_fk)
+				if (found_direct_fk) {
 					break;
+				}
 			}
 
 			if (found_direct_fk) {
@@ -1663,7 +1663,7 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 	}
 
 	// Build a list of all tables that should trigger PAC transformation:
-	// 1. Privacy unit tables themselves
+	// // 1. Privacy unit tables themselves
 	// 2. Tables that are FK-linked to privacy unit tables
 	vector<string> relevant_tables;
 	std::unordered_set<string> relevant_tables_set;

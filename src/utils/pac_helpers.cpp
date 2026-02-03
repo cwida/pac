@@ -343,8 +343,9 @@ vector<string> FindPrimaryKey(ClientContext &context, const string &table_name) 
 			if (unique.HasIndex()) {
 				auto idx = unique.GetIndex();
 				auto &col = table_entry.GetColumn(idx);
-				if (!col.Type().IsNumeric())
+				if (!col.Type().IsNumeric()) {
 					return {};
+				}
 				return {col.GetName()};
 			}
 		}
@@ -483,8 +484,9 @@ FindForeignKeyBetween(ClientContext &context, const vector<string> &privacy_unit
 			string schema = tbl_name.substr(0, dot_pos);
 			string tbl = tbl_name.substr(dot_pos + 1);
 			auto entry = catalog.GetEntry(context, CatalogType::TABLE_ENTRY, schema, tbl, OnEntryNotFound::RETURN_NULL);
-			if (entry)
-				return StringUtil::Lower(tbl);  // return unqualified table name, normalized to lowercase
+			if (entry) {
+				return StringUtil::Lower(tbl); // return unqualified table name, normalized to lowercase
+			}
 			return StringUtil::Lower(tbl_name); // fallback to original, normalized
 		}
 		// Non-qualified: walk the search path; if found return unqualified table name
@@ -492,8 +494,9 @@ FindForeignKeyBetween(ClientContext &context, const vector<string> &privacy_unit
 		for (auto &entry_path : path.Get()) {
 			auto entry = catalog.GetEntry(context, CatalogType::TABLE_ENTRY, entry_path.schema, tbl_name,
 			                              OnEntryNotFound::RETURN_NULL);
-			if (entry)
+			if (entry) {
 				return StringUtil::Lower(tbl_name); // already unqualified, normalized to lowercase
+			}
 		}
 		return StringUtil::Lower(tbl_name); // fallback, normalized to lowercase
 	};
@@ -581,8 +584,9 @@ ReplanGuard::~ReplanGuard() {
 string GetPacPrivacyFile(ClientContext &context, const string &default_filename) {
 	Value v;
 	context.TryGetCurrentSetting("pac_privacy_file", v);
-	if (!v.IsNull())
+	if (!v.IsNull()) {
 		return v.ToString();
+	}
 	return default_filename;
 }
 
@@ -590,8 +594,9 @@ string GetPacCompiledPath(ClientContext &context, const string &default_path) {
 	Value v;
 	context.TryGetCurrentSetting("pac_compiled_path", v);
 	string path = v.IsNull() ? default_path : v.ToString();
-	if (!path.empty() && path.back() != '/')
+	if (!path.empty() && path.back() != '/') {
 		path.push_back('/');
+	}
 	return path;
 }
 

@@ -112,8 +112,9 @@ string PACMetadataManager::SerializeAllToJSON() const {
 
 	size_t idx = 0;
 	for (const auto &entry : table_metadata) {
-		if (idx > 0)
+		if (idx > 0) {
 			ss << ",\n";
+		}
 		ss << "    " << SerializeToJSON(entry.second);
 		idx++;
 	}
