@@ -54,19 +54,21 @@ static inline bool PacNoisedSelectWithCount(uint64_t mask, uint64_t rnd, idx_t c
 // ============================================================================
 struct PacCategoricalBindData : public FunctionData {
 	double mi;
+	double correction;
 	uint64_t seed;
 
-	explicit PacCategoricalBindData(double mi_val = 128.0, uint64_t seed_val = std::random_device {}())
-	    : mi(mi_val), seed(seed_val) {
+	explicit PacCategoricalBindData(double mi_val = 0.0, double correction_val = 1.0,
+	                                uint64_t seed_val = std::random_device {}())
+	    : mi(mi_val), correction(correction_val), seed(seed_val) {
 	}
 
 	unique_ptr<FunctionData> Copy() const override {
-		return make_uniq<PacCategoricalBindData>(mi, seed);
+		return make_uniq<PacCategoricalBindData>(mi, correction, seed);
 	}
 
 	bool Equals(const FunctionData &other) const override {
 		auto &o = other.Cast<PacCategoricalBindData>();
-		return mi == o.mi && seed == o.seed;
+		return mi == o.mi && correction == o.correction && seed == o.seed;
 	}
 };
 
@@ -113,12 +115,26 @@ static inline uint64_t BoolListToMask(UnifiedVectorFormat &list_data, UnifiedVec
 // Helper: Common filter logic for mask-based filtering
 // ============================================================================
 // Returns true with probability proportional to popcount(mask)/64
-// When mi=0: deterministic majority voting (popcount >= 32)
-static inline bool FilterFromMask(uint64_t mask, double mi, std::mt19937_64 &gen) {
-	if (mi == 0.0) {
-		return Popcount64(mask) >= 32;
+// mi: controls probabilistic (mi>0) vs deterministic (mi<=0) mode
+// correction: considers correction times more non-nulls (increases true probability)
+// When mi <= 0: deterministic, true when popcount(mask) * correction >= 32
+// When mi > 0: probabilistic, P(true) = popcount(mask) * correction / 64
+static inline bool FilterFromMask(uint64_t mask, double mi, double correction, std::mt19937_64 &gen) {
+	int popcount = Popcount64(mask);
+	double effective_popcount = popcount * correction;
+
+	if (mi <= 0.0) {
+		// Deterministic mode: true when effective_popcount >= 32
+		return effective_popcount >= 32.0;
 	} else {
-		return PacNoisedSelect(mask, gen());
+		// Probabilistic mode: P(true) = effective_popcount / 64
+		// Equivalently: true if popcount > threshold, where threshold is in [0, 64/correction)
+		uint64_t range = static_cast<uint64_t>(64.0 / correction);
+		if (range == 0) {
+			return true; // correction is very large, always return true
+		}
+		int threshold = static_cast<int>(gen() % range);
+		return popcount > threshold;
 	}
 }
 
@@ -176,11 +192,13 @@ static void PacFilterFromMaskFunction(DataChunk &args, ExpressionState &state, V
 	auto &local_state = ExecuteFunctionState::GetFunctionState(state)->Cast<PacCategoricalLocalState>();
 	auto &gen = local_state.gen;
 
-	double mi = 128.0; // default
+	double mi = 0.0;
+	double correction = 1.0;
 	auto &function = state.expr.Cast<BoundFunctionExpression>();
 	if (function.bind_info) {
 		auto &bind_data = function.bind_info->Cast<PacCategoricalBindData>();
 		mi = bind_data.mi;
+		correction = bind_data.correction;
 	}
 
 	UnifiedVectorFormat mask_data;
@@ -198,7 +216,7 @@ static void PacFilterFromMaskFunction(DataChunk &args, ExpressionState &state, V
 			continue;
 		}
 
-		result_data[i] = FilterFromMask(masks[mask_idx], mi, gen);
+		result_data[i] = FilterFromMask(masks[mask_idx], mi, correction, gen);
 	}
 }
 
@@ -211,11 +229,13 @@ static void PacFilterFromBoolListFunction(DataChunk &args, ExpressionState &stat
 	auto &local_state = ExecuteFunctionState::GetFunctionState(state)->Cast<PacCategoricalLocalState>();
 	auto &gen = local_state.gen;
 
-	double mi = 128.0; // default
+	double mi = 0.0;
+	double correction = 1.0;
 	auto &function = state.expr.Cast<BoundFunctionExpression>();
 	if (function.bind_info) {
 		auto &bind_data = function.bind_info->Cast<PacCategoricalBindData>();
 		mi = bind_data.mi;
+		correction = bind_data.correction;
 	}
 
 	UnifiedVectorFormat list_data;
@@ -247,41 +267,48 @@ static void PacFilterFromBoolListFunction(DataChunk &args, ExpressionState &stat
 		}
 
 		uint64_t mask = BoolListToMask(list_data, child_data, child_values, list_idx);
-		result_data[i] = FilterFromMask(mask, mi, gen);
+		result_data[i] = FilterFromMask(mask, mi, correction, gen);
 	}
 }
 
-// pac_filter(UBIGINT mask, DOUBLE mi) -> BOOLEAN (explicit mi parameter)
-static void PacFilterWithMiFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+// pac_filter(UBIGINT mask, DOUBLE correction) -> BOOLEAN (explicit correction parameter)
+static void PacFilterWithCorrectionFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &mask_vec = args.data[0];
-	auto &mi_vec = args.data[1];
+	auto &correction_vec = args.data[1];
 	idx_t count = args.size();
 
 	auto &local_state = ExecuteFunctionState::GetFunctionState(state)->Cast<PacCategoricalLocalState>();
 	auto &gen = local_state.gen;
 
+	// Get mi from bind data
+	double mi = 0.0;
+	auto &function = state.expr.Cast<BoundFunctionExpression>();
+	if (function.bind_info) {
+		mi = function.bind_info->Cast<PacCategoricalBindData>().mi;
+	}
+
 	UnifiedVectorFormat mask_data;
 	mask_vec.ToUnifiedFormat(count, mask_data);
 	auto masks = UnifiedVectorFormat::GetData<uint64_t>(mask_data);
 
-	UnifiedVectorFormat mi_data;
-	mi_vec.ToUnifiedFormat(count, mi_data);
-	auto mis = UnifiedVectorFormat::GetData<double>(mi_data);
+	UnifiedVectorFormat correction_data;
+	correction_vec.ToUnifiedFormat(count, correction_data);
+	auto corrections = UnifiedVectorFormat::GetData<double>(correction_data);
 
 	auto result_data = FlatVector::GetData<bool>(result);
 	auto &result_validity = FlatVector::Validity(result);
 
 	for (idx_t i = 0; i < count; i++) {
 		auto mask_idx = mask_data.sel->get_index(i);
-		auto mi_idx = mi_data.sel->get_index(i);
+		auto correction_idx = correction_data.sel->get_index(i);
 
 		if (!mask_data.validity.RowIsValid(mask_idx)) {
 			result_validity.SetInvalid(i);
 			continue;
 		}
 
-		double mi = mi_data.validity.RowIsValid(mi_idx) ? mis[mi_idx] : 128.0;
-		result_data[i] = FilterFromMask(masks[mask_idx], mi, gen);
+		double correction = correction_data.validity.RowIsValid(correction_idx) ? corrections[correction_idx] : 1.0;
+		result_data[i] = FilterFromMask(masks[mask_idx], mi, correction, gen);
 	}
 }
 
@@ -376,14 +403,11 @@ static void PacMaskNotFunction(DataChunk &args, ExpressionState &state, Vector &
 // ============================================================================
 static unique_ptr<FunctionData> PacCategoricalBind(ClientContext &ctx, ScalarFunction &func,
                                                    vector<unique_ptr<Expression>> &args) {
-	double mi = 128.0;
+	// Read mi from pac_mi setting
+	double mi = GetPacMiFromSetting(ctx);
+	// Default correction is 1.0 (can be overridden via explicit parameter in some functions)
+	double correction = 1.0;
 	uint64_t seed = std::random_device {}();
-
-	// Try to get mi from session setting
-	Value pac_mi_val;
-	if (ctx.TryGetCurrentSetting("pac_mi", pac_mi_val) && !pac_mi_val.IsNull()) {
-		mi = pac_mi_val.GetValue<double>();
-	}
 
 	// Try to get seed from session setting
 	Value pac_seed_val;
@@ -392,10 +416,11 @@ static unique_ptr<FunctionData> PacCategoricalBind(ClientContext &ctx, ScalarFun
 	}
 
 #ifdef DEBUG
-	Printer::Print("PacCategoricalBind: mi=" + std::to_string(mi) + ", seed=" + std::to_string(seed));
+	Printer::Print("PacCategoricalBind: mi=" + std::to_string(mi) + ", correction=" + std::to_string(correction) +
+	               ", seed=" + std::to_string(seed));
 #endif
 
-	return make_uniq<PacCategoricalBindData>(mi, seed);
+	return make_uniq<PacCategoricalBindData>(mi, correction, seed);
 }
 
 // ============================================================================
@@ -415,11 +440,11 @@ void RegisterPacCategoricalFunctions(ExtensionLoader &loader) {
 	                               PacCategoricalInitLocal);
 	loader.RegisterFunction(pac_filter_mask);
 
-	// pac_filter(UBIGINT mask, DOUBLE mi) -> BOOLEAN : With explicit mi parameter
-	ScalarFunction pac_filter_mask_mi("pac_filter", {LogicalType::UBIGINT, LogicalType::DOUBLE}, LogicalType::BOOLEAN,
-	                                  PacFilterWithMiFunction, PacCategoricalBind, nullptr, nullptr,
-	                                  PacCategoricalInitLocal);
-	loader.RegisterFunction(pac_filter_mask_mi);
+	// pac_filter(UBIGINT mask, DOUBLE correction) -> BOOLEAN : With explicit correction parameter
+	ScalarFunction pac_filter_mask_correction("pac_filter", {LogicalType::UBIGINT, LogicalType::DOUBLE},
+	                                          LogicalType::BOOLEAN, PacFilterWithCorrectionFunction,
+	                                          PacCategoricalBind, nullptr, nullptr, PacCategoricalInitLocal);
+	loader.RegisterFunction(pac_filter_mask_correction);
 
 	// pac_filter(list<bool>) -> BOOLEAN : Probabilistic filter from list (convenience)
 	ScalarFunction pac_filter_list("pac_filter", {list_bool_type}, LogicalType::BOOLEAN, PacFilterFromBoolListFunction,

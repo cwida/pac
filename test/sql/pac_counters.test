@@ -139,7 +139,7 @@ SELECT
     round(pac_avg_counters(hash(rowid)::UBIGINT, value)[5])::INTEGER
 FROM test_data
 ----
-23	12	12	17	26
+46	24	24	34	52
 
 # Grouped pac_avg_counters - show first counter per group (rounded)
 # Note: group 1 returns NULL for counter 1 because key_hash bit 0 is not set
@@ -149,9 +149,9 @@ FROM test_data
 GROUP BY group_id
 ORDER BY group_id
 ----
-0	38
+0	75
 1	NULL
-2	27
+2	53
 
 # ============================================================================
 # PAC_MIN_COUNTERS tests
@@ -179,7 +179,7 @@ SELECT
     pac_min_counters(hash(rowid)::UBIGINT, value)[5]::INTEGER
 FROM test_data
 ----
-0	0	30	0	10
+60	20	30	40	10
 
 # Grouped pac_min_counters - show first counter per group
 query II
@@ -188,9 +188,9 @@ FROM test_data
 GROUP BY group_id
 ORDER BY group_id
 ----
-0	0
-1	10
-2	20
+0	60
+1	NULL
+2	80
 
 # ============================================================================
 # PAC_MAX_COUNTERS tests

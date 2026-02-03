@@ -85,7 +85,9 @@ void RegisterPacAggregateFunctions(ExtensionLoader &loader);
 
 // Declare the noisy-sample helper so other translation units (pac_count.cpp) can call it.
 // is_null: bitmask where bit i=1 means counter i should be excluded (compacted out)
-double PacNoisySampleFrom64Counters(const double counters[64], double mi, std::mt19937_64 &gen,
+// mi: mutual information parameter for noise calculation
+// correction: factor to multiply values by after compacting NULLs but before adding noise
+double PacNoisySampleFrom64Counters(const double counters[64], double mi, double correction, std::mt19937_64 &gen,
                                     bool use_deterministic_noise = true, uint64_t is_null = 0);
 
 // PacNoisedSelect: returns true with probability proportional to popcount(key_hash)/64
@@ -95,34 +97,49 @@ static inline bool PacNoisedSelect(uint64_t key_hash, uint64_t rnd) {
 }
 
 // PacNoiseInNull: probabilistically returns true based on bit count in key_hash.
-// Probability = popcount(key_hash) / 64. If mi==0, returns deterministic bit 0.
-bool PacNoiseInNull(uint64_t key_hash, double mi, std::mt19937_64 &gen);
+// mi: controls probabilistic (mi>0) vs deterministic (mi<=0) mode
+// correction: reduces NULL probability by this factor (considers correction times more non-nulls)
+// Probabilistic: P(NULL) = popcount(~key_hash) / (64 * correction)
+// Deterministic: NULL when popcount(key_hash) * correction < 1
+bool PacNoiseInNull(uint64_t key_hash, double mi, double correction, std::mt19937_64 &gen);
 
 // Helper function to generate a random seed (defined in pac_aggregate.cpp)
 // This avoids including <random> in the header for std::random_device
 uint64_t PacGenerateRandomSeed();
 
-// Bind data used by PAC aggregates to carry the `mi` parameter.
+// Helper to read pac_mi from session setting.
+// Returns 0.0 if not found or null.
+inline double GetPacMiFromSetting(ClientContext &ctx) {
+	Value pac_mi_val;
+	if (ctx.TryGetCurrentSetting("pac_mi", pac_mi_val) && !pac_mi_val.IsNull()) {
+		return pac_mi_val.GetValue<double>();
+	}
+	return 0.0; // default: deterministic mode
+}
+
+// Bind data used by PAC aggregates to carry `mi` and `correction` parameters.
 struct PacBindData : public FunctionData {
-	double mi;
+	double mi;                    // mutual information parameter from pac_mi setting (controls noise/NULL probability)
+	double correction;            // correction factor: multiplies sum/avg/count results, reduces NULL prob for min/max
 	uint64_t seed;                // deterministic RNG seed for PAC aggregates
 	uint64_t query_hash;          // XOR'd with key_hash to randomize and avoid hash(0)==0 issue
 	double scale_divisor;         // for DECIMAL pac_avg: divide result by 10^scale (default 1.0)
 	bool use_deterministic_noise; // if true, use platform-agnostic Box-Muller noise generation
-	explicit PacBindData(double mi_val, uint64_t seed_val = 0, double scale_div = 1.0, bool use_det_noise = false)
-	    : mi(mi_val), seed(seed_val ? seed_val : PacGenerateRandomSeed()),
+	explicit PacBindData(double mi_val, double correction_val = 1.0, uint64_t seed_val = 0, double scale_div = 1.0,
+	                     bool use_det_noise = false)
+	    : mi(mi_val), correction(correction_val), seed(seed_val ? seed_val : PacGenerateRandomSeed()),
 	      query_hash((mi_val > 0.0) ? ((seed ^ PAC_MAGIC_HASH) + seed) : 0), scale_divisor(scale_div),
 	      use_deterministic_noise(use_det_noise) {
 	}
 	unique_ptr<FunctionData> Copy() const override {
-		auto copy = make_uniq<PacBindData>(mi, seed, scale_divisor, use_deterministic_noise);
+		auto copy = make_uniq<PacBindData>(mi, correction, seed, scale_divisor, use_deterministic_noise);
 		copy->query_hash = query_hash;
 		return copy;
 	}
 	bool Equals(const FunctionData &other) const override {
 		auto &o = other.Cast<PacBindData>();
-		return mi == o.mi && seed == o.seed && query_hash == o.query_hash && scale_divisor == o.scale_divisor &&
-		       use_deterministic_noise == o.use_deterministic_noise;
+		return mi == o.mi && correction == o.correction && seed == o.seed && query_hash == o.query_hash &&
+		       scale_divisor == o.scale_divisor && use_deterministic_noise == o.use_deterministic_noise;
 	}
 };
 

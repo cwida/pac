@@ -86,16 +86,34 @@ static inline double DeterministicNormalSample(std::mt19937_64 &gen, bool &has_s
 }
 
 // PacNoiseInNull: probabilistically returns true based on bit count in key_hash
-// Probability = popcount(key_hash) / 64. If mi==0, only return NULL when key_hash==0 (no values seen)
-bool PacNoiseInNull(uint64_t key_hash, double mi, std::mt19937_64 &gen) {
-	return (mi > 0.0) ? PacNoisedSelect(~key_hash, gen()) : (key_hash == 0);
+// mi: controls probabilistic (mi>0) vs deterministic (mi<=0) mode
+// correction: reduces NULL probability by this factor (considers correction times more non-nulls)
+bool PacNoiseInNull(uint64_t key_hash, double mi, double correction, std::mt19937_64 &gen) {
+	int popcount = pac_popcount64(key_hash);
+	// Effective popcount considering correction factor (correction times more non-nulls)
+	double effective_popcount = popcount * correction;
+
+	if (mi <= 0.0) {
+		// Deterministic mode: NULL when effective_popcount < 1
+		return effective_popcount < 1.0;
+	}
+	// Probabilistic mode: P(NULL) = popcount(~key_hash) / (64 * correction)
+	// Equivalently: NULL if popcount(~key_hash) > threshold, where threshold is in [0, 64*correction)
+	uint64_t range = static_cast<uint64_t>(64.0 * correction);
+	if (range == 0) {
+		range = 1;
+	}
+	int threshold = static_cast<int>(gen() % range);
+	return pac_popcount64(~key_hash) > threshold;
 }
 
 // Finalize: compute noisy sample from the 64 counters (works on double array)
 // If use_deterministic_noise is true, uses platform-agnostic Box-Muller; otherwise uses std::normal_distribution
 // is_null: bitmask where bit i=1 means counter i should be excluded (compacted out)
-// Returns: 2*yJ + noise where yJ is a randomly selected counter (each counter estimates sum/2)
-double PacNoisySampleFrom64Counters(const double counters[64], double mi, std::mt19937_64 &gen,
+// mi: mutual information parameter for noise calculation
+// correction: factor to multiply values by after compacting but before noising
+// Returns: correction*yJ + noise where yJ is a randomly selected counter
+double PacNoisySampleFrom64Counters(const double counters[64], double mi, double correction, std::mt19937_64 &gen,
                                     bool use_deterministic_noise, uint64_t is_null) {
 	D_ASSERT(~is_null != 0); // at least one bit must be valid
 
@@ -108,15 +126,18 @@ double PacNoisySampleFrom64Counters(const double counters[64], double mi, std::m
 		}
 	}
 
-	// mi=0 means no noise - return 2*counter[0] directly (no RNG consumption)
-	// Factor of 2 accounts for the missing random counter yJ term
-	// Note: pac_sum_approx/pac_avg_approx override this with mean-based logic
-	if (mi == 0.0) {
-		return 2.0 * vals[0];
+	// Apply correction factor to all values (after compacting NULLs, before noising)
+	for (auto &v : vals) {
+		v *= correction;
+	}
+
+	// mi <= 0 means no noise - return counter[0] directly (no RNG consumption)
+	if (mi <= 0.0) {
+		return vals[0];
 	}
 	int N = static_cast<int>(vals.size());
 
-	// Compute delta using the shared exported helper (validates mi as well)
+	// Compute delta using the shared exported helper (uses mi for noise variance)
 	double delta = ComputeDeltaFromValues(vals, mi);
 
 	// Pick random index J in [0, N-1] to select the base counter yJ
@@ -125,7 +146,7 @@ double PacNoisySampleFrom64Counters(const double counters[64], double mi, std::m
 
 	if (delta <= 0.0 || !std::isfinite(delta)) {
 		// If there's no variance, return the selected counter value without noise.
-		return 2.0 * yJ;
+		return yJ;
 	}
 
 	// Sample normal(0, sqrt(delta)) using either deterministic Box-Muller or std::normal_distribution
@@ -146,7 +167,7 @@ double PacNoisySampleFrom64Counters(const double counters[64], double mi, std::m
 		std::normal_distribution<double> normal_dist(0.0, std::sqrt(delta));
 		noise = normal_dist(gen);
 	}
-	return 2.0 * yJ + noise;
+	return yJ + noise;
 }
 
 struct PacAggregateLocalState : public FunctionLocalState {
@@ -324,7 +345,7 @@ static unique_ptr<FunctionData> PacAggregateBind(ClientContext &ctx, ScalarFunct
 	}
 	// mi is per-row for pac_aggregate; store default mi in bind data but it's unused here
 	double mi = 128.0;
-	return make_uniq<PacBindData>(mi, seed);
+	return make_uniq<PacBindData>(mi, 1.0, seed);
 }
 
 void RegisterPacAggregateFunctions(ExtensionLoader &loader) {

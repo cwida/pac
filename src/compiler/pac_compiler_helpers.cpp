@@ -33,7 +33,7 @@ void ReplanWithoutOptimizers(ClientContext &context, const string &query, unique
 
 	// Add optimizers to disable
 	config.options.disabled_optimizers.insert(OptimizerType::COMPRESSED_MATERIALIZATION);
-	config.options.disabled_optimizers.insert(OptimizerType::COLUMN_LIFETIME);
+	//config.options.disabled_optimizers.insert(OptimizerType::COLUMN_LIFETIME);
 
 	Parser parser;
 	Planner planner(context);
