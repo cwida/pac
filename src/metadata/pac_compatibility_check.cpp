@@ -1041,8 +1041,6 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 	// Check for PROTECTED columns from PAC metadata FIRST (before other structural checks)
 	// This ensures we get the correct error message for protected column violations
 	if (has_protected_columns) {
-		ReplanGuard guard(optimizer_info);
-		ReplanWithoutOptimizers(context, context.GetCurrentQuery(), plan);
 		CheckOutputColumnsNotProtected(*plan, *plan, tables_with_protected_columns);
 	}
 
@@ -1097,9 +1095,9 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 		}
 
 		// Check that GROUP BY columns don't come from PU tables
+		// NOTE: The plan is already optimized without COLUMN_LIFETIME and COMPRESSED_MATERIALIZATION
+		// because the pre-optimizer disabled them before built-in optimizers ran.
 		if (!result.scanned_pu_tables.empty()) {
-			ReplanGuard guard(optimizer_info);
-			ReplanWithoutOptimizers(context, context.GetCurrentQuery(), plan);
 			CheckOutputColumnsNotFromPU(*plan, *plan, result.scanned_pu_tables, tables_with_protected_columns);
 		}
 

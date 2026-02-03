@@ -3,6 +3,7 @@
 //
 
 #include "compiler/pac_compiler_helpers.hpp"
+#include "core/pac_optimizer.hpp"
 
 #include "duckdb/main/connection.hpp"
 #include "duckdb/parser/parser.hpp"
@@ -24,35 +25,6 @@
 #include <duckdb/planner/planner.hpp>
 
 namespace duckdb {
-
-void ReplanWithoutOptimizers(ClientContext &context, const string &query, unique_ptr<LogicalOperator> &plan) {
-	auto &config = DBConfig::GetConfig(context);
-
-	// Save the original disabled optimizers
-	auto original_disabled = config.options.disabled_optimizers;
-
-	// Add optimizers to disable
-	config.options.disabled_optimizers.insert(OptimizerType::COMPRESSED_MATERIALIZATION);
-	//config.options.disabled_optimizers.insert(OptimizerType::COLUMN_LIFETIME);
-
-	Parser parser;
-	Planner planner(context);
-
-	parser.ParseQuery(query);
-	if (parser.statements.empty()) {
-		// Restore original disabled optimizers before returning
-		config.options.disabled_optimizers = original_disabled;
-		return;
-	}
-	auto statement = parser.statements[0].get();
-	planner.CreatePlan(statement->Copy());
-
-	Optimizer optimizer(*planner.binder, context);
-	plan = optimizer.Optimize(std::move(planner.plan));
-
-	// Restore original disabled optimizers
-	config.options.disabled_optimizers = original_disabled;
-}
 
 // Build join conditions from FK columns to PK columns
 void BuildJoinConditions(LogicalGet *left_get, LogicalGet *right_get, const vector<string> &left_cols,

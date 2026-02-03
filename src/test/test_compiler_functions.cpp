@@ -1012,9 +1012,13 @@ int RunCompilerFunctionTests() {
 		const string query =
 		    "SELECT t2.x, SUM(t3.n) FROM t1 INNER JOIN t2 ON t1.a = t2.x INNER JOIN t3 ON t2.x = t3.m GROUP BY t2.x;";
 
-		// Replan without optimizers to avoid compressed materialization complexity
-		unique_ptr<LogicalOperator> plan;
-		ReplanWithoutOptimizers(*con.context, query, plan);
+		// Create plan using parser, planner and optimizer
+		Parser parser;
+		parser.ParseQuery(query);
+		Planner planner(*con.context);
+		planner.CreatePlan(std::move(parser.statements[0]));
+		Optimizer opt(*planner.binder, *con.context);
+		auto plan = opt.Optimize(std::move(planner.plan));
 		if (!plan) {
 			std::cerr << "FAIL: ColumnBelongsToTable test 6: replan returned null plan"
 			          << "\n";
@@ -1114,9 +1118,13 @@ int RunCompilerFunctionTests() {
 
 		const string query = "SELECT a, SUM(b) FROM t1 GROUP BY a ORDER BY a;";
 
-		// Replan without optimizers
-		unique_ptr<LogicalOperator> plan;
-		ReplanWithoutOptimizers(*con.context, query, plan);
+		// Create plan using parser, planner and optimizer
+		Parser parser;
+		parser.ParseQuery(query);
+		Planner planner(*con.context);
+		planner.CreatePlan(std::move(parser.statements[0]));
+		Optimizer opt(*planner.binder, *con.context);
+		auto plan = opt.Optimize(std::move(planner.plan));
 		if (!plan) {
 			std::cerr << "FAIL: ColumnBelongsToTable test 7: replan returned null plan"
 			          << "\n";
@@ -1255,8 +1263,13 @@ int RunCompilerFunctionTests() {
 		const string query = "SELECT non_pu_table.y, SUM(pu_table.b) FROM pu_table INNER JOIN non_pu_table ON "
 		                     "pu_table.a = non_pu_table.x GROUP BY non_pu_table.y;";
 
-		unique_ptr<LogicalOperator> plan;
-		ReplanWithoutOptimizers(*con.context, query, plan);
+		// Create plan using parser, planner and optimizer
+		Parser parser;
+		parser.ParseQuery(query);
+		Planner planner(*con.context);
+		planner.CreatePlan(std::move(parser.statements[0]));
+		Optimizer opt(*planner.binder, *con.context);
+		auto plan = opt.Optimize(std::move(planner.plan));
 		if (!plan) {
 			std::cerr << "FAIL: ColumnBelongsToTable test 8: replan returned null plan"
 			          << "\n";
@@ -1336,8 +1349,13 @@ int RunCompilerFunctionTests() {
 		const string query = "SELECT non_pu_table.x, SUM(pu_table.b) FROM pu_table LEFT JOIN non_pu_table ON "
 		                     "pu_table.a = non_pu_table.x GROUP BY non_pu_table.x;";
 
-		unique_ptr<LogicalOperator> plan;
-		ReplanWithoutOptimizers(*con.context, query, plan);
+		// Create plan using parser, planner and optimizer
+		Parser parser;
+		parser.ParseQuery(query);
+		Planner planner(*con.context);
+		planner.CreatePlan(std::move(parser.statements[0]));
+		Optimizer opt(*planner.binder, *con.context);
+		auto plan = opt.Optimize(std::move(planner.plan));
 		if (!plan) {
 			std::cerr << "FAIL: ColumnBelongsToTable test 9: replan returned null plan"
 			          << "\n";

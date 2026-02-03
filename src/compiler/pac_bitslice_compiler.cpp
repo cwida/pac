@@ -1930,8 +1930,9 @@ void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExten
 		pu_present_in_tree = true;
 	}
 
-	// Replan with selected optimizers disabled
-	ReplanWithoutOptimizers(input.context, input.context.GetCurrentQuery(), plan);
+	// NOTE: The plan coming in is already optimized WITHOUT COLUMN_LIFETIME and COMPRESSED_MATERIALIZATION
+	// because the pre-optimizer (PACPreOptimizeFunction) disabled them before built-in optimizers ran.
+	// We'll run those optimizers ourselves at the end of this function after PAC transformation.
 
 #ifdef DEBUG
 	Printer::Print("=== PLAN BEFORE PAC TRANSFORMATION ===");
@@ -1994,15 +1995,17 @@ void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExten
 #endif
 	}
 
-	// IMPORTANT: After all PAC modifications, resolve operator types for the entire plan tree
-	// This ensures that all column bindings are properly updated after we've added new columns
-	// to table scans and modified aggregate expressions
+#ifdef DEBUG
+	Printer::Print("=== PAC-OPTIMIZED PLAN ===");
+	plan->Print();
+	Printer::Print("=== END PAC-OPTIMIZED PLAN ===");
+#endif
 
-	plan->ResolveOperatorTypes();
+	// NOTE: The deferred optimizers (COLUMN_LIFETIME and COMPRESSED_MATERIALIZATION) are now
+	// run centrally in PACRewriteRuleFunction after this function returns. This ensures they
+	// run for ALL queries (not just PAC-compiled ones) since we disable them in pre-optimize.
 
 #ifdef DEBUG
-	Printer::Print("=== PLAN AFTER PAC TRANSFORMATION ===");
-	plan->Print();
 	Printer::Print("=== PAC COMPILATION END ===");
 #endif
 }

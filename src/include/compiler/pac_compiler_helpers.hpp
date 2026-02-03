@@ -13,9 +13,6 @@
 
 namespace duckdb {
 
-// Replan the provided SQL query into `plan` after disabling several optimizers.
-void ReplanWithoutOptimizers(ClientContext &context, const string &query, unique_ptr<LogicalOperator> &plan);
-
 // Build join conditions from FK columns to PK columns
 void BuildJoinConditions(LogicalGet *left_get, LogicalGet *right_get, const vector<string> &left_cols,
                          const vector<string> &right_cols, const string &left_table_name,

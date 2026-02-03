@@ -18,8 +18,52 @@
 #include "duckdb/execution/operator/schema/physical_drop.hpp"
 #include "duckdb/parser/parsed_data/drop_info.hpp"
 #include "duckdb/planner/operator/logical_simple.hpp"
+// Include DuckDB optimizer headers for deferred optimizers
+#include "duckdb/optimizer/column_lifetime_analyzer.hpp"
+#include "duckdb/optimizer/compressed_materialization.hpp"
+#include "duckdb/optimizer/optimizer.hpp"
 
 namespace duckdb {
+
+// ============================================================================
+// Helper function to run COLUMN_LIFETIME and COMPRESSED_MATERIALIZATION
+// ============================================================================
+// These optimizers are disabled in PACPreOptimizeFunction and must be run
+// after PAC processing (whether PAC compilation happened or not).
+static void RunDeferredOptimizers(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
+                                  bool pac_compiled) {
+	if (!plan) {
+		return;
+	}
+
+#ifdef DEBUG
+	if (pac_compiled) {
+		Printer::Print("=== PLAN AFTER PAC COMPILATION (before deferred optimizers) ===");
+		plan->Print();
+	}
+#endif
+
+	// Run column lifetime analyzer
+	ColumnLifetimeAnalyzer column_lifetime(input.optimizer, *plan, true);
+	column_lifetime.VisitOperator(*plan);
+
+	// Run compressed materialization (if not disabled by user)
+	if (!input.optimizer.OptimizerDisabled(OptimizerType::COMPRESSED_MATERIALIZATION)) {
+		statistics_map_t statistics_map;
+		CompressedMaterialization compressed_materialization(input.optimizer, *plan, statistics_map);
+		compressed_materialization.Compress(plan);
+	}
+
+	// Resolve operator types after running optimizers
+	plan->ResolveOperatorTypes();
+
+#ifdef DEBUG
+	if (pac_compiled) {
+		Printer::Print("=== FINAL PLAN (after deferred optimizers) ===");
+		plan->Print();
+	}
+#endif
+}
 
 // ============================================================================
 // PACDropTableRule - Separate optimizer rule for DROP TABLE operations
@@ -128,17 +172,77 @@ void PACDropTableRule::PACDropTableRuleFunction(OptimizerExtensionInput &input, 
 // PACRewriteRule - Main PAC query rewriting optimizer rule
 // ============================================================================
 
+// Pre-optimizer: disables COLUMN_LIFETIME and COMPRESSED_MATERIALIZATION
+// This runs BEFORE built-in optimizers, ensuring they skip these two optimizers.
+// We'll run them ourselves in the post-optimizer after PAC transformation (if needed).
+void PACRewriteRule::PACPreOptimizeFunction(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan) {
+	if (!plan) {
+		return;
+	}
+
+	// Get the PAC optimizer info
+	PACOptimizerInfo *pac_info = nullptr;
+	if (input.info) {
+		pac_info = dynamic_cast<PACOptimizerInfo *>(input.info.get());
+	}
+
+	if (!pac_info) {
+		return;
+	}
+
+	// Skip if a replan is already in progress (avoid infinite recursion)
+	if (pac_info->replan_in_progress.load(std::memory_order_acquire)) {
+		return;
+	}
+
+	// Disable COLUMN_LIFETIME and COMPRESSED_MATERIALIZATION for the built-in optimizer pass
+	// We'll run them ourselves in the post-optimizer
+	std::lock_guard<std::mutex> lock(pac_info->optimizer_mutex);
+	auto &config = DBConfig::GetConfig(input.context);
+
+	// Check if they're already disabled (don't double-disable)
+	if (config.options.disabled_optimizers.find(OptimizerType::COLUMN_LIFETIME) ==
+	    config.options.disabled_optimizers.end()) {
+		config.options.disabled_optimizers.insert(OptimizerType::COLUMN_LIFETIME);
+		pac_info->disabled_column_lifetime = true;
+	}
+
+	if (config.options.disabled_optimizers.find(OptimizerType::COMPRESSED_MATERIALIZATION) ==
+	    config.options.disabled_optimizers.end()) {
+		config.options.disabled_optimizers.insert(OptimizerType::COMPRESSED_MATERIALIZATION);
+		pac_info->disabled_compressed_materialization = true;
+	}
+}
+
 void PACRewriteRule::PACRewriteRuleFunction(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan) {
 
 	// If the optimizer extension provided a PACOptimizerInfo, and a replan is already in progress,
-	// skip running the PAC checks to avoid re-entrant behavior. We reuse the existing
-	// `replan_in_progress` flag for this purpose.
+	// skip running the PAC checks to avoid re-entrant behavior.
 	PACOptimizerInfo *pac_info = nullptr;
+	bool we_disabled_optimizers = false;
 	if (input.info) {
 		pac_info = dynamic_cast<PACOptimizerInfo *>(input.info.get());
 		if (pac_info && pac_info->replan_in_progress.load(std::memory_order_acquire)) {
 			// A replan/compilation is in progress; bypass PACRewriteRule to avoid recursion
 			return;
+		}
+	}
+
+	// Restore the disabled optimizers now (they were disabled in pre-optimize)
+	// We do this early so the config is restored regardless of what happens below
+	if (pac_info) {
+		std::lock_guard<std::mutex> lock(pac_info->optimizer_mutex);
+		auto &config = DBConfig::GetConfig(input.context);
+
+		if (pac_info->disabled_column_lifetime) {
+			config.options.disabled_optimizers.erase(OptimizerType::COLUMN_LIFETIME);
+			pac_info->disabled_column_lifetime = false;
+			we_disabled_optimizers = true;
+		}
+		if (pac_info->disabled_compressed_materialization) {
+			config.options.disabled_optimizers.erase(OptimizerType::COMPRESSED_MATERIALIZATION);
+			pac_info->disabled_compressed_materialization = false;
+			we_disabled_optimizers = true;
 		}
 	}
 
@@ -159,6 +263,10 @@ void PACRewriteRule::PACRewriteRuleFunction(OptimizerExtensionInput &input, uniq
 	    check_plan->type != LogicalOperatorType::LOGICAL_TOP_N &&
 	    check_plan->type != LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY &&
 	    check_plan->type != LogicalOperatorType::LOGICAL_MATERIALIZED_CTE) {
+		// Not a SELECT-like query, but still need to run deferred optimizers if we disabled them
+		if (we_disabled_optimizers) {
+			RunDeferredOptimizers(input, plan, false);
+		}
 		return;
 	}
 	// Load configured PAC tables once
@@ -181,6 +289,10 @@ void PACRewriteRule::PACRewriteRuleFunction(OptimizerExtensionInput &input, uniq
 	// Note: Tables with protected columns are now treated as implicit privacy units and included
 	// in fk_paths automatically.
 	if (check.fk_paths.empty() && check.scanned_pu_tables.empty()) {
+		// No PAC tables involved, but still need to run deferred optimizers if we disabled them
+		if (we_disabled_optimizers) {
+			RunDeferredOptimizers(input, target_plan, false);
+		}
 		return;
 	}
 
@@ -201,7 +313,10 @@ void PACRewriteRule::PACRewriteRuleFunction(OptimizerExtensionInput &input, uniq
 	std::sort(discovered_pus.begin(), discovered_pus.end());
 	discovered_pus.erase(std::unique(discovered_pus.begin(), discovered_pus.end()), discovered_pus.end());
 	if (discovered_pus.empty()) {
-		// Defensive: nothing discovered
+		// Defensive: nothing discovered, but still need to run deferred optimizers
+		if (we_disabled_optimizers) {
+			RunDeferredOptimizers(input, target_plan, false);
+		}
 		return;
 	}
 
@@ -226,10 +341,15 @@ void PACRewriteRule::PACRewriteRuleFunction(OptimizerExtensionInput &input, uniq
 
 	// Only proceed with compilation if plan passed structural eligibility
 	if (!check.eligible_for_rewrite) {
+		// Not eligible for PAC compilation, but still need to run deferred optimizers
+		if (we_disabled_optimizers) {
+			RunDeferredOptimizers(input, target_plan, false);
+		}
 		return;
 	}
 
 	bool apply_noise = IsPacNoiseEnabled(input.context, true);
+	bool pac_compiled = false;
 	if (apply_noise) {
 #ifdef DEBUG
 		Printer::Print("Query requires PAC Compilation for privacy units:");
@@ -242,6 +362,13 @@ void PACRewriteRule::PACRewriteRuleFunction(OptimizerExtensionInput &input, uniq
 		ReplanGuard scoped2(pac_info);
 		// Call the compiler once with all privacy units
 		CompilePacBitsliceQuery(check, input, target_plan, privacy_units, normalized, query_hash);
+		pac_compiled = true;
+	}
+
+	// Run the deferred optimizers (COLUMN_LIFETIME and COMPRESSED_MATERIALIZATION)
+	// This must happen for ALL queries since we disabled these optimizers in pre-optimize
+	if (we_disabled_optimizers) {
+		RunDeferredOptimizers(input, target_plan, pac_compiled);
 	}
 }
 
