@@ -289,7 +289,8 @@ void ReplaceNode(unique_ptr<LogicalOperator> &root, unique_ptr<LogicalOperator> 
 
 // Find the primary key column name for a given table. Searches the client's catalog search path
 // for the table and returns the first column name of the primary key constraint (if any).
-// Returns empty string when no primary key exists.
+// Also checks PAC KEY metadata if no database constraint is found.
+// Returns empty vector when no primary key exists.
 vector<string> FindPrimaryKey(ClientContext &context, const string &table_name) {
 	Connection con(*context.db);
 	Catalog &catalog = Catalog::GetCatalog(context, DatabaseManager::GetDefaultDatabase(context));
@@ -329,24 +330,32 @@ vector<string> FindPrimaryKey(ClientContext &context, const string &table_name) 
 			return {};
 		auto &table_entry = entry->Cast<TableCatalogEntry>();
 		auto pk = table_entry.GetPrimaryKey();
-		if (!pk)
-			return {};
-		if (pk->type == ConstraintType::UNIQUE) {
+		if (pk && pk->type == ConstraintType::UNIQUE) {
 			auto &unique = pk->Cast<UniqueConstraint>();
 			// If explicit column names present, validate all are numeric
 			if (!unique.GetColumnNames().empty()) {
 				auto cols = unique.GetColumnNames();
 				auto validated = check_and_return_numeric_columns(table_entry, cols);
-				return validated; // either the validated column list or empty
+				if (!validated.empty()) {
+					return validated;
+				}
 			}
 			// Otherwise fall back to index-based single-column PK
 			if (unique.HasIndex()) {
 				auto idx = unique.GetIndex();
 				auto &col = table_entry.GetColumn(idx);
-				if (!col.Type().IsNumeric()) {
-					return {};
+				if (col.Type().IsNumeric()) {
+					return {col.GetName()};
 				}
-				return {col.GetName()};
+			}
+		}
+		// No database PK constraint found - check PAC KEY metadata
+		auto &metadata_mgr = PACMetadataManager::Get();
+		auto *pac_meta = metadata_mgr.GetTableMetadata(tbl);
+		if (pac_meta && !pac_meta->primary_key_columns.empty()) {
+			auto validated = check_and_return_numeric_columns(table_entry, pac_meta->primary_key_columns);
+			if (!validated.empty()) {
+				return validated;
 			}
 		}
 		return {};
@@ -361,9 +370,7 @@ vector<string> FindPrimaryKey(ClientContext &context, const string &table_name) 
 			continue;
 		auto &table_entry = entry->Cast<TableCatalogEntry>();
 		auto pk = table_entry.GetPrimaryKey();
-		if (!pk)
-			continue;
-		if (pk->type == ConstraintType::UNIQUE) {
+		if (pk && pk->type == ConstraintType::UNIQUE) {
 			auto &unique = pk->Cast<UniqueConstraint>();
 			if (!unique.GetColumnNames().empty()) {
 				auto cols = unique.GetColumnNames();
@@ -375,9 +382,18 @@ vector<string> FindPrimaryKey(ClientContext &context, const string &table_name) 
 			if (unique.HasIndex()) {
 				auto idx = unique.GetIndex();
 				auto &col = table_entry.GetColumn(idx);
-				if (!col.Type().IsNumeric())
-					continue;
-				return {col.GetName()};
+				if (col.Type().IsNumeric()) {
+					return {col.GetName()};
+				}
+			}
+		}
+		// No database PK constraint found - check PAC KEY metadata
+		auto &metadata_mgr = PACMetadataManager::Get();
+		auto *pac_meta = metadata_mgr.GetTableMetadata(table_name);
+		if (pac_meta && !pac_meta->primary_key_columns.empty()) {
+			auto validated = check_and_return_numeric_columns(table_entry, pac_meta->primary_key_columns);
+			if (!validated.empty()) {
+				return validated;
 			}
 		}
 	}

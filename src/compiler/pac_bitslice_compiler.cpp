@@ -103,6 +103,77 @@ namespace duckdb {
  * - Not in a separate subquery branch (would need DELIM_GET)
  * If FK table is inaccessible, we add a fresh join to bring it into scope.
  */
+
+// Helper function to compute required columns for a table in the FK path
+// Returns the columns needed for joining and for the PU FK reference (for hashing)
+static vector<string> GetRequiredColumnsForTable(const PACCompatibilityResult &check, const string &table_name,
+                                                 const vector<string> &fk_path, const vector<string> &privacy_units) {
+	vector<string> required_columns;
+	std::unordered_set<string> added_columns;
+
+	auto it = check.table_metadata.find(table_name);
+	if (it == check.table_metadata.end()) {
+#ifdef DEBUG
+		Printer::Print("GetRequiredColumnsForTable WARNING: No metadata for table " + table_name);
+#endif
+		return {}; // Empty = project all columns (fallback)
+	}
+
+	const auto &meta = it->second;
+
+	// 1. Add PK columns (needed for joins FROM other tables TO this table)
+	for (auto &pk : meta.pks) {
+		if (added_columns.insert(StringUtil::Lower(pk)).second) {
+			required_columns.push_back(pk);
+		}
+	}
+
+	// 2. Add FK columns (needed for joins FROM this table TO other tables, and for PU hash)
+	for (auto &fk_pair : meta.fks) {
+		const string &referenced_table = fk_pair.first;
+		const vector<string> &fk_cols = fk_pair.second;
+
+		// Check if this FK references a table in the FK path or a privacy unit
+		bool is_relevant = false;
+		for (auto &path_table : fk_path) {
+			if (StringUtil::Lower(path_table) == StringUtil::Lower(referenced_table)) {
+				is_relevant = true;
+				break;
+			}
+		}
+		if (!is_relevant) {
+			for (auto &pu : privacy_units) {
+				if (StringUtil::Lower(pu) == StringUtil::Lower(referenced_table)) {
+					is_relevant = true;
+					break;
+				}
+			}
+		}
+
+		if (is_relevant) {
+			for (auto &fk_col : fk_cols) {
+				if (added_columns.insert(StringUtil::Lower(fk_col)).second) {
+					required_columns.push_back(fk_col);
+				}
+			}
+		}
+	}
+
+#ifdef DEBUG
+	if (!required_columns.empty()) {
+		string cols_str;
+		for (auto &col : required_columns) {
+			if (!cols_str.empty())
+				cols_str += ", ";
+			cols_str += col;
+		}
+		Printer::Print("GetRequiredColumnsForTable: Table " + table_name + " requires columns: [" + cols_str + "]");
+	}
+#endif
+
+	return required_columns;
+}
+
 void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtensionInput &input,
                          unique_ptr<LogicalOperator> &plan, const vector<string> &gets_missing,
                          const vector<string> &gets_present, const vector<string> &fk_path,
@@ -154,7 +225,9 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 				throw InternalException("PAC compiler: missing table metadata for missing GET: " + table);
 			}
 			vector<string> pks = it->second.pks;
-			auto get = CreateLogicalGet(input.context, plan, table, idx);
+			// Get required columns for this table (PKs and relevant FKs)
+			auto required_cols = GetRequiredColumnsForTable(check, table, fk_path, privacy_units);
+			auto get = CreateLogicalGet(input.context, plan, table, idx, required_cols);
 			get_map[table] = std::move(get);
 			ordered_table_names.push_back(table);
 			idx++;
@@ -367,7 +440,9 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 					throw InternalException("PAC compiler: missing table metadata for table: " + table);
 				}
 				vector<string> pks = it->second.pks;
-				auto get = CreateLogicalGet(input.context, plan, table, local_idx);
+				// Get required columns for this table (PKs and relevant FKs)
+				auto required_cols = GetRequiredColumnsForTable(check, table, fk_path, privacy_units);
+				auto get = CreateLogicalGet(input.context, plan, table, local_idx, required_cols);
 
 				// Remember the table index of the FK table for this instance
 				if (table == fk_table_with_pu_reference) {
@@ -621,8 +696,11 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 								auto local_idx = GetNextTableIndex(plan);
 
 								// Create a join to the FK table
-								auto new_get =
-								    CreateLogicalGet(input.context, plan, fk_table_with_pu_reference, local_idx);
+								// Get required columns for this table (PKs and relevant FKs)
+								auto required_cols = GetRequiredColumnsForTable(check, fk_table_with_pu_reference,
+								                                                fk_path, privacy_units);
+								auto new_get = CreateLogicalGet(input.context, plan, fk_table_with_pu_reference,
+								                                local_idx, required_cols);
 								idx_t fk_table_idx = local_idx;
 
 								auto join = CreateLogicalJoin(check, input.context, std::move(current_node),
@@ -772,7 +850,10 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 										                        table_to_add);
 									}
 
-									auto table_get_new = CreateLogicalGet(input.context, plan, table_to_add, local_idx);
+									auto required_cols =
+									    GetRequiredColumnsForTable(check, table_to_add, fk_path, privacy_units);
+									auto table_get_new =
+									    CreateLogicalGet(input.context, plan, table_to_add, local_idx, required_cols);
 
 									if (table_to_add == fk_table_with_pu_reference) {
 										fk_table_idx = local_idx;
@@ -824,7 +905,9 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 						throw InternalException("PAC compiler: missing table metadata for table: " + table);
 					}
 					vector<string> pks = it->second.pks;
-					auto get = CreateLogicalGet(input.context, plan, table, local_idx);
+					// Get required columns for this table (PKs and relevant FKs)
+					auto required_cols = GetRequiredColumnsForTable(check, table, fk_path, privacy_units);
+					auto get = CreateLogicalGet(input.context, plan, table, local_idx, required_cols);
 
 					// Remember the table index of the FK table for this instance
 					if (table == fk_table_with_pu_reference) {
@@ -1618,7 +1701,7 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
  * 3. For each target aggregate:
  *    - For each PU table in the aggregate's subtree:
  *      * Determine whether to use rowid or primary key columns for hashing
- *      * Build hash expression: hash(pk) or hash(xor(pk1, pk2, ...)) for composite PKs
+ *      *      * Build hash expression: hash(pk) or hash(xor(pk1, pk2, ...)) for composite PKs
  *      * Propagate the hash expression through projections to the aggregate level
  *    - Combine all PU hash expressions with AND (for multi-PU queries)
  *    - Transform the aggregate to use PAC functions
