@@ -29,6 +29,7 @@
 #include "duckdb/catalog/catalog_entry/aggregate_function_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/scalar_function_catalog_entry.hpp"
 #include "duckdb/common/types.hpp"
+#include "duckdb/function/scalar/struct_functions.hpp"
 
 namespace duckdb {
 
@@ -58,6 +59,28 @@ string GetCountersVariant(const string &aggregate_name) {
 	return aggregate_name + "_counters";
 }
 
+// Check if a type is numerical (can be used with pac_noised)
+static bool IsNumericalType(const LogicalType &type) {
+	switch (type.id()) {
+	case LogicalTypeId::TINYINT:
+	case LogicalTypeId::SMALLINT:
+	case LogicalTypeId::INTEGER:
+	case LogicalTypeId::BIGINT:
+	case LogicalTypeId::UTINYINT:
+	case LogicalTypeId::USMALLINT:
+	case LogicalTypeId::UINTEGER:
+	case LogicalTypeId::UBIGINT:
+	case LogicalTypeId::HUGEINT:
+	case LogicalTypeId::UHUGEINT:
+	case LogicalTypeId::FLOAT:
+	case LogicalTypeId::DOUBLE:
+	case LogicalTypeId::DECIMAL:
+		return true;
+	default:
+		return false;
+	}
+}
+
 // Forward declarations
 static string FindPacAggregateInExpressionWithPlan(Expression *expr, LogicalOperator *plan_root);
 static string TracePacAggregateFromBinding(const ColumnBinding &binding, LogicalOperator *plan_root);
@@ -75,6 +98,23 @@ struct PacBindingInfo {
 
 // Forward declaration for FindAllPacBindingsInExpression
 static vector<PacBindingInfo> FindAllPacBindingsInExpression(Expression *expr, LogicalOperator *plan_root);
+
+// Helper: Find the first aggregate operator in a subtree
+static LogicalAggregate *FindFirstAggregateInSubtree(LogicalOperator *op) {
+	if (!op) {
+		return nullptr;
+	}
+	if (op->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+		return &op->Cast<LogicalAggregate>();
+	}
+	for (auto &child : op->children) {
+		auto *agg = FindFirstAggregateInSubtree(child.get());
+		if (agg) {
+			return agg;
+		}
+	}
+	return nullptr;
+}
 
 // Helper: Find the operator in the plan that produces a given table_index
 static LogicalOperator *FindOperatorByTableIndex(LogicalOperator *op, idx_t table_index) {
@@ -94,6 +134,8 @@ static LogicalOperator *FindOperatorByTableIndex(LogicalOperator *op, idx_t tabl
 			return op;
 		}
 	}
+	// Note: Joins don't have their own table_index, they pass through from children
+	// So we just recurse into children (handled below)
 
 	// Recurse into children
 	for (auto &child : op->children) {
@@ -388,10 +430,12 @@ static void FindCategoricalPatternsInOperatorWithPlan(LogicalOperator *op, Logic
 				continue;
 			}
 
-			// Only add if NOT inside an aggregate (categorical = outer query has no aggregate)
-			if (now_inside_aggregate) {
-				continue;
-			}
+			// NOTE: We previously had a check "if (now_inside_aggregate) continue;" here,
+			// but that was incorrect. It blocked categorical patterns when the outer query
+			// has an aggregate (e.g., Q17: sum(l_extendedprice) with a subquery avg comparison).
+			// The IsHavingClausePattern check below correctly distinguishes:
+			// - HAVING: comparison uses the immediate parent aggregate
+			// - Categorical: comparison uses a subquery aggregate
 
 			// Check if ANY of the bindings is NOT a HAVING clause aggregate
 			// If at least one binding is from a subquery (not HAVING), this is categorical
@@ -490,11 +534,19 @@ bool IsCategoricalQuery(unique_ptr<LogicalOperator> &plan, vector<CategoricalPat
 // Helper to find the aggregate operator that produces a given column binding
 static LogicalAggregate *FindAggregateForBinding(const ColumnBinding &binding, LogicalOperator *plan_root) {
 	auto *source_op = FindOperatorByTableIndex(plan_root, binding.table_index);
+#ifdef DEBUG
+	Printer::Print("FindAggregateForBinding: binding=[" + std::to_string(binding.table_index) + "." +
+	               std::to_string(binding.column_index) +
+	               "], source_op=" + (source_op ? LogicalOperatorToString(source_op->type) : "null"));
+#endif
 	if (!source_op) {
 		return nullptr;
 	}
 
 	if (source_op->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+#ifdef DEBUG
+		Printer::Print("  Found aggregate directly!");
+#endif
 		return &source_op->Cast<LogicalAggregate>();
 	}
 
@@ -503,10 +555,74 @@ static LogicalAggregate *FindAggregateForBinding(const ColumnBinding &binding, L
 		auto &proj = source_op->Cast<LogicalProjection>();
 		if (binding.column_index < proj.expressions.size()) {
 			auto &expr = proj.expressions[binding.column_index];
+#ifdef DEBUG
+			Printer::Print("  Projection expr type: " + ExpressionTypeToString(expr->type));
+#endif
 			// Check if this expression is a column reference to an aggregate
 			if (expr->type == ExpressionType::BOUND_COLUMN_REF) {
 				auto &col_ref = expr->Cast<BoundColumnRefExpression>();
 				return FindAggregateForBinding(col_ref.binding, plan_root);
+			}
+			// Check if it's a cast expression (e.g., CAST(agg_result AS DOUBLE) or CAST(coalesce(agg, 0) AS INTEGER))
+			if (expr->type == ExpressionType::OPERATOR_CAST) {
+				auto &cast_expr = expr->Cast<BoundCastExpression>();
+#ifdef DEBUG
+				Printer::Print("  Cast child type: " + ExpressionTypeToString(cast_expr.child->type));
+#endif
+				if (cast_expr.child->type == ExpressionType::BOUND_COLUMN_REF) {
+					auto &col_ref = cast_expr.child->Cast<BoundColumnRefExpression>();
+					return FindAggregateForBinding(col_ref.binding, plan_root);
+				}
+				// Also check for CAST(function(...)) or CAST(coalesce(...)) where it contains aggregate reference
+				// Handle both BOUND_FUNCTION and OPERATOR_COALESCE
+				if (cast_expr.child->type == ExpressionType::BOUND_FUNCTION ||
+				    cast_expr.child->type == ExpressionType::OPERATOR_COALESCE) {
+					// Get children based on expression type
+					vector<Expression *> children;
+					if (cast_expr.child->type == ExpressionType::BOUND_FUNCTION) {
+						auto &func_expr = cast_expr.child->Cast<BoundFunctionExpression>();
+						for (auto &c : func_expr.children) {
+							children.push_back(c.get());
+						}
+					} else {
+						auto &op_expr = cast_expr.child->Cast<BoundOperatorExpression>();
+						for (auto &c : op_expr.children) {
+							children.push_back(c.get());
+						}
+					}
+#ifdef DEBUG
+					Printer::Print("  Checking " + std::to_string(children.size()) + " children for aggregate ref");
+#endif
+					for (auto *child : children) {
+#ifdef DEBUG
+						Printer::Print("    Child type: " + ExpressionTypeToString(child->type));
+#endif
+						if (child->type == ExpressionType::BOUND_COLUMN_REF) {
+							auto &col_ref = child->Cast<BoundColumnRefExpression>();
+							auto *agg = FindAggregateForBinding(col_ref.binding, plan_root);
+							if (agg) {
+								return agg;
+							}
+						}
+						// Also check for aggregate expressions directly (e.g., COALESCE(sum(...), 0))
+						if (child->type == ExpressionType::BOUND_AGGREGATE) {
+							auto &agg_expr = child->Cast<BoundAggregateExpression>();
+#ifdef DEBUG
+							Printer::Print("    Found BOUND_AGGREGATE: " + agg_expr.function.name);
+#endif
+							if (IsPacAggregateOrCounters(agg_expr.function.name)) {
+								// The aggregate is embedded in the projection expression
+								// Search the children of the source operator (the projection) for the aggregate
+								for (auto &source_child : source_op->children) {
+									auto *agg = FindFirstAggregateInSubtree(source_child.get());
+									if (agg) {
+										return agg;
+									}
+								}
+							}
+						}
+					}
+				}
 			}
 			// Check if it's a function that references an aggregate (e.g., 0.5 * agg_result)
 			if (expr->type == ExpressionType::BOUND_FUNCTION) {
@@ -517,6 +633,17 @@ static LogicalAggregate *FindAggregateForBinding(const ColumnBinding &binding, L
 						auto *agg = FindAggregateForBinding(col_ref.binding, plan_root);
 						if (agg) {
 							return agg;
+						}
+					}
+					// Also check for CAST(col_ref) inside functions (e.g., CAST(agg_result AS DOUBLE) / 5.0)
+					if (child->type == ExpressionType::OPERATOR_CAST) {
+						auto &cast_expr = child->Cast<BoundCastExpression>();
+						if (cast_expr.child->type == ExpressionType::BOUND_COLUMN_REF) {
+							auto &col_ref = cast_expr.child->Cast<BoundColumnRefExpression>();
+							auto *agg = FindAggregateForBinding(col_ref.binding, plan_root);
+							if (agg) {
+								return agg;
+							}
 						}
 					}
 				}
@@ -810,6 +937,41 @@ static vector<PacBindingInfo> FindAllPacBindingsInExpression(Expression *expr, L
 // Lambda-based Categorical Rewrite Helpers
 //==============================================================================
 
+// Build an operator expression from cloned children, handling COALESCE type coercion
+// For COALESCE, all children must have compatible types. If the first child changed to DOUBLE
+// (typical when PAC binding becomes a lambda element), cast other children to match.
+static unique_ptr<Expression> BuildClonedOperatorExpression(Expression *original_expr,
+                                                            vector<unique_ptr<Expression>> new_children) {
+	auto &op = original_expr->Cast<BoundOperatorExpression>();
+	LogicalType result_type = op.return_type;
+
+	// For COALESCE with mismatched child types, cast all to the first child's type
+	if (original_expr->type == ExpressionType::OPERATOR_COALESCE && new_children.size() > 1) {
+		LogicalType first_type = new_children[0]->return_type;
+		bool types_mismatch = false;
+		for (idx_t i = 1; i < new_children.size(); i++) {
+			if (new_children[i]->return_type != first_type) {
+				types_mismatch = true;
+				break;
+			}
+		}
+		if (types_mismatch) {
+			for (auto &child : new_children) {
+				if (child->return_type != first_type) {
+					child = BoundCastExpression::AddDefaultCastToType(std::move(child), first_type);
+				}
+			}
+			result_type = first_type;
+		}
+	}
+
+	auto result = make_uniq<BoundOperatorExpression>(original_expr->type, result_type);
+	for (auto &child : new_children) {
+		result->children.push_back(std::move(child));
+	}
+	return result;
+}
+
 // Clone an expression tree for use as a lambda body
 // PAC aggregate column ref becomes BoundReferenceExpression(0) - the list element
 // Other column refs are captured and become BoundReferenceExpression(1+i)
@@ -954,15 +1116,15 @@ static unique_ptr<Expression> CloneForLambdaBody(Expression *expr, const ColumnB
 		return result;
 	}
 
-	// Handle operator expressions (e.g., AND, OR, NOT, arithmetic)
+	// Handle operator expressions (e.g., AND, OR, NOT, arithmetic, COALESCE)
 	if (expr->GetExpressionClass() == ExpressionClass::BOUND_OPERATOR) {
 		auto &op = expr->Cast<BoundOperatorExpression>();
-		auto result = make_uniq<BoundOperatorExpression>(expr->type, op.return_type);
+		vector<unique_ptr<Expression>> new_children;
 		for (auto &child : op.children) {
-			result->children.push_back(
+			new_children.push_back(
 			    CloneForLambdaBody(child.get(), pac_binding, captures, capture_map, plan_root, element_type));
 		}
-		return result;
+		return BuildClonedOperatorExpression(expr, std::move(new_children));
 	}
 
 	// For any other expression type, try to copy it directly
@@ -1074,36 +1236,36 @@ static unique_ptr<Expression> CloneForLambdaBodyMulti(Expression *expr,
 #endif
 
 			// Create: elem.field_name (where elem is BoundReferenceExpression(0))
-			// The struct_extract will be done by accessing the struct field
-			// In DuckDB, for a struct, we use struct_extract(struct, 'field_name')
-			// But inside a lambda, we have BoundReferenceExpression(0) as the element
-			// We need to create a struct_extract function call
+			// Use struct_extract_at which extracts by index position
 
 			// Create the struct element reference
 			auto elem_ref = make_uniq<BoundReferenceExpression>("elem", struct_type, 0);
 
-			// Create struct_extract(elem, 'field_name')
-			auto field_const = make_uniq<BoundConstantExpression>(Value(field_name));
-
-			// Build the struct_extract manually (it's a special function)
-			// The return type is the field type from the struct
+			// Get the field type from the struct
 			auto child_types = StructType::GetChildTypes(struct_type);
 			LogicalType extract_return_type = LogicalType::DOUBLE;
-			for (auto &child : child_types) {
-				if (child.first == field_name) {
-					extract_return_type = child.second;
+			idx_t field_idx = 0;
+			for (idx_t j = 0; j < child_types.size(); j++) {
+				if (child_types[j].first == field_name) {
+					extract_return_type = child_types[j].second;
+					field_idx = j;
 					break;
 				}
 			}
 
-			// Use struct_extract function
+			// For struct field access inside a lambda, use struct_extract_at
+			// which extracts by position (bind data is 0-indexed internally, but BIGINT argument is 1-based)
+			auto extract_func = StructExtractAtFun::GetFunction();
+			auto bind_data = StructExtractAtFun::GetBindData(field_idx);
+
 			vector<unique_ptr<Expression>> extract_children;
 			extract_children.push_back(std::move(elem_ref));
-			extract_children.push_back(std::move(field_const));
+			// Add the 1-based index argument as required by struct_extract_at
+			extract_children.push_back(
+			    make_uniq<BoundConstantExpression>(Value::BIGINT(static_cast<int64_t>(field_idx + 1))));
 
-			// For struct_extract, we create a bound operator expression
-			auto result = make_uniq<BoundOperatorExpression>(ExpressionType::STRUCT_EXTRACT, extract_return_type);
-			result->children = std::move(extract_children);
+			auto result = make_uniq<BoundFunctionExpression>(extract_return_type, extract_func,
+			                                                 std::move(extract_children), std::move(bind_data));
 
 			return result;
 		}
@@ -1123,30 +1285,32 @@ static unique_ptr<Expression> CloneForLambdaBodyMulti(Expression *expr,
 					auto traced_it = binding_to_index.find(traced_hash);
 					if (traced_it != binding_to_index.end()) {
 						// Found it through tracing - same logic as above
-						idx_t field_index = traced_it->second;
-						string field_name = GetStructFieldName(field_index);
-						LogicalType field_type = LogicalType::DOUBLE;
-						auto type_it = binding_to_type.find(traced_hash);
-						if (type_it != binding_to_type.end()) {
-							field_type = type_it->second;
-						}
+						idx_t field_index_traced = traced_it->second;
+						string field_name_traced = GetStructFieldName(field_index_traced);
 
 						auto elem_ref = make_uniq<BoundReferenceExpression>("elem", struct_type, 0);
-						auto field_const = make_uniq<BoundConstantExpression>(Value(field_name));
 						auto child_types = StructType::GetChildTypes(struct_type);
 						LogicalType extract_return_type = LogicalType::DOUBLE;
-						for (auto &child : child_types) {
-							if (child.first == field_name) {
-								extract_return_type = child.second;
+						idx_t struct_field_idx = 0;
+						for (idx_t j = 0; j < child_types.size(); j++) {
+							if (child_types[j].first == field_name_traced) {
+								extract_return_type = child_types[j].second;
+								struct_field_idx = j;
 								break;
 							}
 						}
+
+						auto extract_func = StructExtractAtFun::GetFunction();
+						auto bind_data = StructExtractAtFun::GetBindData(struct_field_idx);
+
 						vector<unique_ptr<Expression>> extract_children;
 						extract_children.push_back(std::move(elem_ref));
-						extract_children.push_back(std::move(field_const));
-						auto result =
-						    make_uniq<BoundOperatorExpression>(ExpressionType::STRUCT_EXTRACT, extract_return_type);
-						result->children = std::move(extract_children);
+						// Add the 1-based index argument as required by struct_extract_at
+						extract_children.push_back(make_uniq<BoundConstantExpression>(
+						    Value::BIGINT(static_cast<int64_t>(struct_field_idx + 1))));
+
+						auto result = make_uniq<BoundFunctionExpression>(
+						    extract_return_type, extract_func, std::move(extract_children), std::move(bind_data));
 						return result;
 					}
 					source_op = FindOperatorByTableIndex(plan_root, traced.table_index);
@@ -1183,6 +1347,13 @@ static unique_ptr<Expression> CloneForLambdaBodyMulti(Expression *expr,
 		auto &cast = expr->Cast<BoundCastExpression>();
 		auto child_clone = CloneForLambdaBodyMulti(cast.child.get(), binding_to_index, binding_to_type, captures,
 		                                           capture_map, plan_root, struct_type);
+		// If the child's type changed (e.g., from DECIMAL to DOUBLE due to PAC counter conversion),
+		// we need to create a new cast with proper cast info for the new source type.
+		// Using AddDefaultCastToType creates a proper cast from child's actual return type to target.
+		if (child_clone->return_type != cast.child->return_type) {
+			return BoundCastExpression::AddDefaultCastToType(std::move(child_clone), cast.return_type, cast.try_cast);
+		}
+		// Types match - safe to copy the original cast
 		auto cast_copy = cast.Copy();
 		auto &new_cast = cast_copy->Cast<BoundCastExpression>();
 		new_cast.child = std::move(child_clone);
@@ -1212,15 +1383,14 @@ static unique_ptr<Expression> CloneForLambdaBodyMulti(Expression *expr,
 		return result;
 	}
 
-	// Handle operator expressions (e.g., AND, OR, NOT, arithmetic)
+	// Handle operator expressions (e.g., AND, OR, NOT, arithmetic, COALESCE)
 	if (expr->GetExpressionClass() == ExpressionClass::BOUND_OPERATOR) {
-		auto &op = expr->Cast<BoundOperatorExpression>();
-		auto result = make_uniq<BoundOperatorExpression>(expr->type, op.return_type);
-		for (auto &child : op.children) {
-			result->children.push_back(CloneForLambdaBodyMulti(child.get(), binding_to_index, binding_to_type, captures,
-			                                                   capture_map, plan_root, struct_type));
+		vector<unique_ptr<Expression>> new_children;
+		for (auto &child : expr->Cast<BoundOperatorExpression>().children) {
+			new_children.push_back(CloneForLambdaBodyMulti(child.get(), binding_to_index, binding_to_type, captures,
+			                                               capture_map, plan_root, struct_type));
 		}
-		return result;
+		return BuildClonedOperatorExpression(expr, std::move(new_children));
 	}
 
 	// For any other expression type, try to copy it directly
@@ -1275,6 +1445,16 @@ static unique_ptr<Expression> BuildListZipCall(OptimizerExtensionInput &input,
 	return result;
 }
 
+// Build a pac_noised function call to reduce LIST<DOUBLE> (64 counters) to a single noised DOUBLE
+static unique_ptr<Expression> BuildPacNoisedCall(OptimizerExtensionInput &input, unique_ptr<Expression> counters_list) {
+	// counters_list is LIST<DOUBLE> (64 values)
+	// Returns: pac_noised(counters_list) -> DOUBLE
+	return input.optimizer.BindScalarFunction("pac_noised", std::move(counters_list));
+}
+
+// Forward declaration
+static void PropagateCountersType(const ColumnBinding &binding, LogicalOperator *plan_root);
+
 // Helper to extract scalar constant and PAC column ref from a multiplication expression
 // Returns true if the expression matches pattern: scalar * col_ref or col_ref * scalar
 static bool ExtractMultiplicationPattern(Expression *expr, LogicalOperator *plan_root,
@@ -1311,12 +1491,78 @@ static bool ExtractMultiplicationPattern(Expression *expr, LogicalOperator *plan
 	return false;
 }
 
+// Check if an expression is already wrapped in pac_noised
+static bool IsAlreadyWrappedInPacNoised(Expression *expr) {
+	if (!expr) {
+		return false;
+	}
+	if (expr->type == ExpressionType::BOUND_FUNCTION) {
+		auto &func = expr->Cast<BoundFunctionExpression>();
+		return func.function.name == "pac_noised";
+	}
+	// Check for CAST(pac_noised(...))
+	if (expr->type == ExpressionType::OPERATOR_CAST) {
+		auto &cast = expr->Cast<BoundCastExpression>();
+		return IsAlreadyWrappedInPacNoised(cast.child.get());
+	}
+	return false;
+}
+
+// Check if this projection expression is part of a filter rewrite (not a final output)
+// Filter rewrite expressions will have boolean return type ultimately
+static bool IsFilterPatternProjection(Expression *expr, LogicalOperator *op) {
+	// If the expression returns LIST<BOOLEAN>, it's likely a filter pattern
+	if (expr->return_type.id() == LogicalTypeId::LIST) {
+		auto &list_type = ListType::GetChildType(expr->return_type);
+		if (list_type.id() == LogicalTypeId::BOOLEAN) {
+			return true;
+		}
+	}
+	return false;
+}
+
+// Check if this projection's output is referenced by a categorical filter pattern
+// If so, we should NOT wrap it with pac_noised - the filter will handle the rewrite
+static bool IsProjectionReferencedByFilterPattern(LogicalProjection &proj,
+                                                  const vector<CategoricalPatternInfo> &patterns,
+                                                  LogicalOperator *plan_root) {
+	// For each pattern, check if the filter expression references this projection's output
+	for (auto &pattern : patterns) {
+		if (!pattern.parent_op || pattern.parent_op->type != LogicalOperatorType::LOGICAL_FILTER) {
+			continue;
+		}
+
+		auto &filter = pattern.parent_op->Cast<LogicalFilter>();
+		if (pattern.expr_index >= filter.expressions.size()) {
+			continue;
+		}
+
+		auto &filter_expr = filter.expressions[pattern.expr_index];
+
+		// Find all PAC bindings in the filter expression
+		auto pac_bindings = FindAllPacBindingsInExpression(filter_expr.get(), plan_root);
+		for (auto &binding_info : pac_bindings) {
+			// Check if the binding references this projection
+			if (binding_info.binding.table_index == proj.table_index) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
 // Rewrite projection expressions that contain arithmetic with PAC aggregates
-// e.g., 0.5 * agg_result becomes list_transform(agg_result, elem -> 0.5 * elem)
+// Handles three cases:
+// 1. Simple column reference: Just update type to LIST<DOUBLE>
+// 2. Single PAC aggregate with arithmetic: list_transform + pac_noised for scalar result
+// 3. Multiple PAC aggregates: list_zip + list_transform + pac_noised
 // This must be called AFTER ReplacePacAggregatesWithCounters
+// IMPORTANT: Projections that are referenced by filter patterns should NOT be rewritten here
+//            because the filter pattern rewrite will handle them with list_zip + list_transform + pac_filter
 static void RewriteProjectionsWithCounters(LogicalOperator *op, OptimizerExtensionInput &input,
                                            LogicalOperator *plan_root,
-                                           const unordered_set<LogicalAggregate *> &categorical_aggregates) {
+                                           const unordered_set<LogicalAggregate *> &categorical_aggregates,
+                                           const vector<CategoricalPatternInfo> &patterns) {
 	if (!op) {
 		return;
 	}
@@ -1324,13 +1570,29 @@ static void RewriteProjectionsWithCounters(LogicalOperator *op, OptimizerExtensi
 	// Process projections that have arithmetic with PAC counters
 	if (op->type == LogicalOperatorType::LOGICAL_PROJECTION) {
 		auto &proj = op->Cast<LogicalProjection>();
+
+		// Check if this projection's output is referenced by a categorical filter pattern
+		// If so, we need to rewrite expressions to use list_transform but NOT add pac_noised
+		// The filter pattern will handle the final pac_filter wrapping
+		bool is_filter_pattern_projection = IsProjectionReferencedByFilterPattern(proj, patterns, plan_root);
+#ifdef DEBUG
+		if (is_filter_pattern_projection) {
+			Printer::Print("Projection #" + std::to_string(proj.table_index) +
+			               " is referenced by filter pattern - will rewrite without pac_noised");
+		}
+#endif
+
 		for (idx_t i = 0; i < proj.expressions.size(); i++) {
 			auto &expr = proj.expressions[i];
 
-			// Check if this expression contains a PAC aggregate binding
-			ColumnBinding pac_binding;
-			string aggregate_name;
-			if (!FindSinglePacBindingInExpression(expr.get(), plan_root, pac_binding, aggregate_name)) {
+			// Skip if already wrapped in pac_noised
+			if (IsAlreadyWrappedInPacNoised(expr.get())) {
+				continue;
+			}
+
+			// Find ALL PAC bindings in this expression
+			auto pac_bindings = FindAllPacBindingsInExpression(expr.get(), plan_root);
+			if (pac_bindings.empty()) {
 				continue;
 			}
 
@@ -1341,64 +1603,281 @@ static void RewriteProjectionsWithCounters(LogicalOperator *op, OptimizerExtensi
 				continue;
 			}
 
-			// Try to extract simple multiplication pattern: scalar * col_ref
-			unique_ptr<Expression> scalar_expr;
-			ColumnBinding mult_pac_binding;
-			if (ExtractMultiplicationPattern(expr.get(), plan_root, scalar_expr, mult_pac_binding)) {
-#ifdef DEBUG
-				Printer::Print("Rewriting multiplication projection with PAC aggregate:");
-				Printer::Print("  Original: " + expr->ToString());
-				Printer::Print("  PAC binding: [" + std::to_string(mult_pac_binding.table_index) + "." +
-				               std::to_string(mult_pac_binding.column_index) + "]");
-#endif
-				// Build fresh lambda body using BindScalarFunction to get correct types
-				// Lambda body: elem -> scalar * elem (where elem is DOUBLE)
-				auto elem_ref = make_uniq<BoundReferenceExpression>("elem", LogicalType::DOUBLE, 0);
-
-				// Cast scalar to DOUBLE if needed
-				if (scalar_expr->return_type != LogicalType::DOUBLE) {
-					scalar_expr =
-					    BoundCastExpression::AddDefaultCastToType(std::move(scalar_expr), LogicalType::DOUBLE);
-				}
-
-				// Bind multiplication with DOUBLE types
-				auto mult_body = input.optimizer.BindScalarFunction("*", std::move(scalar_expr), std::move(elem_ref));
-
-				// Build the lambda
-				auto lambda = BuildPacLambda(std::move(mult_body), {});
-
-				// Get the counters column reference
-				auto counters_ref = make_uniq<BoundColumnRefExpression>(
-				    "pac_counters", LogicalType::LIST(LogicalType::DOUBLE), mult_pac_binding);
-
-				// Build: list_transform(counters, elem -> scalar * elem) -> LIST<DOUBLE>
-				auto list_transform =
-				    BuildListTransformCall(input, std::move(counters_ref), std::move(lambda), LogicalType::DOUBLE);
-
-#ifdef DEBUG
-				Printer::Print("  Rewritten: " + list_transform->ToString());
-#endif
-
-				// Replace the expression
-				proj.expressions[i] = std::move(list_transform);
-				proj.types[i] = LogicalType::LIST(LogicalType::DOUBLE);
+			// Skip filter pattern projections (they're handled separately)
+			if (IsFilterPatternProjection(expr.get(), op)) {
 				continue;
 			}
 
-			// For more complex expressions, fall back to generic cloning approach
-			// This may not work correctly for all cases due to type mismatches
+			// Capture the original expression's target type for final casting
+			LogicalType target_type = expr->return_type;
+
+			// Only rewrite expressions with numerical result types
+			// pac_noised expects numerical input and produces DOUBLE
+			if (!IsNumericalType(target_type)) {
 #ifdef DEBUG
-			Printer::Print("Warning: Complex projection expression with PAC aggregate not fully supported:");
-			Printer::Print("  Expression: " + expr->ToString());
+				Printer::Print("RewriteProjectionsWithCounters: Skipping non-numerical type " + target_type.ToString());
 #endif
-			// Just update the expression's return type and hope for the best
-			// This is a fallback and may cause issues
+				continue;
+			}
+
+#ifdef DEBUG
+			Printer::Print("RewriteProjectionsWithCounters: Found projection with " +
+			               std::to_string(pac_bindings.size()) + " PAC binding(s)");
+			Printer::Print("  Original expr: " + expr->ToString());
+			Printer::Print("  Target type: " + target_type.ToString());
+#endif
+
+			if (pac_bindings.size() == 1) {
+				// ============================================================
+				// SINGLE AGGREGATE: list_transform + pac_noised
+				// ============================================================
+				auto &binding_info = pac_bindings[0];
+				ColumnBinding pac_binding = binding_info.binding;
+
+				// Propagate type to the binding source
+				PropagateCountersType(pac_binding, plan_root);
+
+				// Try to extract simple multiplication pattern: scalar * col_ref
+				unique_ptr<Expression> scalar_expr;
+				ColumnBinding mult_pac_binding;
+				if (ExtractMultiplicationPattern(expr.get(), plan_root, scalar_expr, mult_pac_binding)) {
+#ifdef DEBUG
+					Printer::Print("  Single-aggregate multiplication pattern");
+#endif
+					// Build fresh lambda body using BindScalarFunction to get correct types
+					// Lambda body: elem -> scalar * elem (where elem is DOUBLE)
+					auto elem_ref = make_uniq<BoundReferenceExpression>("elem", LogicalType::DOUBLE, 0);
+
+					// Cast scalar to DOUBLE if needed
+					if (scalar_expr->return_type != LogicalType::DOUBLE) {
+						scalar_expr =
+						    BoundCastExpression::AddDefaultCastToType(std::move(scalar_expr), LogicalType::DOUBLE);
+					}
+
+					// Bind multiplication with DOUBLE types
+					auto mult_body =
+					    input.optimizer.BindScalarFunction("*", std::move(scalar_expr), std::move(elem_ref));
+
+					// Build the lambda
+					auto lambda = BuildPacLambda(std::move(mult_body), {});
+
+					// Get the counters column reference
+					auto counters_ref = make_uniq<BoundColumnRefExpression>(
+					    "pac_counters", LogicalType::LIST(LogicalType::DOUBLE), mult_pac_binding);
+
+					// Build: list_transform(counters, elem -> scalar * elem) -> LIST<DOUBLE>
+					auto list_transform =
+					    BuildListTransformCall(input, std::move(counters_ref), std::move(lambda), LogicalType::DOUBLE);
+
+					unique_ptr<Expression> final_expr;
+					LogicalType final_type;
+
+					if (is_filter_pattern_projection) {
+						// For filter pattern projections, keep as LIST<DOUBLE> - no pac_noised
+						// The filter rewrite's double-lambda will handle the rest
+						final_expr = std::move(list_transform);
+						final_type = LogicalType::LIST(LogicalType::DOUBLE);
+					} else {
+						// Wrap with pac_noised to get scalar result
+						auto noised = BuildPacNoisedCall(input, std::move(list_transform));
+						// Cast to target type if needed
+						if (target_type != LogicalType::DOUBLE) {
+							noised = BoundCastExpression::AddDefaultCastToType(std::move(noised), target_type);
+						}
+						final_expr = std::move(noised);
+						final_type = target_type;
+					}
+
+#ifdef DEBUG
+					Printer::Print("  Rewritten to: " + final_expr->ToString());
+#endif
+
+					// Replace the expression
+					proj.expressions[i] = std::move(final_expr);
+					proj.types[i] = final_type;
+					continue;
+				}
+
+				// For single-aggregate expressions, use list_transform approach
+				// Filter pattern projections need LIST<DOUBLE> output; non-filter need scalar via pac_noised
+
+				if (is_filter_pattern_projection) {
+					// Check if expression is just CAST(col_ref) - can output raw counters
+					bool is_simple_cast =
+					    expr->type == ExpressionType::OPERATOR_CAST &&
+					    expr->Cast<BoundCastExpression>().child->type == ExpressionType::BOUND_COLUMN_REF;
+					if (is_simple_cast) {
+						// Simple cast on column ref - output raw counters, filter rewrite handles the cast
+						proj.expressions[i] = make_uniq<BoundColumnRefExpression>(
+						    "pac_counters", LogicalType::LIST(LogicalType::DOUBLE), pac_binding);
+						proj.types[i] = LogicalType::LIST(LogicalType::DOUBLE);
+						continue;
+					}
+
+					// Complex expression - strip outer CAST if present, then transform
+					Expression *expr_to_clone = expr.get();
+					if (expr->type == ExpressionType::OPERATOR_CAST &&
+					    expr->Cast<BoundCastExpression>().return_type != LogicalType::DOUBLE) {
+						expr_to_clone = expr->Cast<BoundCastExpression>().child.get();
+					}
+
+					vector<unique_ptr<Expression>> captures;
+					unordered_map<uint64_t, idx_t> capture_map;
+					auto lambda_body = CloneForLambdaBody(expr_to_clone, pac_binding, captures, capture_map, plan_root,
+					                                      LogicalType::DOUBLE);
+					auto lambda = BuildPacLambda(std::move(lambda_body), std::move(captures));
+					auto counters_ref = make_uniq<BoundColumnRefExpression>(
+					    "pac_counters", LogicalType::LIST(LogicalType::DOUBLE), pac_binding);
+					proj.expressions[i] =
+					    BuildListTransformCall(input, std::move(counters_ref), std::move(lambda), LogicalType::DOUBLE);
+					proj.types[i] = LogicalType::LIST(LogicalType::DOUBLE);
+				} else {
+					// Non-filter: full transformation with pac_noised for scalar output
+					// pac_noised expects LIST<DOUBLE>, so we must ensure the lambda body produces DOUBLE
+					// Strip outer cast if present (we'll re-apply after pac_noised)
+					Expression *expr_to_clone = expr.get();
+					if (expr->type == ExpressionType::OPERATOR_CAST &&
+					    expr->Cast<BoundCastExpression>().return_type != LogicalType::DOUBLE) {
+						expr_to_clone = expr->Cast<BoundCastExpression>().child.get();
+					}
+
+					vector<unique_ptr<Expression>> captures;
+					unordered_map<uint64_t, idx_t> capture_map;
+					auto lambda_body = CloneForLambdaBody(expr_to_clone, pac_binding, captures, capture_map, plan_root,
+					                                      LogicalType::DOUBLE);
+
+					// Ensure lambda body produces DOUBLE for pac_noised
+					if (lambda_body->return_type != LogicalType::DOUBLE) {
+						lambda_body =
+						    BoundCastExpression::AddDefaultCastToType(std::move(lambda_body), LogicalType::DOUBLE);
+					}
+
+					auto lambda = BuildPacLambda(std::move(lambda_body), std::move(captures));
+					auto counters_ref = make_uniq<BoundColumnRefExpression>(
+					    "pac_counters", LogicalType::LIST(LogicalType::DOUBLE), pac_binding);
+					auto list_transform =
+					    BuildListTransformCall(input, std::move(counters_ref), std::move(lambda), LogicalType::DOUBLE);
+					auto noised = BuildPacNoisedCall(input, std::move(list_transform));
+					if (target_type != LogicalType::DOUBLE) {
+						noised = BoundCastExpression::AddDefaultCastToType(std::move(noised), target_type);
+					}
+					proj.expressions[i] = std::move(noised);
+					proj.types[i] = target_type;
+				}
+
+			} else {
+				// ============================================================
+				// MULTIPLE AGGREGATES: list_zip + list_transform + pac_noised
+				// ============================================================
+#ifdef DEBUG
+				Printer::Print("  Multi-aggregate list_zip pattern with " + std::to_string(pac_bindings.size()) +
+				               " bindings");
+#endif
+
+				// Propagate types to all binding sources
+				for (auto &binding_info : pac_bindings) {
+					PropagateCountersType(binding_info.binding, plan_root);
+				}
+
+				// Build counter expressions for each PAC binding
+				vector<unique_ptr<Expression>> counter_lists;
+				unordered_map<uint64_t, idx_t> binding_to_index;
+				unordered_map<uint64_t, LogicalType> binding_to_type;
+
+				for (auto &binding_info : pac_bindings) {
+					auto counters_expr = make_uniq<BoundColumnRefExpression>(
+					    "pac_counters", LogicalType::LIST(LogicalType::DOUBLE), binding_info.binding);
+					counter_lists.push_back(std::move(counters_expr));
+
+					uint64_t hash =
+					    (uint64_t(binding_info.binding.table_index) << 32) | binding_info.binding.column_index;
+					binding_to_index[hash] = binding_info.index;
+					binding_to_type[hash] = binding_info.original_type;
+				}
+
+				// Build list_zip(A1, A2, ...) -> LIST<STRUCT<a DOUBLE, b DOUBLE, ...>>
+				LogicalType struct_type;
+				auto zipped_list = BuildListZipCall(input, std::move(counter_lists), struct_type);
+
+				if (!zipped_list) {
+#ifdef DEBUG
+					Printer::Print("  Failed to build list_zip call");
+#endif
+					continue;
+				}
+
+#ifdef DEBUG
+				Printer::Print("  Built list_zip with struct type: " + struct_type.ToString());
+#endif
+
+				// Build lambda body using CloneForLambdaBodyMulti
+				// This clones the expression, replacing each PAC binding with struct field extraction
+				vector<unique_ptr<Expression>> captures;
+				unordered_map<uint64_t, idx_t> capture_map;
+
+				// For non-filter projections going to pac_noised, strip outer cast and ensure DOUBLE output
+				// pac_noised expects LIST<DOUBLE>
+				Expression *expr_to_clone = expr.get();
+				if (!is_filter_pattern_projection && expr->type == ExpressionType::OPERATOR_CAST &&
+				    expr->Cast<BoundCastExpression>().return_type != LogicalType::DOUBLE) {
+					expr_to_clone = expr->Cast<BoundCastExpression>().child.get();
+				}
+
+				auto lambda_body = CloneForLambdaBodyMulti(expr_to_clone, binding_to_index, binding_to_type, captures,
+				                                           capture_map, plan_root, struct_type);
+
+				// For non-filter projections, ensure lambda body produces DOUBLE for pac_noised
+				if (!is_filter_pattern_projection && lambda_body->return_type != LogicalType::DOUBLE) {
+					lambda_body =
+					    BoundCastExpression::AddDefaultCastToType(std::move(lambda_body), LogicalType::DOUBLE);
+				}
+
+#ifdef DEBUG
+				Printer::Print("  Lambda body created with " + std::to_string(captures.size()) + " captures");
+				Printer::Print("  Lambda body: " + lambda_body->ToString());
+#endif
+
+				// Build lambda: elem -> expr(elem.a, elem.b, ...)
+				auto lambda = BuildPacLambda(std::move(lambda_body), std::move(captures));
+
+				unique_ptr<Expression> final_expr;
+				LogicalType final_type;
+
+				if (is_filter_pattern_projection) {
+					// For filter pattern projections, keep as LIST<target_type> - no pac_noised
+					// The filter rewrite will combine these with list_zip + list_transform + pac_filter
+					auto list_transform =
+					    BuildListTransformCall(input, std::move(zipped_list), std::move(lambda), target_type);
+					final_expr = std::move(list_transform);
+					final_type = LogicalType::LIST(target_type);
+				} else {
+					// Build: list_transform(zipped_list, lambda) -> LIST<DOUBLE> for pac_noised
+					auto list_transform =
+					    BuildListTransformCall(input, std::move(zipped_list), std::move(lambda), LogicalType::DOUBLE);
+					// Wrap with pac_noised to get scalar result
+					auto noised = BuildPacNoisedCall(input, std::move(list_transform));
+					// Cast to target type if needed
+					if (target_type != LogicalType::DOUBLE) {
+						noised = BoundCastExpression::AddDefaultCastToType(std::move(noised), target_type);
+					}
+					final_expr = std::move(noised);
+					final_type = target_type;
+				}
+
+#ifdef DEBUG
+				Printer::Print("  Rewritten to: " + final_expr->ToString());
+#endif
+
+				// Replace the expression
+				proj.expressions[i] = std::move(final_expr);
+				proj.types[i] = final_type;
+			}
 		}
 	}
 
 	// Recurse into children
 	for (auto &child : op->children) {
-		RewriteProjectionsWithCounters(child.get(), input, plan_root, categorical_aggregates);
+		RewriteProjectionsWithCounters(child.get(), input, plan_root, categorical_aggregates, patterns);
 	}
 }
 
@@ -1445,7 +1924,8 @@ void RewriteCategoricalQuery(OptimizerExtensionInput &input, unique_ptr<LogicalO
 
 	// Step 3: Rewrite projections that do arithmetic with PAC aggregates
 	// e.g., 0.5 * agg_result becomes list_transform(agg_result, elem -> 0.5 * elem)
-	RewriteProjectionsWithCounters(plan.get(), input, plan.get(), categorical_aggregates);
+	// Note: Skip projections that are referenced by filter patterns - those are handled in Step 5
+	RewriteProjectionsWithCounters(plan.get(), input, plan.get(), categorical_aggregates, patterns);
 
 	// Step 4: Resolve operator types after aggregate and projection replacement
 	// This ensures column references get the correct LIST<DOUBLE> type

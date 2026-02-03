@@ -21,6 +21,7 @@
 #include "query_processing/pac_projection_propagation.hpp"
 #include "query_processing/pac_subquery_handler.hpp"
 #include "categorical/pac_categorical_rewriter.hpp"
+#include "parser/pac_parser.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/planner/operator/logical_aggregate.hpp"
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
@@ -152,6 +153,44 @@ static vector<string> GetRequiredColumnsForTable(const PACCompatibilityResult &c
 			for (auto &fk_col : fk_cols) {
 				if (added_columns.insert(StringUtil::Lower(fk_col)).second) {
 					required_columns.push_back(fk_col);
+				}
+			}
+		}
+	}
+
+	// 3. Add columns that are REFERENCED BY other tables' FKs (needed for incoming joins)
+	// For example, if lineitem has FK l_orderkey -> orders.o_orderkey, then orders needs o_orderkey
+	string table_name_lower = StringUtil::Lower(table_name);
+	for (auto &path_table : fk_path) {
+		if (StringUtil::Lower(path_table) == table_name_lower) {
+			continue; // Skip self
+		}
+		auto other_it = check.table_metadata.find(path_table);
+		if (other_it == check.table_metadata.end()) {
+			continue;
+		}
+		const auto &other_meta = other_it->second;
+		for (auto &other_fk_pair : other_meta.fks) {
+			// Check if this FK from path_table references our table
+			if (StringUtil::Lower(other_fk_pair.first) == table_name_lower) {
+				// The FK columns from the other table reference columns in our table
+				// We need to find which columns in our table they reference
+				// This info is in PAC LINK metadata (referenced_columns)
+				auto &metadata_mgr = PACMetadataManager::Get();
+				auto *other_pac_metadata = metadata_mgr.GetTableMetadata(path_table);
+				if (other_pac_metadata) {
+					for (auto &link : other_pac_metadata->links) {
+						if (StringUtil::Lower(link.referenced_table) == table_name_lower &&
+						    link.local_columns == other_fk_pair.second && !link.referenced_columns.empty()) {
+							// Add the referenced columns from our table
+							for (auto &ref_col : link.referenced_columns) {
+								if (added_columns.insert(StringUtil::Lower(ref_col)).second) {
+									required_columns.push_back(ref_col);
+								}
+							}
+							break;
+						}
+					}
 				}
 			}
 		}

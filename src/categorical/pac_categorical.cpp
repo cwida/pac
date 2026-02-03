@@ -533,8 +533,8 @@ void RegisterPacCategoricalFunctions(ExtensionLoader &loader) {
 
 	// pac_filter(UBIGINT mask, DOUBLE correction) -> BOOLEAN : With explicit correction parameter
 	ScalarFunction pac_filter_mask_correction("pac_filter", {LogicalType::UBIGINT, LogicalType::DOUBLE},
-	                                          LogicalType::BOOLEAN, PacFilterWithCorrectionFunction,
-	                                          PacCategoricalBind, nullptr, nullptr, PacCategoricalInitLocal);
+	                                          LogicalType::BOOLEAN, PacFilterWithCorrectionFunction, PacCategoricalBind,
+	                                          nullptr, nullptr, PacCategoricalInitLocal);
 	loader.RegisterFunction(pac_filter_mask_correction);
 
 	// pac_filter(list<bool>) -> BOOLEAN : Probabilistic filter from list (convenience)
