@@ -399,6 +399,97 @@ static void PacMaskNotFunction(DataChunk &args, ExpressionState &state, Vector &
 }
 
 // ============================================================================
+// PAC_NOISED: Apply noise to a list of 64 counter values
+// ============================================================================
+// pac_noised(list<double> counters) -> DOUBLE
+// Takes a list of 64 counter values, reconstructs key_hash from NULL/non-NULL pattern,
+// and returns a single noised value using PacNoisySampleFrom64Counters.
+// This is essentially what pac_sum/avg/count/min/max aggregates do in their finalize.
+static void PacNoisedFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	auto &list_vec = args.data[0];
+	idx_t count = args.size();
+
+	auto &local_state = ExecuteFunctionState::GetFunctionState(state)->Cast<PacCategoricalLocalState>();
+
+	// Get mi and correction from bind data
+	double mi = 0.0;
+	double correction = 1.0;
+	uint64_t seed = 0;
+	auto &function = state.expr.Cast<BoundFunctionExpression>();
+	if (function.bind_info) {
+		auto &bind_data = function.bind_info->Cast<PacCategoricalBindData>();
+		mi = bind_data.mi;
+		correction = bind_data.correction;
+		seed = bind_data.seed;
+	}
+
+	UnifiedVectorFormat list_data;
+	list_vec.ToUnifiedFormat(count, list_data);
+
+	auto result_data = FlatVector::GetData<double>(result);
+	auto &result_validity = FlatVector::Validity(result);
+
+	auto &child_vec = ListVector::GetEntry(list_vec);
+	UnifiedVectorFormat child_data;
+	child_vec.ToUnifiedFormat(ListVector::GetListSize(list_vec), child_data);
+	auto child_values = UnifiedVectorFormat::GetData<double>(child_data);
+
+	for (idx_t i = 0; i < count; i++) {
+		auto list_idx = list_data.sel->get_index(i);
+
+		if (!list_data.validity.RowIsValid(list_idx)) {
+			// NULL list -> NULL result
+			result_validity.SetInvalid(i);
+			continue;
+		}
+
+		auto list_entries = UnifiedVectorFormat::GetData<list_entry_t>(list_data);
+		auto &entry = list_entries[list_idx];
+
+		// Must have exactly 64 elements
+		if (entry.length != 64) {
+			result_validity.SetInvalid(i);
+			continue;
+		}
+
+		// Reconstruct key_hash from NULL pattern and extract counter values
+		uint64_t key_hash = 0;
+		double counters[64];
+		for (idx_t j = 0; j < 64; j++) {
+			auto child_idx = child_data.sel->get_index(entry.offset + j);
+			if (child_data.validity.RowIsValid(child_idx)) {
+				// Non-NULL: set bit in key_hash and store value
+				key_hash |= (1ULL << j);
+				counters[j] = child_values[child_idx];
+			} else {
+				// NULL: bit stays 0, value doesn't matter (will be filtered out)
+				counters[j] = 0.0;
+			}
+		}
+
+		// If no valid counters, return NULL
+		if (key_hash == 0) {
+			result_validity.SetInvalid(i);
+			continue;
+		}
+
+		// Use per-row deterministic RNG seeded by both seed and key_hash
+		std::mt19937_64 gen(seed ^ key_hash);
+
+		// Check if we should return NULL based on key_hash (uses mi and correction)
+		if (PacNoiseInNull(key_hash, mi, correction, gen)) {
+			result_validity.SetInvalid(i);
+			continue;
+		}
+
+		// Get noised sample from counters
+		// Note: No 2x multiplier here because _counters functions already apply it
+		double noised = PacNoisySampleFrom64Counters(counters, mi, correction, gen, true, ~key_hash);
+		result_data[i] = noised;
+	}
+}
+
+// ============================================================================
 // Bind function for pac_filter/pac_select (reads pac_seed and pac_mi settings)
 // ============================================================================
 static unique_ptr<FunctionData> PacCategoricalBind(ClientContext &ctx, ScalarFunction &func,
@@ -462,6 +553,12 @@ void RegisterPacCategoricalFunctions(ExtensionLoader &loader) {
 
 	ScalarFunction pac_mask_not("pac_mask_not", {LogicalType::UBIGINT}, LogicalType::UBIGINT, PacMaskNotFunction);
 	loader.RegisterFunction(pac_mask_not);
+
+	// pac_noised(list<double>) -> DOUBLE : Apply noise to 64 counter values
+	auto list_double_type = LogicalType::LIST(LogicalType::DOUBLE);
+	ScalarFunction pac_noised("pac_noised", {list_double_type}, LogicalType::DOUBLE, PacNoisedFunction,
+	                          PacCategoricalBind, nullptr, nullptr, PacCategoricalInitLocal);
+	loader.RegisterFunction(pac_noised);
 }
 
 } // namespace duckdb

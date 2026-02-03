@@ -912,16 +912,21 @@ static unique_ptr<Expression> CloneForLambdaBody(Expression *expr, const ColumnB
 		return expr->Copy();
 	}
 
-	// Handle cast expressions - use Copy() since BoundCastInfo is not easily copyable
+	// Handle cast expressions
 	if (expr->type == ExpressionType::OPERATOR_CAST) {
 		auto &cast = expr->Cast<BoundCastExpression>();
 		auto child_clone =
 		    CloneForLambdaBody(cast.child.get(), pac_binding, captures, capture_map, plan_root, element_type);
-		// Copy the entire cast expression and replace its child
-		auto cast_copy = cast.Copy();
-		auto &new_cast = cast_copy->Cast<BoundCastExpression>();
-		new_cast.child = std::move(child_clone);
-		return cast_copy;
+
+		// If the child's type already matches the target type, skip the cast
+		// This is important because the PAC element has already been cast to the correct type
+		// by the inner lambda, and the copied cast function expects the original input type
+		if (child_clone->return_type == cast.return_type) {
+			return child_clone;
+		}
+
+		// Otherwise, create a new cast with the correct function for the new child type
+		return BoundCastExpression::AddDefaultCastToType(std::move(child_clone), cast.return_type);
 	}
 
 	// Handle comparison expressions

@@ -423,10 +423,11 @@ ORDER BY
 1	forest green
 2	forest blue
 3	ocean red
+4	forest yellow
 
-# Note: Part 4 (forest yellow) is excluded because with PAC counters and mi=0,
-# the avg filter for partkey=4 has majority FALSE (28 false vs 18 true)
-# because ps_supplycost=30 is NOT < many of the avg counter values (13.33, 30).
+# Note: Part 4 (forest yellow) is included because with corrected pac_avg
+# (2x compensation for 50% sampling), the avg(l_extendedprice/l_quantity)
+# values are correct, and ps_supplycost=30 < avg ~= 43.33 evaluates to TRUE.
 
 # ============================================================================
 # Test 8: Nested subqueries with categorical comparison
