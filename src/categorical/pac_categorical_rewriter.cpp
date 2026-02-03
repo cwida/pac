@@ -312,8 +312,9 @@ static bool IsHavingClausePattern(LogicalOperator *filter_op, const ColumnBindin
 
 	// Skip projections to find the aggregate
 	while (child && child->type == LogicalOperatorType::LOGICAL_PROJECTION) {
-		if (child->children.empty())
+		if (child->children.empty()) {
 			break;
+		}
 		child = child->children[0].get();
 	}
 

@@ -309,8 +309,9 @@ DelimColumnResult AddColumnToDelimJoin(unique_ptr<LogicalOperator> &plan, Logica
 	// Find and update all DELIM_GETs in the subquery that reference this DELIM_JOIN
 	// We need to add the new column type to their chunk_types
 	std::function<void(LogicalOperator *)> update_delim_gets = [&](LogicalOperator *op) {
-		if (!op)
+		if (!op) {
 			return;
+		}
 
 		if (op->type == LogicalOperatorType::LOGICAL_DELIM_GET) {
 			auto &delim_get = op->Cast<LogicalDelimGet>();
