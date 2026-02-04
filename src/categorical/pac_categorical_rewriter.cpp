@@ -107,6 +107,9 @@ struct PacBindingInfo {
 // Forward declaration for FindAllPacBindingsInExpression
 static vector<PacBindingInfo> FindAllPacBindingsInExpression(Expression *expr, LogicalOperator *plan_root);
 
+// Forward declaration for IsAlreadyWrappedInPacNoised
+static bool IsAlreadyWrappedInPacNoised(Expression *expr);
+
 // Helper: Find the first aggregate operator in a subtree
 static LogicalAggregate *FindFirstAggregateInSubtree(LogicalOperator *op) {
 	if (!op) {
@@ -759,7 +762,10 @@ static void FindCategoricalPatternsInOperatorWithPlan(LogicalOperator *op, Logic
 
 	// Check projection expressions for arithmetic involving multiple PAC aggregates
 	// This handles cases like Q08: sum(CASE...)/sum(volume) in SELECT list
-	if (op->type == LogicalOperatorType::LOGICAL_PROJECTION) {
+	// NOTE: Only check projections if we haven't already found filter/join patterns,
+	// because those patterns will handle the projections via RewriteProjectionsWithCounters.
+	// We only want standalone projection patterns (no filter/join categorical patterns).
+	if (!inside_aggregate && patterns.empty() && op->type == LogicalOperatorType::LOGICAL_PROJECTION) {
 		auto &proj = op->Cast<LogicalProjection>();
 		for (idx_t i = 0; i < proj.expressions.size(); i++) {
 			auto &expr = proj.expressions[i];
@@ -2332,16 +2338,22 @@ static bool ExtractMultiplicationPattern(Expression *expr, LogicalOperator *plan
 	return false;
 }
 
-// Check if an expression is already wrapped in pac_noised
+// Check if an expression is already wrapped in a categorical rewrite terminal function
+// This includes pac_noised, pac_filter, list_transform, and list_zip
+// These functions indicate that the expression has already been processed by categorical rewriting
 static bool IsAlreadyWrappedInPacNoised(Expression *expr) {
 	if (!expr) {
 		return false;
 	}
 	if (expr->type == ExpressionType::BOUND_FUNCTION) {
 		auto &func = expr->Cast<BoundFunctionExpression>();
-		return func.function.name == "pac_noised";
+		// Check for all categorical rewrite terminal functions
+		if (func.function.name == "pac_noised" || func.function.name == "pac_filter" ||
+		    func.function.name == "list_transform" || func.function.name == "list_zip") {
+			return true;
+		}
 	}
-	// Check for CAST(pac_noised(...))
+	// Check for CAST(terminal_function(...))
 	if (expr->type == ExpressionType::OPERATOR_CAST) {
 		auto &cast = expr->Cast<BoundCastExpression>();
 		return IsAlreadyWrappedInPacNoised(cast.child.get());
