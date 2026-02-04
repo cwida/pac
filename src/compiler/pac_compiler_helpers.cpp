@@ -225,7 +225,7 @@ unique_ptr<LogicalGet> CreateLogicalGet(ClientContext &context, unique_ptr<Logic
 				}
 			}
 			PAC_DEBUG_PRINT("CreateLogicalGet WARNING: Could not find columns [" + missing + "] in table " + table +
-			               ", projecting all columns instead");
+			                ", projecting all columns instead");
 #endif
 
 			// Fall back to projecting all columns

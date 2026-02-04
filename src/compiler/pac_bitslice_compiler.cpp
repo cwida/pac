@@ -417,7 +417,7 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 				connecting_table_to_orders_table[connecting_table_idx] = connecting_table_idx;
 #ifdef DEBUG
 				PAC_DEBUG_PRINT("ModifyPlanWithoutPU: Connecting table #" + std::to_string(connecting_table_idx) +
-				               " is already the FK table (" + fk_table_with_pu_reference + "), no join needed");
+				                " is already the FK table (" + fk_table_with_pu_reference + "), no join needed");
 #endif
 			} else {
 				vector<unique_ptr<LogicalOperator> *> fk_nodes;
@@ -451,14 +451,14 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 					tables_to_join_for_instance.push_back(fk_table_with_pu_reference);
 #ifdef DEBUG
 					PAC_DEBUG_PRINT("ModifyPlanWithoutPU: Adding " + fk_table_with_pu_reference +
-					               " join for subquery instance #" + std::to_string(connecting_table_idx));
+					                " join for subquery instance #" + std::to_string(connecting_table_idx));
 #endif
 				}
 #ifdef DEBUG
 				else {
 					PAC_DEBUG_PRINT("ModifyPlanWithoutPU: FK table " + fk_table_with_pu_reference +
-					               " accessible via DELIM_GET for subquery instance #" +
-					               std::to_string(connecting_table_idx));
+					                " accessible via DELIM_GET for subquery instance #" +
+					                std::to_string(connecting_table_idx));
 				}
 #endif
 			}
@@ -559,8 +559,8 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 										connecting_table_to_orders_table[connecting_table_idx] = fk_table_idx;
 #ifdef DEBUG
 										PAC_DEBUG_PRINT("ModifyPlanWithoutPU: Connecting table #" +
-										               std::to_string(connecting_table_idx) +
-										               " IS the FK table - mapping to itself");
+										                std::to_string(connecting_table_idx) +
+										                " IS the FK table - mapping to itself");
 #endif
 										found_accessible_fk_table = true;
 										break;
@@ -621,9 +621,9 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 										connecting_table_to_orders_table[connecting_table_idx] = fk_table_idx;
 #ifdef DEBUG
 										PAC_DEBUG_PRINT("ModifyPlanWithoutPU: Mapped connecting table #" +
-										               std::to_string(connecting_table_idx) + " to FK table " +
-										               present_table + " #" + std::to_string(fk_table_idx) +
-										               " for hashing (same subtree)");
+										                std::to_string(connecting_table_idx) + " to FK table " +
+										                present_table + " #" + std::to_string(fk_table_idx) +
+										                " for hashing (same subtree)");
 #endif
 										found_accessible_fk_table = true;
 										break;
@@ -632,9 +632,9 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 #ifdef DEBUG
 								else {
 									PAC_DEBUG_PRINT("ModifyPlanWithoutPU: FK table " + present_table + " #" +
-									               std::to_string(fk_table_idx) +
-									               " is NOT in same subtree as connecting table #" +
-									               std::to_string(connecting_table_idx));
+									                std::to_string(fk_table_idx) +
+									                " is NOT in same subtree as connecting table #" +
+									                std::to_string(connecting_table_idx));
 								}
 #endif
 							}
@@ -679,8 +679,8 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 					}
 #ifdef DEBUG
 					PAC_DEBUG_PRINT("ModifyPlanWithoutPU: Connecting table #" + std::to_string(connecting_table_idx) +
-					               " (" + connecting_table_name +
-					               ") IS the FK table but columns are NOT accessible (blocked by SEMI/ANTI join)");
+					                " (" + connecting_table_name +
+					                ") IS the FK table but columns are NOT accessible (blocked by SEMI/ANTI join)");
 #endif
 					// Columns are NOT accessible - we need to find an accessible table that has
 					// a PAC LINK (FK) to the blocked FK table, and add a join from there.
@@ -727,9 +727,9 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 								// Add a join from this table to the FK table
 #ifdef DEBUG
 								PAC_DEBUG_PRINT("ModifyPlanWithoutPU: Found accessible table " + present_table + " #" +
-								               std::to_string(table_get.table_index) +
-								               " with FK to blocked table - adding join to " +
-								               fk_table_with_pu_reference);
+								                std::to_string(table_get.table_index) +
+								                " with FK to blocked table - adding join to " +
+								                fk_table_with_pu_reference);
 #endif
 								unique_ptr<LogicalOperator> current_node = (*table_node)->Copy(input.context);
 								auto local_idx = GetNextTableIndex(plan);
@@ -768,7 +768,7 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 					// code paths may handle this aggregate differently)
 #ifdef DEBUG
 					PAC_DEBUG_PRINT("ModifyPlanWithoutPU: No accessible alternative found for blocked FK table " +
-					               fk_table_with_pu_reference + " - skipping this connecting table instance");
+					                fk_table_with_pu_reference + " - skipping this connecting table instance");
 #endif
 					continue;
 				}
@@ -793,8 +793,8 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 
 #ifdef DEBUG
 				PAC_DEBUG_PRINT("ModifyPlanWithoutPU: No accessible FK table found, adding join chain for " +
-				               std::to_string(tables_to_add.size()) + " tables to connecting table #" +
-				               std::to_string(connecting_table_idx));
+				                std::to_string(tables_to_add.size()) + " tables to connecting table #" +
+				                std::to_string(connecting_table_idx));
 				for (auto &t : tables_to_add) {
 					PAC_DEBUG_PRINT("  - " + t);
 				}
@@ -812,8 +812,8 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 				if (!AreTableColumnsAccessible(plan.get(), connecting_table_idx)) {
 #ifdef DEBUG
 					PAC_DEBUG_PRINT("ModifyPlanWithoutPU: Connecting table #" + std::to_string(connecting_table_idx) +
-					               " (" + connecting_table_name +
-					               ") columns are NOT accessible - looking for accessible alternative");
+					                " (" + connecting_table_name +
+					                ") columns are NOT accessible - looking for accessible alternative");
 #endif
 					// Find an accessible table in the FK path and add the full join chain from there
 					bool found_accessible_alternative = false;
@@ -872,7 +872,7 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 
 #ifdef DEBUG
 								PAC_DEBUG_PRINT("ModifyPlanWithoutPU: Found accessible table " + scanned_table + " #" +
-								               std::to_string(table_get.table_index) + " - adding full join chain:");
+								                std::to_string(table_get.table_index) + " - adding full join chain:");
 								for (auto &t : full_tables_to_add) {
 									PAC_DEBUG_PRINT("  - " + t);
 								}
@@ -1007,7 +1007,7 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 
 #ifdef DEBUG
 	PAC_DEBUG_PRINT("ModifyPlanWithoutPU: Found " + std::to_string(target_aggregates.size()) +
-	               " aggregates with FK-linked tables");
+	                " aggregates with FK-linked tables");
 #endif
 
 	// For each target aggregate, find which FK table it has access to and build hash expression
@@ -1046,7 +1046,7 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 
 #ifdef DEBUG
 		PAC_DEBUG_PRINT("ModifyPlanWithoutPU: Aggregate has " + std::to_string(candidate_conn_tables.size()) +
-		               " candidate connecting tables");
+		                " candidate connecting tables");
 #endif
 
 		// If no candidate connecting tables found, the scanned table itself must have an FK to PU
@@ -1136,7 +1136,7 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 
 #ifdef DEBUG
 									PAC_DEBUG_PRINT("ModifyPlanWithoutPU: FK table #" + std::to_string(node_table_idx) +
-									               " hash expression propagated");
+									                " hash expression propagated");
 #endif
 
 									// Modify this aggregate with PAC functions
@@ -1363,7 +1363,7 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 
 #ifdef DEBUG
 			PAC_DEBUG_PRINT("ModifyPlanWithoutPU: Trying " + std::to_string(candidate_orders_tables.size()) +
-			               " candidate orders tables for aggregate");
+			                " candidate orders tables for aggregate");
 #endif
 
 			// Try each candidate until propagation succeeds
@@ -1419,7 +1419,7 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 				if (test_result) {
 #ifdef DEBUG
 					PAC_DEBUG_PRINT("ModifyPlanWithoutPU: Propagation succeeded for orders table #" +
-					               std::to_string(test_ord_idx));
+					                std::to_string(test_ord_idx));
 #endif
 					ModifyAggregatesWithPacFunctions(input, target_agg, test_result);
 					found_working_table = true;
@@ -1427,7 +1427,7 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 				}
 #ifdef DEBUG
 				PAC_DEBUG_PRINT("ModifyPlanWithoutPU: Propagation failed for orders table #" +
-				               std::to_string(test_ord_idx) + ", trying next candidate");
+				                std::to_string(test_ord_idx) + ", trying next candidate");
 #endif
 			}
 
@@ -1494,7 +1494,7 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 						// Found an FK table directly in this aggregate's subtree - use it
 #ifdef DEBUG
 						PAC_DEBUG_PRINT("ModifyPlanWithoutPU: Found FK table " + present_table + " #" +
-						               std::to_string(node_table_idx) + " directly in aggregate subtree");
+						                std::to_string(node_table_idx) + " directly in aggregate subtree");
 #endif
 						// Ensure FK columns are projected
 						for (auto &fk_col : fk_cols) {
@@ -1529,7 +1529,7 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 			// If still not found, fall back to AddColumnToDelimJoin for correlated subqueries
 #ifdef DEBUG
 			PAC_DEBUG_PRINT("ModifyPlanWithoutPU: Orders table #" + std::to_string(orders_table_idx) +
-			               " not in aggregate subtree, using AddColumnToDelimJoin");
+			                " not in aggregate subtree, using AddColumnToDelimJoin");
 #endif
 			// Find the orders table LogicalGet
 			vector<unique_ptr<LogicalOperator> *> orders_nodes;
@@ -1605,7 +1605,7 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 
 #ifdef DEBUG
 		PAC_DEBUG_PRINT("ModifyPlanWithoutPU: Selected orders table #" + std::to_string(orders_table_idx) +
-		               " for aggregate");
+		                " for aggregate");
 #endif
 
 		// Find the orders table LogicalGet with this index
@@ -1670,7 +1670,7 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 		if (!hash_input_expr) {
 #ifdef DEBUG
 			PAC_DEBUG_PRINT("ModifyPlanWithoutPU: Direct propagation failed for orders table #" +
-			               std::to_string(orders_table_idx) + ", trying AddColumnToDelimJoin fallback");
+			                std::to_string(orders_table_idx) + ", trying AddColumnToDelimJoin fallback");
 #endif
 			// Try to add FK columns via DELIM_JOIN
 			vector<DelimColumnResult> delim_results;
@@ -1703,7 +1703,7 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 				}
 #ifdef DEBUG
 				PAC_DEBUG_PRINT("ModifyPlanWithoutPU: AddColumnToDelimJoin fallback succeeded for orders table #" +
-				               std::to_string(orders_table_idx));
+				                std::to_string(orders_table_idx));
 #endif
 			}
 		}
@@ -1714,14 +1714,14 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 		if (!hash_input_expr) {
 #ifdef DEBUG
 			PAC_DEBUG_PRINT("ModifyPlanWithoutPU: Skipping aggregate - no direct path to orders table #" +
-			               std::to_string(orders_table_idx) + " (likely a nested aggregate on aggregated data)");
+			                std::to_string(orders_table_idx) + " (likely a nested aggregate on aggregated data)");
 #endif
 			continue;
 		}
 
 #ifdef DEBUG
 		PAC_DEBUG_PRINT("ModifyPlanWithoutPU: Built hash expression for aggregate using orders table #" +
-		               std::to_string(orders_table_idx));
+		                std::to_string(orders_table_idx));
 #endif
 
 		// Modify this aggregate with PAC functions
@@ -1831,7 +1831,7 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 
 #ifdef DEBUG
 	PAC_DEBUG_PRINT("ModifyPlanWithPU: Found " + std::to_string(target_aggregates.size()) +
-	               " aggregates with privacy unit tables");
+	                " aggregates with privacy unit tables");
 #endif
 
 	// For each target aggregate, build hash expressions and modify it
@@ -1861,9 +1861,9 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 
 #ifdef DEBUG
 				PAC_DEBUG_PRINT("ModifyPlanWithPU: Processing table " + pu_table_name + " #" +
-				               std::to_string(get.table_index) +
-				               " for aggregate, column_ids.size=" + std::to_string(get.GetColumnIds().size()) +
-				               ", projection_ids.size=" + std::to_string(get.projection_ids.size()));
+				                std::to_string(get.table_index) +
+				                " for aggregate, column_ids.size=" + std::to_string(get.GetColumnIds().size()) +
+				                ", projection_ids.size=" + std::to_string(get.projection_ids.size()));
 #endif
 
 				// Determine if we should use rowid or PKs
@@ -1903,7 +1903,7 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 				if (!hash_input_expr) {
 #ifdef DEBUG
 					PAC_DEBUG_PRINT("ModifyPlanWithPU: Skipping PU table " + pu_table_name +
-					               " - propagation failed (likely blocked by semi/anti join)");
+					                " - propagation failed (likely blocked by semi/anti join)");
 #endif
 					continue;
 				}
@@ -1989,7 +1989,7 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 					if (!fk_hash_expr) {
 #ifdef DEBUG
 						PAC_DEBUG_PRINT("ModifyPlanWithPU: Skipping FK table " + fk_table +
-						               " - propagation failed (likely blocked by semi/anti join)");
+						                " - propagation failed (likely blocked by semi/anti join)");
 #endif
 						continue;
 					}
@@ -2119,9 +2119,9 @@ void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExten
 		PAC_DEBUG_PRINT("Found " + std::to_string(categorical_patterns.size()) + " categorical pattern(s)");
 		for (idx_t i = 0; i < categorical_patterns.size(); i++) {
 			auto &p = categorical_patterns[i];
-			PAC_DEBUG_PRINT("  Pattern " + std::to_string(i) + ": parent_op=" +
-			               (p.parent_op ? LogicalOperatorToString(p.parent_op->type) : "null") +
-			               ", aggregate=" + p.aggregate_name);
+			PAC_DEBUG_PRINT("  Pattern " + std::to_string(i) +
+			                ": parent_op=" + (p.parent_op ? LogicalOperatorToString(p.parent_op->type) : "null") +
+			                ", aggregate=" + p.aggregate_name);
 		}
 		RewriteCategoricalQuery(input, plan, categorical_patterns);
 		PAC_DEBUG_PRINT("=== CATEGORICAL REWRITE COMPLETE ===");

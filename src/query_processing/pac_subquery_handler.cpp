@@ -52,7 +52,7 @@ static ColumnBinding EnsureColumnFlowsThrough(LogicalOperator *target_op, Logica
 			// Column is in column_ids but not in projection_ids - we need to add it
 #ifdef DEBUG
 			PAC_DEBUG_PRINT("EnsureColumnFlowsThrough: Column at position " + std::to_string(source_col_proj_idx) +
-			               " not in projection_ids, adding it");
+			                " not in projection_ids, adding it");
 #endif
 			source_get.projection_ids.push_back(source_col_proj_idx);
 			output_col_idx = source_col_proj_idx; // The binding uses the projection_id value
@@ -123,8 +123,8 @@ static ColumnBinding EnsureColumnFlowsThrough(LogicalOperator *target_op, Logica
 			// We add the column to the aggregate's groups so it passes through
 #ifdef DEBUG
 			PAC_DEBUG_PRINT("AddColumnToDelimJoin: Adding column to aggregate groups (binding [" +
-			               std::to_string(child_result.table_index) + "." + std::to_string(child_result.column_index) +
-			               "])");
+			                std::to_string(child_result.table_index) + "." + std::to_string(child_result.column_index) +
+			                "])");
 #endif
 			// Create a column ref expression for the group
 			auto group_col_ref = make_uniq<BoundColumnRefExpression>(out_type, child_result);
@@ -136,8 +136,8 @@ static ColumnBinding EnsureColumnFlowsThrough(LogicalOperator *target_op, Logica
 
 #ifdef DEBUG
 			PAC_DEBUG_PRINT("AddColumnToDelimJoin: Added column as group " + std::to_string(new_group_idx) +
-			               ", output binding [" + std::to_string(agg.group_index) + "." +
-			               std::to_string(new_group_idx) + "]");
+			                ", output binding [" + std::to_string(agg.group_index) + "." +
+			                std::to_string(new_group_idx) + "]");
 #endif
 			return ColumnBinding(agg.group_index, new_group_idx);
 		}
@@ -235,13 +235,13 @@ DelimColumnResult AddColumnToDelimJoin(unique_ptr<LogicalOperator> &plan, Logica
 
 #ifdef DEBUG
 	PAC_DEBUG_PRINT("AddColumnToDelimJoin: Found DELIM_JOIN, source_get.table_index=" +
-	               std::to_string(source_get.table_index) + ", column=" + column_name);
+	                std::to_string(source_get.table_index) + ", column=" + column_name);
 	PAC_DEBUG_PRINT("AddColumnToDelimJoin: DELIM_JOIN has " +
-	               std::to_string(delim_join->duplicate_eliminated_columns.size()) +
-	               " existing duplicate_eliminated_columns");
+	                std::to_string(delim_join->duplicate_eliminated_columns.size()) +
+	                " existing duplicate_eliminated_columns");
 	for (idx_t i = 0; i < delim_join->duplicate_eliminated_columns.size(); i++) {
 		PAC_DEBUG_PRINT("  dup_elim_col[" + std::to_string(i) +
-		               "]: " + delim_join->duplicate_eliminated_columns[i]->ToString());
+		                "]: " + delim_join->duplicate_eliminated_columns[i]->ToString());
 	}
 #endif
 
@@ -256,7 +256,7 @@ DelimColumnResult AddColumnToDelimJoin(unique_ptr<LogicalOperator> &plan, Logica
 
 #ifdef DEBUG
 	PAC_DEBUG_PRINT("AddColumnToDelimJoin: Column " + column_name + " projected at index " +
-	               std::to_string(col_proj_idx) + " in source_get");
+	                std::to_string(col_proj_idx) + " in source_get");
 #endif
 
 	// Get the column type
@@ -284,15 +284,15 @@ DelimColumnResult AddColumnToDelimJoin(unique_ptr<LogicalOperator> &plan, Logica
 	if (output_binding.table_index == DConstants::INVALID_INDEX) {
 #ifdef DEBUG
 		PAC_DEBUG_PRINT("AddColumnToDelimJoin: Column " + column_name +
-		               " does not flow through to DELIM_JOIN left child output");
+		                " does not flow through to DELIM_JOIN left child output");
 #endif
 		return invalid_result;
 	}
 
 #ifdef DEBUG
 	PAC_DEBUG_PRINT("AddColumnToDelimJoin: Column flows through with output binding [" +
-	               std::to_string(output_binding.table_index) + "." + std::to_string(output_binding.column_index) +
-	               "]");
+	                std::to_string(output_binding.table_index) + "." + std::to_string(output_binding.column_index) +
+	                "]");
 #endif
 
 	// Create a column reference expression using the OUTPUT binding (not the scan binding)
@@ -300,7 +300,7 @@ DelimColumnResult AddColumnToDelimJoin(unique_ptr<LogicalOperator> &plan, Logica
 
 #ifdef DEBUG
 	PAC_DEBUG_PRINT("AddColumnToDelimJoin: Adding column ref " + col_ref->ToString() +
-	               " to duplicate_eliminated_columns");
+	                " to duplicate_eliminated_columns");
 #endif
 
 	// Add to DELIM_JOIN's duplicate_eliminated_columns
@@ -320,7 +320,7 @@ DelimColumnResult AddColumnToDelimJoin(unique_ptr<LogicalOperator> &plan, Logica
 			delim_get.chunk_types.push_back(col_type);
 #ifdef DEBUG
 			PAC_DEBUG_PRINT("AddColumnToDelimJoin: Updated DELIM_GET #" + std::to_string(delim_get.table_index) +
-			               " with new column type");
+			                " with new column type");
 #endif
 		}
 
@@ -364,8 +364,8 @@ DelimColumnResult AddColumnToDelimJoin(unique_ptr<LogicalOperator> &plan, Logica
 
 #ifdef DEBUG
 	PAC_DEBUG_PRINT("AddColumnToDelimJoin: Found DELIM_GET #" + std::to_string(delim_get->table_index) +
-	               ", returning binding [" + std::to_string(delim_get->table_index) + "." +
-	               std::to_string(new_col_idx) + "]");
+	                ", returning binding [" + std::to_string(delim_get->table_index) + "." +
+	                std::to_string(new_col_idx) + "]");
 #endif
 
 	// Return binding and type for the new column in the DELIM_GET

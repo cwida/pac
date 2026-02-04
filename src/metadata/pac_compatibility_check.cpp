@@ -855,7 +855,7 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 #ifdef DEBUG
 	PAC_DEBUG_PRINT("PAC compatibility check: scanned_pu_tables = " + std::to_string(result.scanned_pu_tables.size()));
 	PAC_DEBUG_PRINT("PAC compatibility check: tables_with_protected_columns = " +
-	               std::to_string(tables_with_protected_columns.size()));
+	                std::to_string(tables_with_protected_columns.size()));
 	PAC_DEBUG_PRINT("PAC compatibility check: fk_paths = " + std::to_string(result.fk_paths.size()));
 	for (auto &kv : result.fk_paths) {
 		string path_str = kv.first + " -> ";

@@ -273,7 +273,7 @@ void ModifyAggregatesWithPacFunctions(OptimizerExtensionInput &input, LogicalAgg
 
 #ifdef DEBUG
 	PAC_DEBUG_PRINT("ModifyAggregatesWithPacFunctions: Processing aggregate with " +
-	               std::to_string(agg->expressions.size()) + " expressions");
+	                std::to_string(agg->expressions.size()) + " expressions");
 
 	// Debug: Print hash input expression details
 	PAC_DEBUG_PRINT("ModifyAggregatesWithPacFunctions: Hash input expression: " + hash_input_expr->ToString());
@@ -284,31 +284,31 @@ void ModifyAggregatesWithPacFunctions(OptimizerExtensionInput &input, LogicalAgg
 		if (expr.type == ExpressionType::BOUND_COLUMN_REF) {
 			auto &col_ref = expr.Cast<BoundColumnRefExpression>();
 			PAC_DEBUG_PRINT("ModifyAggregatesWithPacFunctions: Hash expr references column [" +
-			               std::to_string(col_ref.binding.table_index) + "." +
-			               std::to_string(col_ref.binding.column_index) + "] type=" + col_ref.return_type.ToString());
+			                std::to_string(col_ref.binding.table_index) + "." +
+			                std::to_string(col_ref.binding.column_index) + "] type=" + col_ref.return_type.ToString());
 		}
 	});
 
 	// Debug: Print aggregate's groups
 	PAC_DEBUG_PRINT("ModifyAggregatesWithPacFunctions: Aggregate has " + std::to_string(agg->groups.size()) +
-	               " groups:");
+	                " groups:");
 	for (idx_t i = 0; i < agg->groups.size(); i++) {
 		PAC_DEBUG_PRINT("  Group " + std::to_string(i) + ": " + agg->groups[i]->ToString());
 	}
 
 	// Debug: Print aggregate's group_index and aggregate_index
 	PAC_DEBUG_PRINT("ModifyAggregatesWithPacFunctions: group_index=" + std::to_string(agg->group_index) +
-	               ", aggregate_index=" + std::to_string(agg->aggregate_index));
+	                ", aggregate_index=" + std::to_string(agg->aggregate_index));
 
 	// Debug: Print child operator info
 	if (!agg->children.empty()) {
 		PAC_DEBUG_PRINT("ModifyAggregatesWithPacFunctions: Child operator type=" +
-		               std::to_string(static_cast<int>(agg->children[0]->type)));
+		                std::to_string(static_cast<int>(agg->children[0]->type)));
 		if (agg->children[0]->type == LogicalOperatorType::LOGICAL_GET) {
 			auto &child_get = agg->children[0]->Cast<LogicalGet>();
 			PAC_DEBUG_PRINT("ModifyAggregatesWithPacFunctions: Child is GET with table_index=" +
-			               std::to_string(child_get.table_index) +
-			               ", columns=" + std::to_string(child_get.GetColumnIds().size()));
+			                std::to_string(child_get.table_index) +
+			                ", columns=" + std::to_string(child_get.GetColumnIds().size()));
 		}
 	}
 #endif
@@ -327,12 +327,12 @@ void ModifyAggregatesWithPacFunctions(OptimizerExtensionInput &input, LogicalAgg
 		PAC_DEBUG_PRINT("ModifyAggregatesWithPacFunctions: Old aggregate expression: " + old_aggr.ToString());
 		if (!old_aggr.children.empty()) {
 			PAC_DEBUG_PRINT("ModifyAggregatesWithPacFunctions: Old aggregate child: " +
-			               old_aggr.children[0]->ToString());
+			                old_aggr.children[0]->ToString());
 			if (old_aggr.children[0]->type == ExpressionType::BOUND_COLUMN_REF) {
 				auto &child_ref = old_aggr.children[0]->Cast<BoundColumnRefExpression>();
 				PAC_DEBUG_PRINT("ModifyAggregatesWithPacFunctions: Old aggregate child binding: [" +
-				               std::to_string(child_ref.binding.table_index) + "." +
-				               std::to_string(child_ref.binding.column_index) + "]");
+				                std::to_string(child_ref.binding.table_index) + "." +
+				                std::to_string(child_ref.binding.column_index) + "]");
 			}
 		}
 #endif
@@ -423,7 +423,7 @@ void ModifyAggregatesWithPacFunctions(OptimizerExtensionInput &input, LogicalAgg
 		}
 
 		PAC_DEBUG_PRINT("ModifyAggregatesWithPacFunctions: Constructing " + pac_function_name + " with hash of " +
-		               hash_col_name + ", value of " + value_col_name);
+		                hash_col_name + ", value of " + value_col_name);
 #endif
 
 		agg->expressions[i] = std::move(new_aggr);
@@ -435,7 +435,7 @@ void ModifyAggregatesWithPacFunctions(OptimizerExtensionInput &input, LogicalAgg
 	agg->ResolveOperatorTypes();
 #ifdef DEBUG
 	PAC_DEBUG_PRINT("ModifyAggregatesWithPacFunctions: After ResolveOperatorTypes, types.size()=" +
-	               std::to_string(agg->types.size()));
+	                std::to_string(agg->types.size()));
 	for (idx_t i = 0; i < agg->types.size(); i++) {
 		PAC_DEBUG_PRINT("  Type " + std::to_string(i) + ": " + agg->types[i].ToString());
 	}
