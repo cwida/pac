@@ -19,6 +19,7 @@
 #include "utils/pac_helpers.hpp"
 #include "metadata/pac_compatibility_check.hpp"
 #include "compiler/pac_compiler_helpers.hpp"
+#include "query_processing/pac_join_builder.hpp"
 #include "query_processing/pac_projection_propagation.hpp"
 #include "query_processing/pac_subquery_handler.hpp"
 #include "categorical/pac_categorical_rewriter.hpp"
@@ -491,25 +492,8 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 				local_get_map[table] = std::move(get);
 				local_idx++;
 			}
-			// Handle first join separately to avoid use-after-move in loop
-			auto &first_tbl_name = tables_to_join_for_instance[0];
-			unique_ptr<LogicalGet> first_right_op = std::move(local_get_map[first_tbl_name]);
-			if (!first_right_op) {
-				throw InternalException("PAC compiler: failed to transfer ownership of LogicalGet for " +
-				                        first_tbl_name);
-			}
-			unique_ptr<LogicalOperator> final_join =
-			    CreateLogicalJoin(check, input.context, std::move(existing_node), std::move(first_right_op));
-
-			// Chain remaining joins
-			for (size_t i = 1; i < tables_to_join_for_instance.size(); ++i) {
-				auto &tbl_name = tables_to_join_for_instance[i];
-				unique_ptr<LogicalGet> right_op = std::move(local_get_map[tbl_name]);
-				if (!right_op) {
-					throw InternalException("PAC compiler: failed to transfer ownership of LogicalGet for " + tbl_name);
-				}
-				final_join = CreateLogicalJoin(check, input.context, std::move(final_join), std::move(right_op));
-			}
+			unique_ptr<LogicalOperator> final_join = ChainJoinsFromGetMap(
+			    check, input.context, std::move(existing_node), local_get_map, tables_to_join_for_instance);
 			// Replace this instance with the join chain
 			ReplaceNode(plan, *target_ref, final_join);
 		} else {
@@ -960,26 +944,8 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 					local_get_map[table] = std::move(get);
 					local_idx++;
 				}
-				// Handle first join separately to avoid use-after-move in loop
-				auto &first_tbl_name = tables_to_add[0];
-				unique_ptr<LogicalGet> first_right_op = std::move(local_get_map[first_tbl_name]);
-				if (!first_right_op) {
-					throw InternalException("PAC compiler: failed to transfer ownership of LogicalGet for " +
-					                        first_tbl_name);
-				}
 				unique_ptr<LogicalOperator> final_join =
-				    CreateLogicalJoin(check, input.context, std::move(existing_node), std::move(first_right_op));
-
-				// Chain remaining joins
-				for (size_t i = 1; i < tables_to_add.size(); ++i) {
-					auto &tbl_name = tables_to_add[i];
-					unique_ptr<LogicalGet> right_op = std::move(local_get_map[tbl_name]);
-					if (!right_op) {
-						throw InternalException("PAC compiler: failed to transfer ownership of LogicalGet for " +
-						                        tbl_name);
-					}
-					final_join = CreateLogicalJoin(check, input.context, std::move(final_join), std::move(right_op));
-				}
+				    ChainJoinsFromGetMap(check, input.context, std::move(existing_node), local_get_map, tables_to_add);
 				// Replace this instance with the join chain
 				ReplaceNode(plan, *target_ref, final_join);
 			}
