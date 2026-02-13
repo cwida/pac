@@ -450,6 +450,9 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
                     con.Query("ALTER TABLE hits UNSET PAC;");
                 }
 
+                // Force checkpoint to release memory before next query
+                con.Query("CHECKPOINT;");
+
                 // Connection closed here when con goes out of scope
             }
         }
