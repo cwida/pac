@@ -14,9 +14,10 @@ if (!dir.exists(user_lib)) {
 
 required_packages <- c("ggplot2", "dplyr", "readr", "scales", "stringr", "tidyr", "ggpattern")
 options(repos = c(CRAN = "https://cloud.r-project.org"))
-installed <- rownames(installed.packages())
+
+# Fast package checking - only install if library() fails
 for (pkg in required_packages) {
-  if (!(pkg %in% installed)) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
     message("Installing package: ", pkg)
     install.packages(pkg, dependencies = TRUE, lib = user_lib)
   }
@@ -65,9 +66,9 @@ COUNT_VARIANT_ORDER <- c('DuckDB Count', 'Buffering+Cascading',
 
 COUNT_VARIANT_COLORS <- c(
   'DuckDB Count' = '#95a5a6',
-  'Buffering+Cascading' = '#27ae60',
-  'Cascading' = '#3498db',
-  'Naive/SIMD-Unfriendly' = '#e74c3c'
+  'Buffering+Cascading' = '#00e600',
+  'Cascading' = '#33bbff',
+  'Naive/SIMD-Unfriendly' = '#ff5c33'
 )
 
 # Sum variant names
@@ -85,10 +86,10 @@ SUM_VARIANT_ORDER <- c('DuckDB Sum', 'Approximate+Buffering',
 
 SUM_VARIANT_COLORS <- c(
   'DuckDB Sum' = '#95a5a6',
-  'Approximate+Buffering' = '#27ae60',
-  'Approximate' = '#3498db',
-  'Exact' = '#f39c12',
-  'Naive/SIMD-Unfriendly' = '#e74c3c'
+  'Approximate+Buffering' = '#00e600',
+  'Approximate' = '#ff9933',
+  'Exact' = '#b366ff',
+  'Naive/SIMD-Unfriendly' = '#ff5c33'
 )
 
 # MinMax variant names
@@ -102,18 +103,12 @@ MINMAX_VARIANT_NAMES <- c(
 MINMAX_VARIANT_ORDER <- c('DuckDB Max', 'Buffering+Pruning',
                           'Pruning', 'Naive/SIMD-Unfriendly')
 
-MINMAX_VARIANT_COLORS <- c(
-  'DuckDB Max' = '#95a5a6',
-  'Buffering+Pruning' = '#27ae60',
-  'Pruning' = '#3498db',
-  'Naive/SIMD-Unfriendly' = '#e74c3c'
-)
 
 # SIMD aggregate colors - unique colors for each aggregate
 AGG_COLORS <- c(
-  'pac_count' = '#9b59b6',    # Purple
-  'pac_max' = '#e67e22',       # Orange
-  'pac_sum' = '#16a085'        # Teal
+  'pac_count' = '#ff66cc',    # Purple
+  'pac_max' = '#ffff00',       # Orange
+  'pac_sum' = '#99ffcc'        # Teal
 )
 
 AGG_ORDER <- c('pac_max', 'pac_count', 'pac_sum')
@@ -124,11 +119,11 @@ AGG_ORDER <- c('pac_max', 'pac_count', 'pac_sum')
 VARIANT_PATTERNS <- c(
   'Buffering+Cascading' = 'stripe',
   'Cascading' = 'crosshatch',
-  'Approximate+Buffering' = 'wave',
-  'Approximate' = 'weave',
+  'Approximate+Buffering' = 'stripe',
+  'Approximate' = 'stripe',
   'Exact' = 'stripe',
-  'Buffering+Pruning' = 'rose',
-  'Pruning' = 'plasma',
+  'Buffering+Pruning' = 'stripe',
+  'Pruning' = 'crosshatch',
   'DuckDB Count' = 'none',
   'DuckDB Sum' = 'none',
   'DuckDB Max' = 'none',
@@ -143,17 +138,17 @@ VARIANT_COLORS <- c(
   'DuckDB Sum' = '#95a5a6',
   'DuckDB Max' = '#95a5a6',
   # Best optimizations with buffering (green)
-  'Buffering+Cascading' = '#27ae60',
-  'Approximate+Buffering' = '#27ae60',
-  'Buffering+Pruning' = '#27ae60',
+  'Buffering+Cascading' = '#00e600',
+  'Approximate+Buffering' = '#00e600',
+  'Buffering+Pruning' = '#00e600',
   # Mid-tier without buffering (blue)
   'Cascading' = '#3498db',
   'Approximate' = '#3498db',
-  'Pruning' = '#3498db',
+  'Pruning' = '#d2a679',
   # Alternative methods (orange)
-  'Exact' = '#f39c12',
+  'Exact' = '#ffff00',
   # Naive/unoptimized (red)
-  'Naive/SIMD-Unfriendly' = '#e74c3c'
+  'Naive/SIMD-Unfriendly' = '#ff5c33'
 )
 
 AGG_PATTERNS <- c(
@@ -254,9 +249,9 @@ plot_count_optimizations <- function(platform, platform_name, results_dir, outpu
   p <- ggplot(df, aes(x = group_label, y = plot_time, fill = variant_name, pattern = variant_name)) +
     geom_col_pattern(position = position_dodge(width = 0.9), width = 0.85,
                      color = 'black', linewidth = 0.5,
-                     pattern_density = 0.15, pattern_spacing = 0.05,
+                     pattern_density = 0.2, pattern_spacing = 0.03,
                      pattern_fill = 'black', pattern_color = 'black',
-                     pattern_angle = 45, pattern_size = 0.3) +
+                     pattern_angle = 45, pattern_size = 0.1) +
     # Regular time labels on top of bars
     geom_text(aes(label = time_label, color = variant_name),
               position = position_dodge(width = 0.9),
@@ -264,8 +259,8 @@ plot_count_optimizations <- function(platform, platform_name, results_dir, outpu
     # FAILED labels inside bars - ensure variant_name is factored correctly
     geom_text(data = df %>% filter(is_timeout) %>% mutate(label_y = y_max, variant_name = factor(variant_name, levels = COUNT_VARIANT_ORDER)),
               aes(x = group_label, y = label_y, label = 'FAILED', fill = variant_name),
-              position = position_dodge(width = 0.5),
-              vjust = 3.6, hjust = 0.5,
+              position = position_dodge(width = 0.45),
+              vjust = 3.3, hjust = 0.5,
               size = base_size * 0.25, fontface = 'bold',
               color = 'white', angle = 90, show.legend = FALSE) +
     scale_fill_manual(values = COUNT_VARIANT_COLORS, name = NULL) +
@@ -383,6 +378,15 @@ plot_sum_optimizations <- function(platform, platform_name, results_dir, output_
   # Add pattern mapping
   df <- df %>% mutate(pattern = VARIANT_PATTERNS[as.character(variant_name)])
 
+  # Add custom pattern angles for sum variants: horizontal for Approximate, vertical for Exact
+  df <- df %>% mutate(
+    pattern_angle_custom = case_when(
+      variant_name == 'Approximate' ~ 0,      # Horizontal stripes
+      variant_name == 'Exact' ~ 90,           # Vertical stripes
+      TRUE ~ 45                                # Default diagonal for others
+    )
+  )
+
   # Paper plot settings (wider for more variants)
   width <- 4800
   height <- 1700
@@ -391,15 +395,16 @@ plot_sum_optimizations <- function(platform, platform_name, results_dir, output_
   base_family <- "Linux Libertine"
 
   p <- ggplot(df, aes(x = group_label, y = plot_time, fill = variant_name, pattern = variant_name)) +
-    geom_col_pattern(position = position_dodge(width = 0.9), width = 0.8,
+    geom_col_pattern(aes(pattern_angle = pattern_angle_custom),
+                     position = position_dodge(width = 0.9), width = 0.8,
                      color = 'black', size = 0.5,
-                     pattern_density = 0.15, pattern_spacing = 0.05,
+                     pattern_density = 0.2, pattern_spacing = 0.03,
                      pattern_fill = 'black', pattern_color = 'black',
-                     pattern_angle = 45, pattern_size = 0.3) +
+                     pattern_size = 0.1) +
     # Regular time labels on top of bars
     geom_text(aes(label = time_label, color = variant_name),
               position = position_dodge(width = 0.9),
-              vjust = -0.3, size = base_size * 0.165, fontface = 'bold') +
+              vjust = -0.3, size = base_size * 0.18, fontface = 'bold') +
     # FAILED labels inside bars - vertical like count plot
     geom_text(data = df %>% filter(is_timeout) %>% mutate(label_y = y_max, variant_name = factor(variant_name, levels = SUM_VARIANT_ORDER)),
               aes(x = group_label, y = label_y, label = 'FAILED', fill = variant_name),
@@ -410,6 +415,7 @@ plot_sum_optimizations <- function(platform, platform_name, results_dir, output_
     scale_fill_manual(values = SUM_VARIANT_COLORS, name = NULL) +
     scale_color_manual(values = SUM_VARIANT_COLORS, guide = 'none') +
     scale_pattern_manual(values = VARIANT_PATTERNS, guide = 'none') +
+    scale_pattern_angle_continuous(guide = 'none') +
     labs(x = 'distinct GROUP BY values for a SUM',
          y = 'Time (seconds)') +
     theme_bw(base_size = base_size, base_family = base_family) +
@@ -417,11 +423,11 @@ plot_sum_optimizations <- function(platform, platform_name, results_dir, output_
       panel.grid.major = element_line(linewidth = 1.0),
       panel.grid.minor = element_blank(),
       legend.position = 'top',
-      legend.justification = 'right',
+      legend.justification = 'left',
       legend.direction = 'horizontal',
       legend.margin = margin(0, 0, 0, 0),
       legend.box.margin = margin(0, 0, -10, 0),
-      legend.text = element_text(size = base_size - 5),
+      legend.text = element_text(size = base_size),
       axis.text.x = element_text(angle = 0, hjust = 0.5, size = base_size + 2),
       axis.text.y = element_text(size = base_size + 2),
       axis.title.x = element_text(size = base_size + 4, margin = margin(t = 5)),
@@ -500,17 +506,17 @@ plot_minmax_optimizations <- function(platform, platform_name, results_dir, outp
   base_size <- 40
   base_family <- "Linux Libertine"
 
-  p <- ggplot(df, aes(x = dist_label, y = plot_time, fill = variant_name, pattern = pattern)) +
+  p <- ggplot(df, aes(x = dist_label, y = plot_time, fill = variant_name, pattern = variant_name)) +
     geom_col_pattern(position = position_dodge(width = 0.9), width = 0.85,
                      color = 'black', size = 0.5,
-                     pattern_density = 0.15, pattern_spacing = 0.05,
+                     pattern_density = 0.2, pattern_spacing = 0.03,
                      pattern_fill = 'black', pattern_color = 'black',
-                     pattern_angle = 45, pattern_size = 0.3) +
+                     pattern_angle = 45, pattern_size = 0.1) +
     geom_text(aes(label = time_label, color = variant_name),
               position = position_dodge(width = 0.9),
               vjust = -0.3, size = base_size * 0.30, fontface = 'bold') +
-    scale_fill_manual(values = MINMAX_VARIANT_COLORS, name = NULL) +
-    scale_color_manual(values = MINMAX_VARIANT_COLORS, guide = 'none') +
+    scale_fill_manual(values = VARIANT_COLORS, name = NULL) +
+    scale_color_manual(values = VARIANT_COLORS, guide = 'none') +
     scale_pattern_manual(values = VARIANT_PATTERNS, guide = 'none') +
     labs(x = 'Data Distribution',
          y = 'Time (seconds)') +
@@ -747,7 +753,7 @@ plot_simd_improvements <- function(results_dir, output_dir) {
     geom_text(aes(label = sprintf('%.1fx', factor)),
               position = position_dodge(width = 0.8),
               vjust = -0.3, size = base_size * 0.18, fontface = 'bold') +
-    geom_hline(yintercept = 1, linetype = 'dashed', color = 'gray', size = 0.8) +
+    geom_hline(yintercept = 1, linetype = 'dashed', color = '#666666', size = 0.8) +
     scale_fill_manual(values = AGG_COLORS, name = 'Aggregate') +
     labs(x = 'Architecture',
          y = 'Improvement Factor') +
@@ -871,8 +877,8 @@ main <- function() {
 
     message("\n--- ", platform_name, " ---")
 
-    plot_count_optimizations(platform, platform_name, results_dir, output_dir)
-    plot_sum_optimizations(platform, platform_name, results_dir, output_dir)
+    #plot_count_optimizations(platform, platform_name, results_dir, output_dir)
+    #plot_sum_optimizations(platform, platform_name, results_dir, output_dir)
     plot_minmax_optimizations(platform, platform_name, results_dir, output_dir)
   }
 
@@ -888,4 +894,3 @@ main <- function() {
 if (!interactive()) {
   main()
 }
-
