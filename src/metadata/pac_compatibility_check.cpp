@@ -787,7 +787,7 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 
 	// Discover tables with PROTECTED columns in PAC metadata
 	// Note: Tables with protected columns are NOT automatically privacy units anymore.
-	// A table is a privacy unit only if it has is_privacy_unit = true (via CREATE PAC TABLE or ALTER TABLE SET PAC)
+	// A table is a privacy unit only if it has is_privacy_unit = true (via CREATE PU TABLE or ALTER TABLE SET PAC)
 	auto &metadata_mgr = PACMetadataManager::Get();
 	vector<string> tables_with_protected_columns;
 	for (auto &kv : scan_counts) {
@@ -851,9 +851,9 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 
 	// Build the combined privacy unit list:
 	// 1. Configured PAC tables (pac_tables from the CSV file)
-	// 2. Tables explicitly marked as privacy units (is_privacy_unit = true via CREATE PAC TABLE or ALTER TABLE SET PAC)
+	// 2. Tables explicitly marked as privacy units (is_privacy_unit = true via CREATE PU TABLE or ALTER TABLE SET PAC)
 	// Note: Tables with protected columns are NOT automatically privacy units anymore
-	// A table is a privacy unit only if it has is_privacy_unit = true (via CREATE PAC TABLE or ALTER TABLE SET PAC)
+	// A table is a privacy unit only if it has is_privacy_unit = true (via CREATE PU TABLE or ALTER TABLE SET PAC)
 	vector<string> all_privacy_units = pac_tables;
 	for (auto &t : result.scanned_pu_tables) {
 		if (std::find(all_privacy_units.begin(), all_privacy_units.end(), t) == all_privacy_units.end()) {

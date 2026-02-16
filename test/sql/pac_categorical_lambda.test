@@ -101,7 +101,7 @@ INSERT INTO sales VALUES
 # ============================================================================
 
 statement ok
-ALTER TABLE customers SET PAC;
+ALTER TABLE customers SET PU;
 
 statement ok
 SET pac_seed = 42;

@@ -95,7 +95,7 @@ INSERT INTO lineitem VALUES
 
 # Configure PAC
 statement ok
-ALTER TABLE customer SET PAC;
+ALTER TABLE customer SET PU;
 
 statement ok
 SET pac_join_elimination = true;

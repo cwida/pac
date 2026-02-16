@@ -2,7 +2,7 @@
 // PAC Parser Helpers
 //
 // This file implements SQL parsing and clause extraction for PAC statements.
-// It handles parsing of CREATE PAC TABLE and ALTER PAC TABLE statements,
+// It handles parsing of CREATE PU TABLE and ALTER PU TABLE statements,
 // extracting PAC-specific clauses (PAC_KEY, PAC_LINK, PROTECTED), and
 // stripping these clauses to produce valid SQL for DuckDB's standard parser.
 //
@@ -32,14 +32,14 @@ namespace duckdb {
  *
  * Handles:
  *   - CREATE TABLE table_name ...
- *   - CREATE PAC TABLE table_name ...
+ *   - CREATE PU TABLE table_name ...
  *   - CREATE TABLE IF NOT EXISTS table_name ...
  *   - ALTER TABLE table_name ...
  */
 string PACParserExtension::ExtractTableName(const string &sql, bool is_create) {
 	if (is_create) {
-		// Match: CREATE [PAC] TABLE [IF NOT EXISTS] table_name
-		std::regex create_regex(R"(create\s+(?:pac\s+)?table\s+(?:if\s+not\s+exists\s+)?([a-zA-Z_][a-zA-Z0-9_]*))");
+		// Match: CREATE [PU] TABLE [IF NOT EXISTS] table_name
+		std::regex create_regex(R"(create\s+(?:pu\s+)?table\s+(?:if\s+not\s+exists\s+)?([a-zA-Z_][a-zA-Z0-9_]*))");
 		std::smatch match;
 		string sql_lower = StringUtil::Lower(sql);
 		if (std::regex_search(sql_lower, match, create_regex)) {
@@ -213,10 +213,10 @@ string PACParserExtension::StripPACClauses(const string &sql) {
 // ============================================================================
 
 /**
- * ParseCreatePACTable: Parses CREATE PAC TABLE statement
+ * ParseCreatePACTable: Parses CREATE PU TABLE statement
  *
  * Syntax:
- *   CREATE PAC TABLE table_name (
+ *   CREATE PU TABLE table_name (
  *     col1 INTEGER,
  *     col2 VARCHAR,
  *     PAC_KEY (col1),
@@ -231,8 +231,8 @@ string PACParserExtension::StripPACClauses(const string &sql) {
 bool PACParserExtension::ParseCreatePACTable(const string &query, string &stripped_sql, PACTableMetadata &metadata) {
 	string query_lower = StringUtil::Lower(query);
 
-	// Check if this is a CREATE PAC TABLE statement
-	if (query_lower.find("create pac table") == string::npos && query_lower.find("create table") == string::npos) {
+	// Check if this is a CREATE PU TABLE statement
+	if (query_lower.find("create pu table") == string::npos && query_lower.find("create table") == string::npos) {
 		return false;
 	}
 
@@ -242,8 +242,8 @@ bool PACParserExtension::ParseCreatePACTable(const string &query, string &stripp
 		return false;
 	}
 
-	// Check if this is CREATE PAC TABLE (marks the table as a privacy unit)
-	bool is_create_pac_table = query_lower.find("create pac table") != string::npos;
+	// Check if this is CREATE PU TABLE (marks the table as a privacy unit)
+	bool is_create_pu_table = query_lower.find("create pu table") != string::npos;
 
 	// Check if any PAC clauses exist
 	// Use regex to avoid matching as part of identifiers
@@ -251,12 +251,12 @@ bool PACParserExtension::ParseCreatePACTable(const string &query, string &stripp
 	                       std::regex_search(query_lower, std::regex(R"(\bpac_link\s*\()")) ||
 	                       std::regex_search(query_lower, std::regex(R"(\bprotected\s*\()"));
 
-	if (!has_pac_clauses && !is_create_pac_table) {
+	if (!has_pac_clauses && !is_create_pu_table) {
 		return false;
 	}
 
-	// If CREATE PAC TABLE, mark as privacy unit
-	if (is_create_pac_table) {
+	// If CREATE PU TABLE, mark as privacy unit
+	if (is_create_pu_table) {
 		metadata.is_privacy_unit = true;
 	}
 
@@ -277,33 +277,33 @@ bool PACParserExtension::ParseCreatePACTable(const string &query, string &stripp
 	// Extract protected columns
 	ExtractProtectedColumns(query, metadata.protected_columns);
 
-	// Validate: CREATE PAC TABLE must have PAC_KEY or PRIMARY KEY
-	if (is_create_pac_table) {
+	// Validate: CREATE PU TABLE must have PAC_KEY or PRIMARY KEY
+	if (is_create_pu_table) {
 		bool has_pac_key = !metadata.primary_key_columns.empty();
 		// Check for PRIMARY KEY in the SQL (both inline "col INTEGER PRIMARY KEY" and constraint "PRIMARY KEY(col)")
 		bool has_primary_key = std::regex_search(query_lower, std::regex(R"(\bprimary\s+key\b)"));
 
 		if (!has_pac_key && !has_primary_key) {
 			throw ParserException(
-			    "CREATE PAC TABLE requires either a PAC_KEY or PRIMARY KEY constraint to identify the privacy unit");
+			    "CREATE PU TABLE requires either a PAC_KEY or PRIMARY KEY constraint to identify the privacy unit");
 		}
 	}
 
-	// Strip PAC clauses and replace "CREATE PAC TABLE" with "CREATE TABLE"
+	// Strip PAC clauses and replace "CREATE PU TABLE" with "CREATE TABLE"
 	stripped_sql = StripPACClauses(query);
-	stripped_sql = std::regex_replace(stripped_sql, std::regex(R"(create\s+pac\s+table)", std::regex_constants::icase),
+	stripped_sql = std::regex_replace(stripped_sql, std::regex(R"(create\s+pu\s+table)", std::regex_constants::icase),
 	                                  "CREATE TABLE");
 
 	return true;
 }
 
 /**
- * ParseAlterTableAddPAC: Parses ALTER PAC TABLE ... ADD ... statement
+ * ParseAlterTableAddPAC: Parses ALTER PU TABLE ... ADD ... statement
  *
  * Syntax:
- *   ALTER PAC TABLE table_name ADD PAC_KEY (col1);
- *   ALTER PAC TABLE table_name ADD PAC_LINK (col1) REFERENCES other(col2);
- *   ALTER PAC TABLE table_name ADD PROTECTED (col1, col2);
+ *   ALTER PU TABLE table_name ADD PAC_KEY (col1);
+ *   ALTER PU TABLE table_name ADD PAC_LINK (col1) REFERENCES other(col2);
+ *   ALTER PU TABLE table_name ADD PROTECTED (col1, col2);
  *
  * This operation is metadata-only (no actual DDL executed). It merges new
  * metadata with existing metadata for the table.
@@ -316,16 +316,16 @@ bool PACParserExtension::ParseCreatePACTable(const string &query, string &stripp
 bool PACParserExtension::ParseAlterTableAddPAC(const string &query, string &stripped_sql, PACTableMetadata &metadata) {
 	string query_lower = StringUtil::Lower(query);
 
-	// Check if this is an ALTER PAC TABLE statement
-	// This is a PAC-specific syntax: ALTER PAC TABLE table_name ADD PAC KEY/LINK/PROTECTED
-	if (query_lower.find("alter pac table") == string::npos) {
+	// Check if this is an ALTER PU TABLE statement
+	// This is a PAC-specific syntax: ALTER PU TABLE table_name ADD PAC KEY/LINK/PROTECTED
+	if (query_lower.find("alter pu table") == string::npos) {
 		return false;
 	}
 
-	// Extract table name - for ALTER PAC TABLE, the table name comes after "alter pac table"
-	std::regex alter_pac_regex(R"(alter\s+pac\s+table\s+([a-zA-Z_][a-zA-Z0-9_]*))");
+	// Extract table name - for ALTER PU TABLE, the table name comes after "alter pu table"
+	std::regex alter_pu_regex(R"(alter\s+pu\s+table\s+([a-zA-Z_][a-zA-Z0-9_]*))");
 	std::smatch match;
-	if (!std::regex_search(query_lower, match, alter_pac_regex)) {
+	if (!std::regex_search(query_lower, match, alter_pu_regex)) {
 		return false;
 	}
 	metadata.table_name = match[1].str();
@@ -415,7 +415,7 @@ bool PACParserExtension::ParseAlterTableAddPAC(const string &query, string &stri
 				for (size_t j = i + 1; j < new_protected_cols.size(); j++) {
 					if (StringUtil::Lower(new_protected_cols[i]) == StringUtil::Lower(new_protected_cols[j])) {
 						throw ParserException("Duplicate protected column '" + new_protected_cols[i] +
-						                      "' in ALTER PAC TABLE statement");
+						                      "' in ALTER PU TABLE statement");
 					}
 				}
 			}
@@ -437,20 +437,20 @@ bool PACParserExtension::ParseAlterTableAddPAC(const string &query, string &stri
 		}
 	}
 
-	// For ALTER PAC TABLE, we only update metadata, no actual DDL execution needed
+	// For ALTER PU TABLE, we only update metadata, no actual DDL execution needed
 	stripped_sql = "";
 
 	return true;
 }
 
 /**
- * ParseAlterTableDropPAC: Parses ALTER PAC TABLE ... DROP ... statement
+ * ParseAlterTableDropPAC: Parses ALTER PU TABLE ... DROP ... statement
  *
  * Syntax:
- *   ALTER PAC TABLE table_name DROP PAC_LINK (col1);
- *   ALTER PAC TABLE table_name DROP PROTECTED (col1, col2);
- *   ALTER TABLE table_name SET PAC;
- *   ALTER TABLE table_name UNSET PAC;
+ *   ALTER PU TABLE table_name DROP PAC_LINK (col1);
+ *   ALTER PU TABLE table_name DROP PROTECTED (col1, col2);
+ *   ALTER TABLE table_name SET PU;
+ *   ALTER TABLE table_name UNSET PU;
  *
  * This operation is metadata-only (no actual DDL executed). It removes
  * metadata entries from the table's metadata.
@@ -462,11 +462,11 @@ bool PACParserExtension::ParseAlterTableAddPAC(const string &query, string &stri
 bool PACParserExtension::ParseAlterTableDropPAC(const string &query, string &stripped_sql, PACTableMetadata &metadata) {
 	string query_lower = StringUtil::Lower(query);
 
-	// Check for ALTER TABLE ... SET PAC (marks table as privacy unit)
-	// Syntax: ALTER TABLE table_name SET PAC;
-	std::regex set_pac_regex(R"(alter\s+table\s+([a-zA-Z_][a-zA-Z0-9_]*)\s+set\s+pac\s*$)");
+	// Check for ALTER TABLE ... SET PU (marks table as privacy unit)
+	// Syntax: ALTER TABLE table_name SET PU;
+	std::regex set_pu_regex(R"(alter\s+table\s+([a-zA-Z_][a-zA-Z0-9_]*)\s+set\s+pu\s*$)");
 	std::smatch match;
-	if (std::regex_search(query_lower, match, set_pac_regex)) {
+	if (std::regex_search(query_lower, match, set_pu_regex)) {
 		metadata.table_name = match[1].str();
 
 		// Get existing metadata if any, or create new
@@ -481,10 +481,10 @@ bool PACParserExtension::ParseAlterTableDropPAC(const string &query, string &str
 		return true;
 	}
 
-	// Check for ALTER TABLE ... UNSET PAC (removes privacy unit status)
-	// Syntax: ALTER TABLE table_name UNSET PAC;
-	std::regex unset_pac_regex(R"(alter\s+table\s+([a-zA-Z_][a-zA-Z0-9_]*)\s+unset\s+pac\s*$)");
-	if (std::regex_search(query_lower, match, unset_pac_regex)) {
+	// Check for ALTER TABLE ... UNSET PU (removes privacy unit status)
+	// Syntax: ALTER TABLE table_name UNSET PU;
+	std::regex unset_pu_regex(R"(alter\s+table\s+([a-zA-Z_][a-zA-Z0-9_]*)\s+unset\s+pu\s*$)");
+	if (std::regex_search(query_lower, match, unset_pu_regex)) {
 		metadata.table_name = match[1].str();
 
 		// Get existing metadata - it should exist
@@ -499,9 +499,9 @@ bool PACParserExtension::ParseAlterTableDropPAC(const string &query, string &str
 		return true;
 	}
 
-	// Check if this is an ALTER PAC TABLE ... DROP statement
+	// Check if this is an ALTER PU TABLE ... DROP statement
 	// Must check for specific DROP patterns (drop pac link, drop protected), not just "drop" anywhere
-	if (query_lower.find("alter pac table") == string::npos) {
+	if (query_lower.find("alter pu table") == string::npos) {
 		return false;
 	}
 
@@ -513,10 +513,10 @@ bool PACParserExtension::ParseAlterTableDropPAC(const string &query, string &str
 		return false;
 	}
 
-	// Extract table name - for ALTER PAC TABLE, the table name comes after "alter pac table"
-	std::regex alter_pac_regex(R"(alter\s+pac\s+table\s+([a-zA-Z_][a-zA-Z0-9_]*))");
+	// Extract table name - for ALTER PU TABLE, the table name comes after "alter pu table"
+	std::regex alter_pu_regex(R"(alter\s+pu\s+table\s+([a-zA-Z_][a-zA-Z0-9_]*))");
 	// Reuse 'match' variable declared earlier
-	if (!std::regex_search(query_lower, match, alter_pac_regex)) {
+	if (!std::regex_search(query_lower, match, alter_pu_regex)) {
 		return false;
 	}
 	metadata.table_name = match[1].str();
@@ -604,7 +604,7 @@ bool PACParserExtension::ParseAlterTableDropPAC(const string &query, string &str
 		}
 	}
 
-	// For ALTER PAC TABLE DROP, we only update metadata, no actual DDL execution needed
+	// For ALTER PU TABLE DROP, we only update metadata, no actual DDL execution needed
 	stripped_sql = "";
 
 	return true;

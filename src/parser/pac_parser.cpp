@@ -163,7 +163,7 @@ static unique_ptr<FunctionData> PACDDLBindFunction(ClientContext &context, Table
 	}
 
 	// Save metadata to JSON file after any PAC DDL operation (CREATE or ALTER)
-	// For ALTER PAC TABLE, sql_to_execute is empty but table_name is set
+	// For ALTER PU TABLE, sql_to_execute is empty but table_name is set
 	// Only save to file if NOT an in-memory database
 	if (!sql_to_execute.empty() || !table_name.empty()) {
 		string metadata_path = PACMetadataManager::GetMetadataFilePath(context);
@@ -203,9 +203,9 @@ static void PACDDLExecuteFunction(ClientContext &context, TableFunctionInput &da
  * This function is called by DuckDB's parser extension mechanism for every query.
  * It:
  * 1. Cleans the query (removes semicolons, normalizes whitespace)
- * 2. Attempts to parse as CREATE PAC TABLE
- * 3. Attempts to parse as ALTER PAC TABLE DROP (checked before ADD)
- * 4. Attempts to parse as ALTER PAC TABLE ADD
+ * 2. Attempts to parse as CREATE PU TABLE
+ * 3. Attempts to parse as ALTER PU TABLE DROP (checked before ADD)
+ * 4. Attempts to parse as ALTER PU TABLE ADD
  * 5. Returns empty result if no PAC syntax found (let normal parser handle it)
  *
  * The order matters: DROP must be checked before ADD because DROP statements
@@ -227,7 +227,7 @@ ParserExtensionParseResult PACParserExtension::PACParseFunction(ParserExtensionI
 	string stripped_sql;
 	bool is_pac_ddl = false;
 
-	// Try to parse as CREATE PAC TABLE
+	// Try to parse as CREATE PU TABLE
 	if (ParseCreatePACTable(clean_query, stripped_sql, metadata)) {
 		is_pac_ddl = true;
 	}
@@ -258,11 +258,11 @@ ParserExtensionParseResult PACParserExtension::PACParseFunction(ParserExtensionI
  * 2. Stores metadata in PACMetadataManager
  * 3. Sets up a table function to execute the DDL
  *
- * For CREATE PAC TABLE:
+ * For CREATE PU TABLE:
  *   - Executes the stripped SQL (CREATE TABLE without PAC clauses)
  *   - Saves metadata to file
  *
- * For ALTER PAC TABLE:
+ * For ALTER PU TABLE:
  *   - No DDL executed (metadata-only operation)
  *   - Validates columns/tables exist
  *   - Saves updated metadata to file
@@ -273,9 +273,9 @@ ParserExtensionPlanResult PACParserExtension::PACPlanFunction(ParserExtensionInf
 
 	// Validate metadata before storing it
 	if (pac_data.is_pac_ddl && !pac_data.metadata.table_name.empty()) {
-		// For ALTER PAC TABLE operations, validate that the table exists
+		// For ALTER PU TABLE operations, validate that the table exists
 		if (pac_data.stripped_sql.empty()) {
-			// This is an ALTER PAC TABLE operation (stripped_sql is empty for ALTER PAC TABLE)
+			// This is an ALTER PU TABLE operation (stripped_sql is empty for ALTER PU TABLE)
 			// Check if table exists in the catalog
 			try {
 				auto &catalog = Catalog::GetCatalog(context, DatabaseManager::GetDefaultDatabase(context));
@@ -328,7 +328,7 @@ ParserExtensionPlanResult PACParserExtension::PACPlanFunction(ParserExtensionInf
 				throw;
 			}
 		} else {
-			// This is a CREATE PAC TABLE operation
+			// This is a CREATE PU TABLE operation
 			// Validate cycle detection: PAC tables cannot link to other PAC tables
 			if (pac_data.metadata.is_privacy_unit && !pac_data.metadata.links.empty()) {
 				auto &catalog = Catalog::GetCatalog(context, DatabaseManager::GetDefaultDatabase(context));

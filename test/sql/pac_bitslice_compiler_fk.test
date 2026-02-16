@@ -46,7 +46,7 @@ SELECT i AS id, (i % 5) AS pu_id, (i % 5) AS grp, (i % 10) AS val
 FROM range(25) t(i);
 
 statement ok
-ALTER TABLE bitslice_fk_pu SET PAC;
+ALTER TABLE bitslice_fk_pu SET PU;
 
 # Basic FK query with MIN/MAX on non-join key
 # Note: Grouping by PRIMARY KEY means single-row groups, PAC returns NULL for privacy

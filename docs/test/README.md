@@ -59,7 +59,7 @@ SQL tests use a simple format:
 require pac
 
 statement ok
-CREATE PAC TABLE test (id INTEGER, PAC_KEY (id));
+CREATE PU TABLE test (id INTEGER, PAC_KEY (id));
 
 query I
 SELECT COUNT(*) FROM test;
@@ -130,7 +130,7 @@ make debug
 ./build/debug/duckdb
 
 # Manually run the failing SQL
-D CREATE PAC TABLE test (id INTEGER, PAC_KEY (id));
+D CREATE PU TABLE test (id INTEGER, PAC_KEY (id));
 D SELECT COUNT(*) FROM test;
 ```
 

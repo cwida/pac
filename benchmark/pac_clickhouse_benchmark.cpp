@@ -324,8 +324,8 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
             }
 
             // Ensure PAC is disabled initially
-            con.Query("ALTER PAC TABLE hits DROP PROTECTED (UserID, ClientIP);");
-            con.Query("ALTER TABLE hits UNSET PAC;");
+            con.Query("ALTER PU TABLE hits DROP PROTECTED (UserID, ClientIP);");
+            con.Query("ALTER TABLE hits UNSET PU;");
         }
 
         // Prepare output CSV
@@ -367,7 +367,7 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
                 // Cold run (baseline, not recorded)
                 // ------------------------------------------------------------------
                 {
-                    con.Query("ALTER TABLE hits UNSET PAC;");  // Ensure no PAC
+                    con.Query("ALTER TABLE hits UNSET PU;");  // Ensure no PAC
                     Log(string("Q") + std::to_string(qnum) + " cold run");
                     auto r = con.Query(query);
                     if (r && r->HasError()) {
@@ -379,7 +379,7 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
                 // Warm run (baseline, recorded)
                 // ------------------------------------------------------------------
                 {
-                    con.Query("ALTER TABLE hits UNSET PAC;");  // Ensure no PAC
+                    con.Query("ALTER TABLE hits UNSET PU;");  // Ensure no PAC
 
                     auto t0 = std::chrono::steady_clock::now();
                     auto r = con.Query(query);
@@ -410,8 +410,8 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
                 // ------------------------------------------------------------------
                 {
                     // Enable PAC for this query
-                    con.Query("ALTER TABLE hits SET PAC;");
-                    con.Query("ALTER PAC TABLE hits ADD PROTECTED (UserID, ClientIP);");
+                    con.Query("ALTER TABLE hits SET PU;");
+                    con.Query("ALTER PU TABLE hits ADD PROTECTED (UserID, ClientIP);");
 
                     auto t0 = std::chrono::steady_clock::now();
                     auto r = con.Query(query);
@@ -446,8 +446,8 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
                     }
 
                     // Disable PAC after the run
-                    con.Query("ALTER PAC TABLE hits DROP PROTECTED (UserID, ClientIP);");
-                    con.Query("ALTER TABLE hits UNSET PAC;");
+                    con.Query("ALTER PU TABLE hits DROP PROTECTED (UserID, ClientIP);");
+                    con.Query("ALTER TABLE hits UNSET PU;");
                 }
 
                 // Force checkpoint to release memory before next query

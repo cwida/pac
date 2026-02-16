@@ -31,7 +31,7 @@ SELECT i AS id, i % 5 AS grp, ((i * 2) % 10) AS val_b, (i % 4) AS other
 FROM range(25) t(i)
 
 statement ok
-ALTER TABLE bitslice_a SET PAC;
+ALTER TABLE bitslice_a SET PU;
 
 # Ungrouped SUM / COUNT on a single table
 query I
@@ -99,7 +99,7 @@ SELECT i AS rowid, i % 5 AS grp, (i % 10) AS val
 FROM range(10) t(i)
 
 statement ok
-ALTER TABLE bitslice_with_rowid SET PAC;
+ALTER TABLE bitslice_with_rowid SET PU;
 
 query I
 SELECT SUM(val) FROM bitslice_with_rowid

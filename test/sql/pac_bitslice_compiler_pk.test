@@ -51,7 +51,7 @@ SELECT i AS pk1, (i % 7) AS pk2, (i % 11) AS pk3, i % 5 AS grp, (i % 10) AS val
 FROM range(25) t(i);
 
 statement ok
-ALTER TABLE bitslice_pk_single SET PAC;
+ALTER TABLE bitslice_pk_single SET PU;
 
 # Ungrouped SUM on single-PK table (should match distribution from no-pk test)
 query I

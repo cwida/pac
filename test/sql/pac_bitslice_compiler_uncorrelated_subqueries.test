@@ -136,7 +136,7 @@ INSERT INTO lineitem VALUES
     (12, 1, 3, 30.00, 3000.00, 0.05, '1996-02-20');
 
 statement ok
-ALTER TABLE customer SET PAC;
+ALTER TABLE customer SET PU;
 
 # Test 1: TPC-H Q7-style query
 # Tests: Multiple joins, date filtering, projections with date_part, arithmetic expressions, GROUP BY, ORDER BY
@@ -482,11 +482,11 @@ INSERT INTO orders_nopk VALUES
 
 # Set PAC on customer (no PAC_KEY — PU key must be inferred from PAC_LINK)
 statement ok
-ALTER TABLE customer_nopk SET PAC;
+ALTER TABLE customer_nopk SET PU;
 
 # Link orders to customer via PAC_LINK (this is how sf30 metadata works)
 statement ok
-ALTER PAC TABLE orders_nopk ADD PAC_LINK (o_custkey) REFERENCES customer_nopk(c_custkey);
+ALTER PU TABLE orders_nopk ADD PAC_LINK (o_custkey) REFERENCES customer_nopk(c_custkey);
 
 # Q13-style nested aggregate: inner groups by PU key, outer should get noised
 query II

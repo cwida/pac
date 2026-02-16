@@ -123,7 +123,7 @@ The hash input is generated based on the privacy unit's identifier:
 
 ### Priority Order
 
-1. **PAC_KEY**: If defined via `CREATE PAC TABLE` or `ALTER PAC TABLE ADD PAC_KEY`
+1. **PAC_KEY**: If defined via `CREATE PU TABLE` or `ALTER PU TABLE ADD PAC_KEY`
 2. **PRIMARY KEY**: Database-level primary key constraint
 3. **rowid**: DuckDB's internal row identifier (fallback)
 

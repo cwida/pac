@@ -129,10 +129,31 @@ VARIANT_PATTERNS <- c(
   'Exact' = 'stripe',
   'Buffering+Pruning' = 'rose',
   'Pruning' = 'plasma',
-  'DuckDB Count' = 'circle',
-  'DuckDB Sum' = 'circle',
-  'DuckDB Max' = 'circle',
-  'Naive/SIMD-Unfriendly' = 'crosshatch'
+  'DuckDB Count' = 'none',
+  'DuckDB Sum' = 'none',
+  'DuckDB Max' = 'none',
+  'Naive/SIMD-Unfriendly' = 'circle'
+)
+
+# Unified color mapping for all variants (combines COUNT, SUM, MINMAX colors)
+# This can be used when you need a single color scale across all variant types
+VARIANT_COLORS <- c(
+  # DuckDB baselines (gray)
+  'DuckDB Count' = '#95a5a6',
+  'DuckDB Sum' = '#95a5a6',
+  'DuckDB Max' = '#95a5a6',
+  # Best optimizations with buffering (green)
+  'Buffering+Cascading' = '#27ae60',
+  'Approximate+Buffering' = '#27ae60',
+  'Buffering+Pruning' = '#27ae60',
+  # Mid-tier without buffering (blue)
+  'Cascading' = '#3498db',
+  'Approximate' = '#3498db',
+  'Pruning' = '#3498db',
+  # Alternative methods (orange)
+  'Exact' = '#f39c12',
+  # Naive/unoptimized (red)
+  'Naive/SIMD-Unfriendly' = '#e74c3c'
 )
 
 AGG_PATTERNS <- c(
@@ -867,6 +888,4 @@ main <- function() {
 if (!interactive()) {
   main()
 }
-
-
 

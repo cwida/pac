@@ -45,7 +45,7 @@ int main() {
 		std::cerr << "✓ Plan traversal tests passed\n";
 	}
 
-	// Test 4: PAC Parser (CREATE PAC TABLE, ALTER PAC TABLE, metadata management)
+	// Test 4: PAC Parser (CREATE PU TABLE, ALTER PU TABLE, metadata management)
 	std::cerr << "\n[4/4] Running PAC parser tests...\n";
 	try {
 		duckdb::TestPACParser::RunAllTests();

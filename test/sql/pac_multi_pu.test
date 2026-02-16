@@ -88,16 +88,16 @@ INSERT INTO mid_no_pk SELECT i, i % 5, i * 4 FROM range(30) t(i);
 
 # Add PAC privacy units for pu_a and pu_b and pu_c and pu_no_pk
 statement ok
-ALTER TABLE pu_a SET PAC;
+ALTER TABLE pu_a SET PU;
 
 statement ok
-ALTER TABLE pu_b SET PAC;
+ALTER TABLE pu_b SET PU;
 
 statement ok
-ALTER TABLE pu_c SET PAC;
+ALTER TABLE pu_c SET PU;
 
 statement ok
-ALTER TABLE pu_no_pk SET PAC;
+ALTER TABLE pu_no_pk SET PU;
 
 # Basic aggregate on intermediate table joining single PU
 query I

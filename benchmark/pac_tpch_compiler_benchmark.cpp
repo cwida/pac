@@ -193,7 +193,7 @@ static void LoadPACSchema(Connection &con, const string &db_path) {
 
 	// Split the SQL file into individual statements and execute them separately
 	// This is necessary because the PAC parser extension needs to process each
-	// ALTER PAC TABLE statement individually to properly save metadata
+	// ALTER PU TABLE statement individually to properly save metadata
 	std::istringstream sql_stream(schema_sql);
 	string line;
 	string current_statement;

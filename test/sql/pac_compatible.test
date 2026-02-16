@@ -29,7 +29,7 @@ INSERT INTO t1 VALUES (1, 10), (2, 20), (3, 30), (3 , 40);
 
 # Mark table as PAC privacy unit using ALTER TABLE SET PAC
 statement ok
-ALTER TABLE t1 SET PAC;
+ALTER TABLE t1 SET PU;
 
 # PAC-compatible query: SUM
 query I
@@ -249,7 +249,7 @@ SET pac_conservative_mode = true;
 
 # Create a privacy unit table (customers) and a fact table (sales) linked via PAC_LINK
 statement ok
-CREATE PAC TABLE customers(id INTEGER PRIMARY KEY, name VARCHAR);
+CREATE PU TABLE customers(id INTEGER PRIMARY KEY, name VARCHAR);
 
 statement ok
 INSERT INTO customers VALUES (1, 'Alice'), (2, 'Bob');
@@ -261,10 +261,10 @@ statement ok
 INSERT INTO sales VALUES (1, 100, 50.00, 2), (1, 101, 30.00, 1), (2, 100, 75.00, 3), (2, 102, 25.00, 1);
 
 statement ok
-ALTER PAC TABLE sales ADD PROTECTED (amount, quantity);
+ALTER PU TABLE sales ADD PROTECTED (amount, quantity);
 
 statement ok
-ALTER PAC TABLE sales ADD PAC_LINK (customer_id) REFERENCES customers(id);
+ALTER PU TABLE sales ADD PAC_LINK (customer_id) REFERENCES customers(id);
 
 # PAC-compatible: protected column inside SUM aggregate
 query I
@@ -334,16 +334,16 @@ DROP TABLE customers;
 statement ok
 DROP TABLE products;
 
-# Test ALTER PAC TABLE to add PROTECTED columns
+# Test ALTER PU TABLE to add PROTECTED columns
 statement ok
 CREATE TABLE employees(id INTEGER, name VARCHAR, salary DECIMAL(10,2), bonus DECIMAL(10,2));
 
 statement ok
 INSERT INTO employees VALUES (1, 'Alice', 50000.00, 5000.00), (2, 'Bob', 60000.00, 6000.00), (3, 'Charlie', 55000.00, 5500.00);
 
-# Add PROTECTED columns via ALTER PAC TABLE
+# Add PROTECTED columns via ALTER PU TABLE
 statement ok
-ALTER PAC TABLE employees ADD PROTECTED (salary);
+ALTER PU TABLE employees ADD PROTECTED (salary);
 
 # PAC-compatible: protected column inside aggregate
 query I
@@ -376,29 +376,29 @@ DROP TABLE employees;
 # PAC tables cannot link to other PAC tables (cycles not supported)
 # This is now detected at DDL time, not query time
 
-# Create PAC tables
+# Create PU tables
 statement ok
-CREATE PAC TABLE cycle_a (id INTEGER PRIMARY KEY, b_id INTEGER, value_a INTEGER, PROTECTED (value_a));
+CREATE PU TABLE cycle_a (id INTEGER PRIMARY KEY, b_id INTEGER, value_a INTEGER, PROTECTED (value_a));
 
 statement ok
-CREATE PAC TABLE cycle_b (id INTEGER PRIMARY KEY, c_id INTEGER, value_b INTEGER, PROTECTED (value_b));
+CREATE PU TABLE cycle_b (id INTEGER PRIMARY KEY, c_id INTEGER, value_b INTEGER, PROTECTED (value_b));
 
 statement ok
-CREATE PAC TABLE cycle_c (id INTEGER PRIMARY KEY, a_id INTEGER, value_c INTEGER, PROTECTED (value_c));
+CREATE PU TABLE cycle_c (id INTEGER PRIMARY KEY, a_id INTEGER, value_c INTEGER, PROTECTED (value_c));
 
 # Attempting to add PAC_LINK from PAC table to PAC table should fail
 statement error
-ALTER PAC TABLE cycle_a ADD PAC_LINK (b_id) REFERENCES cycle_b(id);
+ALTER PU TABLE cycle_a ADD PAC_LINK (b_id) REFERENCES cycle_b(id);
 ----
 Cannot create PAC LINK from PAC table 'cycle_a' to PAC table 'cycle_b'. PAC tables cannot link to other PAC tables (cycles not supported).
 
 statement error
-ALTER PAC TABLE cycle_b ADD PAC_LINK (c_id) REFERENCES cycle_c(id);
+ALTER PU TABLE cycle_b ADD PAC_LINK (c_id) REFERENCES cycle_c(id);
 ----
 Cannot create PAC LINK from PAC table 'cycle_b' to PAC table 'cycle_c'. PAC tables cannot link to other PAC tables (cycles not supported).
 
 statement error
-ALTER PAC TABLE cycle_c ADD PAC_LINK (a_id) REFERENCES cycle_a(id);
+ALTER PU TABLE cycle_c ADD PAC_LINK (a_id) REFERENCES cycle_a(id);
 ----
 Cannot create PAC LINK from PAC table 'cycle_c' to PAC table 'cycle_a'. PAC tables cannot link to other PAC tables (cycles not supported).
 
@@ -413,13 +413,13 @@ statement ok
 DROP TABLE cycle_c;
 
 # ============================================================================
-# Test: CREATE PAC TABLE vs CREATE TABLE with PROTECTED columns
+# Test: CREATE PU TABLE vs CREATE TABLE with PROTECTED columns
 # Verifies that is_privacy_unit flag works correctly
 # ============================================================================
 
-# Test 1: CREATE PAC TABLE with PROTECTED - should be a privacy unit and trigger PAC compilation
+# Test 1: CREATE PU TABLE with PROTECTED - should be a privacy unit and trigger PAC compilation
 statement ok
-CREATE PAC TABLE pac_users (
+CREATE PU TABLE pac_users (
     user_id INTEGER PRIMARY KEY,
     name VARCHAR,
     salary INTEGER,
@@ -430,7 +430,7 @@ CREATE PAC TABLE pac_users (
 statement ok
 INSERT INTO pac_users VALUES (1, 'Alice', 50000), (2, 'Bob', 60000), (3, 'Carol', 70000);
 
-# This should trigger PAC compilation because pac_users is a privacy unit (CREATE PAC TABLE)
+# This should trigger PAC compilation because pac_users is a privacy unit (CREATE PU TABLE)
 query I
 SELECT SUM(salary) FROM pac_users;
 ----
@@ -483,10 +483,10 @@ SELECT SUM(secret_data) FROM regular_with_protected;
 300
 
 # ============================================================================
-# Test: ALTER TABLE SET PAC / DROP PAC
+# Test: ALTER TABLE SET PU / DROP PU
 # ============================================================================
 
-# Test 3: Convert a regular table to a privacy unit using ALTER TABLE SET PAC
+# Test 3: Convert a regular table to a privacy unit using ALTER TABLE SET PU
 statement ok
 CREATE TABLE convertible_table (
     id INTEGER PRIMARY KEY,
@@ -496,7 +496,7 @@ CREATE TABLE convertible_table (
 statement ok
 INSERT INTO convertible_table VALUES (1, 100), (2, 200), (3, 300);
 
-# Before SET PAC - can project columns (not a privacy unit)
+# Before SET PU - can project columns (not a privacy unit)
 query II
 SELECT id, value FROM convertible_table ORDER BY id;
 ----
@@ -506,9 +506,9 @@ SELECT id, value FROM convertible_table ORDER BY id;
 
 # Mark as privacy unit
 statement ok
-ALTER TABLE convertible_table SET PAC;
+ALTER TABLE convertible_table SET PU;
 
-# After SET PAC - cannot project columns (now a privacy unit, PK is protected)
+# After SET PU - cannot project columns (now a privacy unit, PK is protected)
 statement error
 SELECT id, value FROM convertible_table;
 ----
@@ -520,11 +520,11 @@ SELECT SUM(value) FROM convertible_table;
 ----
 1200
 
-# Test 4: Remove privacy unit status using ALTER TABLE UNSET PAC
+# Test 4: Remove privacy unit status using ALTER TABLE UNSET PU
 statement ok
-ALTER TABLE convertible_table UNSET PAC;
+ALTER TABLE convertible_table UNSET PU;
 
-# After UNSET PAC - can project columns again (no longer a privacy unit)
+# After UNSET PU - can project columns again (no longer a privacy unit)
 query II
 SELECT id, value FROM convertible_table ORDER BY id;
 ----
@@ -542,7 +542,7 @@ DROP TABLE convertible_table;
 
 # Test 5: Verify DROP TABLE cleans up PAC metadata
 statement ok
-CREATE PAC TABLE drop_test_pu (
+CREATE PU TABLE drop_test_pu (
     id INTEGER PRIMARY KEY,
     data INTEGER,
     PAC_KEY (id),
@@ -587,7 +587,7 @@ DROP TABLE drop_test_linked;
 
 # Test 6: Verify DROP TABLE removes table's own metadata
 statement ok
-CREATE PAC TABLE drop_test_self (
+CREATE PU TABLE drop_test_self (
     id INTEGER PRIMARY KEY,
     secret INTEGER,
     PAC_KEY (id),
@@ -634,7 +634,7 @@ DROP TABLE drop_test_self;
 
 # Test 7: Non-PAC table with PROTECTED columns linked to PAC table
 statement ok
-CREATE PAC TABLE test_pu_main (
+CREATE PU TABLE test_pu_main (
     id INTEGER PRIMARY KEY,
     name VARCHAR,
     PAC_KEY (id)

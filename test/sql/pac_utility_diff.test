@@ -44,7 +44,7 @@ FROM range(300) t(i);
 
 # Declare diff_pu as privacy unit
 statement ok
-ALTER TABLE diff_pu SET PAC;
+ALTER TABLE diff_pu SET PU;
 
 # ========== Test 1: pac_diffcols with key-based matching (perfect utility) ==========
 # pac_noise=true but pac_mi=0 means zero noise → utility should be 100%

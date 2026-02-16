@@ -4,7 +4,7 @@ PAC (Privacy-Aware-Computed) is a DuckDB extension that enforces privacy rules o
 
 ## What PAC Does
 
-PAC enables privacy-preserving analytics on sensitive data by automatically transforming SQL queries. When you designate a table as a **privacy unit** (using `CREATE PAC TABLE` or `ALTER TABLE SET PAC`), PAC ensures that individual records cannot be directly accessed or leaked through query results.
+PAC enables privacy-preserving analytics on sensitive data by automatically transforming SQL queries. When you designate a table as a **privacy unit** (using `CREATE PU TABLE` or `ALTER TABLE SET PAC`), PAC ensures that individual records cannot be directly accessed or leaked through query results.
 
 Instead of returning exact values, PAC transforms aggregates like `SUM`, `COUNT`, `AVG`, `MIN`, and `MAX` into probabilistic versions that provide strong privacy guarantees while maintaining statistical accuracy. The extension uses a bit-level probabilistic counting algorithm that distributes each record's contribution across 64 parallel counters based on a hash of the privacy unit's key, then samples from these counters with appropriate noise to produce privacy-preserving results.
 
@@ -27,12 +27,12 @@ Additional documentation is available in the `docs/` folder:
 
 ## PAC SQL Syntax
 
-### CREATE PAC TABLE
+### CREATE PU TABLE
 
 Creates a table marked as a privacy unit. **Must include either `PAC_KEY` or `PRIMARY KEY`**.
 
 ```sql
-CREATE PAC TABLE users (
+CREATE PU TABLE users (
     user_id INTEGER,
     name VARCHAR,
     email VARCHAR,
@@ -41,7 +41,7 @@ CREATE PAC TABLE users (
 );
 
 -- Or with PRIMARY KEY
-CREATE PAC TABLE users (
+CREATE PU TABLE users (
     user_id INTEGER PRIMARY KEY,
     name VARCHAR,
     email VARCHAR,
@@ -71,7 +71,7 @@ CREATE PAC TABLE users (
 
 ```sql
 -- Privacy unit table
-CREATE PAC TABLE customers (
+CREATE PU TABLE customers (
     id INTEGER,
     name VARCHAR,
     PAC_KEY (id),
@@ -92,35 +92,35 @@ SELECT SUM(amount) FROM orders;  -- Uses hash(customer_id) internally
 
 Without a `PAC_LINK`, you can still join tables with privacy units, but the PU table must be present in the query for PAC to derive the privacy hash.
 
-### ALTER PAC TABLE
+### ALTER PU TABLE
 
 Add PAC metadata to existing tables:
 
 ```sql
 -- Add PAC_KEY
-ALTER PAC TABLE orders ADD PAC_KEY (order_id);
+ALTER PU TABLE orders ADD PAC_KEY (order_id);
 
 -- Add PAC_LINK (foreign key relationship)
-ALTER PAC TABLE orders ADD PAC_LINK (customer_id) REFERENCES customers(id);
+ALTER PU TABLE orders ADD PAC_LINK (customer_id) REFERENCES customers(id);
 
 -- Add protected columns
-ALTER PAC TABLE orders ADD PROTECTED (total_amount);
+ALTER PU TABLE orders ADD PROTECTED (total_amount);
 
 -- Drop PAC metadata
-ALTER PAC TABLE orders DROP PAC_LINK (customer_id);
-ALTER PAC TABLE orders DROP PROTECTED (total_amount);
+ALTER PU TABLE orders DROP PAC_LINK (customer_id);
+ALTER PU TABLE orders DROP PROTECTED (total_amount);
 ```
 
-### SET PAC / UNSET PAC
+### SET PU / UNSET PU
 
 Mark or unmark a table as a privacy unit:
 
 ```sql
 -- Mark as privacy unit (table must have PRIMARY KEY)
-ALTER TABLE customers SET PAC;
+ALTER TABLE customers SET PU;
 
 -- Remove privacy unit status
-ALTER TABLE customers UNSET PAC;
+ALTER TABLE customers UNSET PU;
 ```
 
 ### PAC Metadata Management
@@ -188,7 +188,7 @@ The PAC compiler has been tested with the TPC-H queries (SQL-92 constructs). In 
 ```sql
 -- Create a privacy unit with NO protected columns specified
 -- This means ALL columns are treated as protected
-CREATE PAC TABLE customers (
+CREATE PU TABLE customers (
     id INTEGER,
     name VARCHAR,
     balance DECIMAL(10,2),
@@ -210,7 +210,7 @@ SELECT SUM(balance) FROM customers;
 ```sql
 -- Create a privacy unit WITH protected columns specified
 -- Only the protected columns are restricted
-CREATE PAC TABLE employees (
+CREATE PU TABLE employees (
     id INTEGER,
     department VARCHAR,
     salary DECIMAL(10,2),
