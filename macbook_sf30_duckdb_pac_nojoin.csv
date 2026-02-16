@@ -1,0 +1,73 @@
+query,mode,median_ms
+q01,baseline,550.007
+q01,SIMD PAC,2727.841542
+q01,simple hash PAC,2172.940917
+q04,baseline,244.672541
+q04,SIMD PAC,247.292833
+q04,simple hash PAC,242.7565
+q05,baseline,264.403875
+q05,SIMD PAC,271.786292
+q05,simple hash PAC,270.31725
+q06,baseline,70.321917
+q06,SIMD PAC,208.589666
+q06,simple hash PAC,95.514125
+q07,baseline,245.928292
+q07,SIMD PAC,248.082667
+q07,simple hash PAC,248.929375
+q08,baseline,301.431458
+q08,SIMD PAC,302.863083
+q08,simple hash PAC,303.764167
+q08-nolambda,baseline,301.431458
+q08-nolambda,SIMD PAC,306.225542
+q08-nolambda,simple hash PAC,306.260125
+q09,baseline,877.08475
+q09,SIMD PAC,917.951208
+q09,simple hash PAC,903.925667
+q12,baseline,235.013209
+q12,SIMD PAC,234.890542
+q12,simple hash PAC,233.780375
+q13,baseline,914.655792
+q13,SIMD PAC,914.985083
+q13,simple hash PAC,909.837292
+q14,baseline,145.761417
+q14,SIMD PAC,404.039459
+q14,simple hash PAC,174.642542
+q14-nolambda,baseline,145.761417
+q14-nolambda,SIMD PAC,401.071958
+q14-nolambda,simple hash PAC,174.911875
+q15,baseline,110.767
+q15,SIMD PAC,464.946
+q15,simple hash PAC,196.099792
+q17,baseline,468.88825
+q17,SIMD PAC,778.604125
+q17,simple hash PAC,489.681375
+q17-nofuse,baseline,468.88825
+q17-nofuse,SIMD PAC,795.836792
+q17-nofuse,simple hash PAC,490.774334
+q17-nolambda,baseline,468.88825
+q17-nolambda,SIMD PAC,775.716792
+q17-nolambda,simple hash PAC,491.221375
+q19,baseline,326.136625
+q19,SIMD PAC,386.016375
+q19,simple hash PAC,342.077791
+q20,baseline,200.907292
+q20,SIMD PAC,292.369084
+q20,simple hash PAC,250.720333
+q20-nofuse,baseline,200.907292
+q20-nofuse,SIMD PAC,329.483375
+q20-nofuse,simple hash PAC,249.169583
+q20-nolambda,baseline,200.907292
+q20-nolambda,SIMD PAC,280.715875
+q20-nolambda,simple hash PAC,251.905333
+q21,baseline,813.72225
+q21,SIMD PAC,991.998916
+q21,simple hash PAC,811.031875
+q22,baseline,144.130834
+q22,SIMD PAC,150.869125
+q22,simple hash PAC,148.248167
+q22-nofuse,baseline,144.130834
+q22-nofuse,SIMD PAC,277.019417
+q22-nofuse,simple hash PAC,158.21475
+q22-nolambda,baseline,144.130834
+q22-nolambda,SIMD PAC,147.643458
+q22-nolambda,simple hash PAC,148.530584
