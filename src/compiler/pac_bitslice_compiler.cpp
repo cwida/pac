@@ -106,6 +106,30 @@ namespace duckdb {
  * If FK table is inaccessible, we add a fresh join to bring it into scope.
  */
 
+// Check if a table scan is directly reachable from an operator without crossing an aggregate boundary.
+// Returns false if the table is behind a nested aggregate (e.g., Q13 pattern).
+static bool IsDirectlyReachable(LogicalOperator *from, idx_t table_index, bool is_start = true) {
+	if (!from) {
+		return false;
+	}
+	// Stop at nested aggregates - they create a new column scope
+	if (!is_start && from->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+		return false;
+	}
+	if (from->type == LogicalOperatorType::LOGICAL_GET) {
+		auto &get = from->Cast<LogicalGet>();
+		if (get.table_index == table_index) {
+			return true;
+		}
+	}
+	for (auto &child : from->children) {
+		if (IsDirectlyReachable(child.get(), table_index, false)) {
+			return true;
+		}
+	}
+	return false;
+}
+
 // Helper function to compute required columns for a table in the FK path
 // Returns the columns needed for joining and for the PU FK reference (for hashing)
 static vector<string> GetRequiredColumnsForTable(const PACCompatibilityResult &check, const string &table_name,
@@ -985,6 +1009,7 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 	// For each target aggregate, find which FK table it has access to and build hash expression
 	// IMPORTANT: We need to find the "closest" FK table instance for each aggregate
 	// to handle correlated subqueries correctly
+	std::unordered_map<idx_t, ColumnBinding> hash_cache;
 	for (auto *target_agg : target_aggregates) {
 		// Find which connecting table (lineitem) this aggregate has in its DIRECT path
 		// (not in a nested subquery), and use the corresponding FK table (orders)
@@ -1078,31 +1103,13 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 								}
 
 								if (!fk_cols.empty()) {
-									// Ensure FK columns are projected
-									for (auto &fk_col : fk_cols) {
-										idx_t proj_idx = EnsureProjectedColumn(node_get, fk_col);
-										if (proj_idx == DConstants::INVALID_INDEX) {
-											throw InternalException("PAC compiler: failed to project FK column " +
-											                        fk_col);
-										}
-									}
-
-									// Build hash expression
-									auto base_hash_expr = BuildXorHashFromPKs(input, node_get, fk_cols);
-
-									// ALWAYS propagate the hash expression through any intermediate operators
-									// between the table scan and the aggregate. This ensures:
-									// 1. Projection maps are updated to include the new column
-									// 2. Operator types are re-resolved
-									// 3. The binding is correctly mapped through the operator chain
-									// Even if the aggregate reads directly from the scan, PropagatePKThroughProjections
-									// will handle it correctly (returning the original expression if no intermediate
-									// ops)
-									auto hash_input_expr = PropagatePKThroughProjections(
-									    *plan, node_get, std::move(base_hash_expr), target_agg);
-
-									// Skip if no direct path found (e.g., table is behind nested aggregate)
-									if (!hash_input_expr) {
+									// Insert hash projection above get and propagate
+									auto hash_binding =
+									    GetOrInsertHashProjection(input, plan, node_get, fk_cols, false, hash_cache);
+									auto propagated =
+									    PropagateSingleBinding(*plan, hash_binding.table_index, hash_binding,
+									                           LogicalType::UBIGINT, target_agg);
+									if (propagated.table_index == DConstants::INVALID_INDEX) {
 										continue;
 									}
 
@@ -1110,8 +1117,8 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 									PAC_DEBUG_PRINT("ModifyPlanWithoutPU: FK table #" + std::to_string(node_table_idx) +
 									                " hash expression propagated");
 #endif
-
-									// Modify this aggregate with PAC functions
+									unique_ptr<Expression> hash_input_expr =
+									    make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT, propagated);
 									ModifyAggregatesWithPacFunctions(input, target_agg, hash_input_expr);
 
 									// Mark as handled so we don't process this aggregate again
@@ -1214,27 +1221,18 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 									if (accessible_node) {
 										auto &hash_source_get = accessible_node->get()->Cast<LogicalGet>();
 
-										// Ensure FK columns are projected
-										for (auto &hash_fk_col : hash_source_fk_cols) {
-											idx_t proj_idx = EnsureProjectedColumn(hash_source_get, hash_fk_col);
-											if (proj_idx == DConstants::INVALID_INDEX) {
-												throw InternalException("PAC compiler: failed to project FK column " +
-												                        hash_fk_col);
-											}
-										}
-
-										// Build hash expression
-										auto base_hash_expr =
-										    BuildXorHashFromPKs(input, hash_source_get, hash_source_fk_cols);
-										auto hash_input_expr = PropagatePKThroughProjections(
-										    *plan, hash_source_get, std::move(base_hash_expr), target_agg);
-
-										// Skip if no direct path found
-										if (!hash_input_expr) {
+										// Insert hash projection and propagate
+										auto hash_binding = GetOrInsertHashProjection(
+										    input, plan, hash_source_get, hash_source_fk_cols, false, hash_cache);
+										auto propagated =
+										    PropagateSingleBinding(*plan, hash_binding.table_index, hash_binding,
+										                           LogicalType::UBIGINT, target_agg);
+										if (propagated.table_index == DConstants::INVALID_INDEX) {
 											continue;
 										}
 
-										// Modify this aggregate with PAC functions
+										unique_ptr<Expression> hash_input_expr =
+										    make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT, propagated);
 										ModifyAggregatesWithPacFunctions(input, target_agg, hash_input_expr);
 
 										// Mark as handled and break
@@ -1260,33 +1258,15 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 										}
 
 										if (delim_results.size() == hash_source_fk_cols.size()) {
-											// Successfully added all FK columns to DELIM_JOIN
-											// Build hash expression using the DELIM_GET bindings with correct types
-											unique_ptr<Expression> hash_input_expr;
-
-											if (delim_results.size() == 1) {
-												// Single FK column - just hash it
-												auto col_ref = make_uniq<BoundColumnRefExpression>(
-												    delim_results[0].type, delim_results[0].binding);
-												hash_input_expr =
-												    input.optimizer.BindScalarFunction("hash", std::move(col_ref));
-											} else {
-												// Multiple FK columns - XOR them together then hash
-												auto first_col = make_uniq<BoundColumnRefExpression>(
-												    delim_results[0].type, delim_results[0].binding);
-												unique_ptr<Expression> xor_expr = std::move(first_col);
-
-												for (size_t i = 1; i < delim_results.size(); i++) {
-													auto next_col = make_uniq<BoundColumnRefExpression>(
-													    delim_results[i].type, delim_results[i].binding);
-													xor_expr = input.optimizer.BindScalarFunction(
-													    "xor", std::move(xor_expr), std::move(next_col));
-												}
-												hash_input_expr =
-												    input.optimizer.BindScalarFunction("hash", std::move(xor_expr));
+											// Build hash expression from DELIM_GET bindings
+											vector<unique_ptr<Expression>> fk_col_exprs;
+											for (auto &dr : delim_results) {
+												fk_col_exprs.push_back(
+												    make_uniq<BoundColumnRefExpression>(dr.type, dr.binding));
 											}
+											unique_ptr<Expression> hash_input_expr =
+											    BuildXorHash(input, std::move(fk_col_exprs));
 
-											// Modify this aggregate with PAC functions
 											ModifyAggregatesWithPacFunctions(input, target_agg, hash_input_expr);
 
 											// Mark as handled and break
@@ -1372,27 +1352,19 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 					continue;
 				}
 
-				// Ensure FK columns are projected
-				bool proj_ok = true;
-				for (auto &fk_col : test_fk_cols) {
-					if (EnsureProjectedColumn(test_get, fk_col) == DConstants::INVALID_INDEX) {
-						proj_ok = false;
-						break;
-					}
-				}
-				if (!proj_ok) {
-					continue;
-				}
+				// Try to insert hash projection and propagate
+				auto test_hash_binding =
+				    GetOrInsertHashProjection(input, plan, test_get, test_fk_cols, false, hash_cache);
+				auto test_propagated = PropagateSingleBinding(*plan, test_hash_binding.table_index, test_hash_binding,
+				                                              LogicalType::UBIGINT, target_agg);
 
-				// Try to propagate - this will return nullptr if blocked by DELIM_JOIN etc.
-				auto test_hash = BuildXorHashFromPKs(input, test_get, test_fk_cols);
-				auto test_result = PropagatePKThroughProjections(*plan, test_get, std::move(test_hash), target_agg);
-
-				if (test_result) {
+				if (test_propagated.table_index != DConstants::INVALID_INDEX) {
 #if PAC_DEBUG
 					PAC_DEBUG_PRINT("ModifyPlanWithoutPU: Propagation succeeded for orders table #" +
 					                std::to_string(test_ord_idx));
 #endif
+					unique_ptr<Expression> test_result =
+					    make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT, test_propagated);
 					ModifyAggregatesWithPacFunctions(input, target_agg, test_result);
 					found_working_table = true;
 					break;
@@ -1468,20 +1440,13 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 						PAC_DEBUG_PRINT("ModifyPlanWithoutPU: Found FK table " + present_table + " #" +
 						                std::to_string(node_table_idx) + " directly in aggregate subtree");
 #endif
-						// Ensure FK columns are projected
-						for (auto &fk_col : fk_cols) {
-							idx_t proj_idx = EnsureProjectedColumn(node_get, fk_col);
-							if (proj_idx == DConstants::INVALID_INDEX) {
-								throw InternalException("PAC compiler: failed to project FK column " + fk_col);
-							}
-						}
-
-						// Build hash expression
-						auto base_hash_expr = BuildXorHashFromPKs(input, node_get, fk_cols);
-						auto hash_input_expr =
-						    PropagatePKThroughProjections(*plan, node_get, std::move(base_hash_expr), target_agg);
-
-						// Modify this aggregate with PAC functions
+						// Insert hash projection and propagate
+						auto hash_binding =
+						    GetOrInsertHashProjection(input, plan, node_get, fk_cols, false, hash_cache);
+						auto propagated = PropagateSingleBinding(*plan, hash_binding.table_index, hash_binding,
+						                                         LogicalType::UBIGINT, target_agg);
+						unique_ptr<Expression> hash_input_expr =
+						    make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT, propagated);
 						ModifyAggregatesWithPacFunctions(input, target_agg, hash_input_expr);
 
 						found_direct_fk = true;
@@ -1543,34 +1508,15 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 				throw InternalException("PAC Compiler: no FK found from " + fk_table_name + " to any PU");
 			}
 
-			// Add FK columns to DELIM_JOIN and build hash from DELIM_GET binding
-			vector<DelimColumnResult> delim_results;
-			for (auto &fk_col : fk_cols) {
-				auto delim_result = AddColumnToDelimJoin(plan, orders_get, fk_col, target_agg);
-				if (!delim_result.IsValid()) {
-					throw InternalException("PAC Compiler: failed to add " + fk_col + " to DELIM_JOIN");
-				}
-				delim_results.push_back(delim_result);
+			// Add pre-computed hash via DELIM_JOIN
+			auto hash_binding = GetOrInsertHashProjection(input, plan, orders_get, fk_cols, false, hash_cache);
+			auto delim_result =
+			    AddBindingToDelimJoin(plan, hash_binding.table_index, hash_binding, LogicalType::UBIGINT, target_agg);
+			if (!delim_result.IsValid()) {
+				throw InternalException("PAC Compiler: failed to add hash to DELIM_JOIN for " + fk_table_name);
 			}
-
-			// Build hash expression using the DELIM_GET bindings
-			unique_ptr<Expression> hash_input_expr;
-			if (delim_results.size() == 1) {
-				auto col_ref = make_uniq<BoundColumnRefExpression>(delim_results[0].type, delim_results[0].binding);
-				hash_input_expr = input.optimizer.BindScalarFunction("hash", std::move(col_ref));
-			} else {
-				auto first_col = make_uniq<BoundColumnRefExpression>(delim_results[0].type, delim_results[0].binding);
-				unique_ptr<Expression> xor_expr = std::move(first_col);
-
-				for (size_t i = 1; i < delim_results.size(); i++) {
-					auto next_col =
-					    make_uniq<BoundColumnRefExpression>(delim_results[i].type, delim_results[i].binding);
-					xor_expr = input.optimizer.BindScalarFunction("xor", std::move(xor_expr), std::move(next_col));
-				}
-				hash_input_expr = input.optimizer.BindScalarFunction("hash", std::move(xor_expr));
-			}
-
-			// Modify this aggregate with PAC functions
+			unique_ptr<Expression> hash_input_expr =
+			    make_uniq<BoundColumnRefExpression>(delim_result.type, delim_result.binding);
 			ModifyAggregatesWithPacFunctions(input, target_agg, hash_input_expr);
 			continue; // Move to next aggregate
 		}
@@ -1624,59 +1570,26 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 			throw InternalException("PAC Compiler: no FK found from " + fk_table_name + " to any PU");
 		}
 
-		// Ensure FK columns are projected
-		for (auto &fk_col : fk_cols) {
-			idx_t proj_idx = EnsureProjectedColumn(orders_get, fk_col);
-			if (proj_idx == DConstants::INVALID_INDEX) {
-				throw InternalException("PAC compiler: failed to project FK column " + fk_col);
-			}
+		// Insert hash projection and propagate
+		auto hash_binding = GetOrInsertHashProjection(input, plan, orders_get, fk_cols, false, hash_cache);
+		auto propagated =
+		    PropagateSingleBinding(*plan, hash_binding.table_index, hash_binding, LogicalType::UBIGINT, target_agg);
+
+		unique_ptr<Expression> hash_input_expr;
+		if (propagated.table_index != DConstants::INVALID_INDEX) {
+			hash_input_expr = make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT, propagated);
 		}
 
-		// Build hash expression
-		auto base_hash_expr = BuildXorHashFromPKs(input, orders_get, fk_cols);
-		auto hash_input_expr = PropagatePKThroughProjections(*plan, orders_get, std::move(base_hash_expr), target_agg);
-
-		// If propagation failed (e.g., blocked by DELIM_JOIN with RIGHT_SEMI), try AddColumnToDelimJoin
-		// This handles cases where the FK table is accessible but its columns can't be propagated
-		// directly through the operator chain due to semi/anti join semantics
+		// If propagation failed (e.g., blocked by DELIM_JOIN), try AddBindingToDelimJoin
 		if (!hash_input_expr) {
 #if PAC_DEBUG
 			PAC_DEBUG_PRINT("ModifyPlanWithoutPU: Direct propagation failed for orders table #" +
-			                std::to_string(orders_table_idx) + ", trying AddColumnToDelimJoin fallback");
+			                std::to_string(orders_table_idx) + ", trying DELIM_JOIN fallback");
 #endif
-			// Try to add FK columns via DELIM_JOIN
-			vector<DelimColumnResult> delim_results;
-			bool delim_fallback_ok = true;
-			for (auto &fk_col : fk_cols) {
-				auto delim_result = AddColumnToDelimJoin(plan, orders_get, fk_col, target_agg);
-				if (!delim_result.IsValid()) {
-					delim_fallback_ok = false;
-					break;
-				}
-				delim_results.push_back(delim_result);
-			}
-
-			if (delim_fallback_ok && !delim_results.empty()) {
-				// Successfully added FK columns via DELIM_JOIN - build hash from DELIM_GET bindings
-				if (delim_results.size() == 1) {
-					auto col_ref = make_uniq<BoundColumnRefExpression>(delim_results[0].type, delim_results[0].binding);
-					hash_input_expr = input.optimizer.BindScalarFunction("hash", std::move(col_ref));
-				} else {
-					auto first_col =
-					    make_uniq<BoundColumnRefExpression>(delim_results[0].type, delim_results[0].binding);
-					unique_ptr<Expression> xor_expr = std::move(first_col);
-
-					for (size_t i = 1; i < delim_results.size(); i++) {
-						auto next_col =
-						    make_uniq<BoundColumnRefExpression>(delim_results[i].type, delim_results[i].binding);
-						xor_expr = input.optimizer.BindScalarFunction("xor", std::move(xor_expr), std::move(next_col));
-					}
-					hash_input_expr = input.optimizer.BindScalarFunction("hash", std::move(xor_expr));
-				}
-#if PAC_DEBUG
-				PAC_DEBUG_PRINT("ModifyPlanWithoutPU: AddColumnToDelimJoin fallback succeeded for orders table #" +
-				                std::to_string(orders_table_idx));
-#endif
+			auto delim_result =
+			    AddBindingToDelimJoin(plan, hash_binding.table_index, hash_binding, LogicalType::UBIGINT, target_agg);
+			if (delim_result.IsValid()) {
+				hash_input_expr = make_uniq<BoundColumnRefExpression>(delim_result.type, delim_result.binding);
 			}
 		}
 
@@ -1809,6 +1722,9 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 	                " aggregates with privacy unit tables");
 #endif
 
+	// Cache for hash projections: get.table_index → hash column binding
+	std::unordered_map<idx_t, ColumnBinding> hash_cache;
+
 	// For each target aggregate, build hash expressions and modify it
 	for (auto *target_agg : target_aggregates) {
 		// Build hash expressions for each privacy unit
@@ -1852,33 +1768,10 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 					use_rowid = true;
 				}
 
-				if (use_rowid) {
-					AddRowIDColumn(get);
-				} else {
-					// Ensure primary key columns are present in the LogicalGet (add them if necessary)
-					AddPKColumns(get, pks);
-				}
-
-				// Build the hash expression for this PU
-				unique_ptr<Expression> hash_input_expr;
-				if (use_rowid) {
-					// rowid is the last column added
-					auto rowid_binding = ColumnBinding(get.table_index, get.GetColumnIds().size() - 1);
-					auto rowid_col = make_uniq<BoundColumnRefExpression>(LogicalType::BIGINT, rowid_binding);
-					auto bound_hash = input.optimizer.BindScalarFunction("hash", std::move(rowid_col));
-					hash_input_expr = std::move(bound_hash);
-				} else {
-					hash_input_expr = BuildXorHashFromPKs(input, get, pks);
-				}
-
-				// Propagate the hash expression through all projections between table scan and this aggregate
-				hash_input_expr = PropagatePKThroughProjections(*plan, get, std::move(hash_input_expr), target_agg);
-
-				// Skip if propagation failed (e.g., blocked by RIGHT_SEMI/RIGHT_ANTI join)
-				if (!hash_input_expr) {
-					// Special case: Check if this outer aggregate was selected because its inner
-					// aggregate groups by PU key (Q13 pattern). In this case, use the inner
-					// aggregate's group column output as the hash input.
+				// Check if the PU table is directly reachable (not behind a nested aggregate).
+				// If not directly reachable, this is a Q13 pattern where an inner aggregate
+				// groups by PU key — we use the inner aggregate's group column output instead.
+				if (!IsDirectlyReachable(target_agg, get.table_index)) {
 					ColumnBinding pk_binding;
 					auto *inner_agg = FindInnerAggregateWithPUKeyGroup(target_agg, check, pu_table_names, pk_binding);
 					if (inner_agg) {
@@ -1887,9 +1780,6 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 						                std::to_string(pk_binding.table_index) + "." +
 						                std::to_string(pk_binding.column_index) + "] as hash input");
 #endif
-						// Look up the actual type of the PU key column at the binding position.
-						// The binding may point through intermediate projections whose types
-						// differ from the original table column type (e.g., BIGINT vs INTEGER).
 						LogicalType pk_type = LogicalType::BIGINT; // safe default
 						for (auto &child : target_agg->children) {
 							auto child_bindings = child->GetColumnBindings();
@@ -1900,20 +1790,31 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 								}
 							}
 						}
-						// Build hash expression from the inner aggregate's group column output
 						auto pk_col = make_uniq<BoundColumnRefExpression>(pk_type, pk_binding);
 						auto bound_hash = input.optimizer.BindScalarFunction("hash", std::move(pk_col));
 						hash_exprs.push_back(std::move(bound_hash));
 					} else {
 #if PAC_DEBUG
 						PAC_DEBUG_PRINT("ModifyPlanWithPU: Skipping PU table " + pu_table_name +
-						                " - propagation failed (likely blocked by semi/anti join)");
+						                " - not directly reachable and no Q13 pattern found");
 #endif
 					}
 					continue;
 				}
 
-				hash_exprs.push_back(std::move(hash_input_expr));
+				// Direct path: insert hash projection above get and propagate
+				auto hash_binding = GetOrInsertHashProjection(input, plan, get, pks, use_rowid, hash_cache);
+				auto propagated = PropagateSingleBinding(*plan, hash_binding.table_index, hash_binding,
+				                                         LogicalType::UBIGINT, target_agg);
+				if (propagated.table_index == DConstants::INVALID_INDEX) {
+#if PAC_DEBUG
+					PAC_DEBUG_PRINT("ModifyPlanWithPU: Skipping PU table " + pu_table_name +
+					                " - propagation failed (likely blocked by semi/anti join)");
+#endif
+					continue;
+				}
+				auto hash_ref = make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT, propagated);
+				hash_exprs.push_back(std::move(hash_ref));
 			} else {
 				// FK-linked table case: find FK columns that reference the PU
 				// Check which FK-linked tables are in this aggregate's subtree
@@ -1981,17 +1882,15 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 					}
 					auto &fk_get = fk_scan_ptr->get()->Cast<LogicalGet>();
 
-					// Ensure FK columns are projected
-					AddPKColumns(fk_get, fk_cols);
+					// Insert hash projection above FK get (or use cached one)
+					auto fk_hash_binding = GetOrInsertHashProjection(input, plan, fk_get, fk_cols, false, hash_cache);
 
-					// Build hash expression from FK columns
-					auto fk_hash_expr = BuildXorHashFromPKs(input, fk_get, fk_cols);
-
-					// Propagate through projections
-					fk_hash_expr = PropagatePKThroughProjections(*plan, fk_get, std::move(fk_hash_expr), target_agg);
+					// Propagate through intermediate operators
+					auto fk_propagated = PropagateSingleBinding(*plan, fk_hash_binding.table_index, fk_hash_binding,
+					                                            LogicalType::UBIGINT, target_agg);
 
 					// Skip if propagation failed (e.g., blocked by RIGHT_SEMI/RIGHT_ANTI join)
-					if (!fk_hash_expr) {
+					if (fk_propagated.table_index == DConstants::INVALID_INDEX) {
 #if PAC_DEBUG
 						PAC_DEBUG_PRINT("ModifyPlanWithPU: Skipping FK table " + fk_table +
 						                " - propagation failed (likely blocked by semi/anti join)");
@@ -1999,7 +1898,8 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 						continue;
 					}
 
-					hash_exprs.push_back(std::move(fk_hash_expr));
+					auto fk_hash_ref = make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT, fk_propagated);
+					hash_exprs.push_back(std::move(fk_hash_ref));
 					break; // Only process one FK path per PU per aggregate
 				}
 			}

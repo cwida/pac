@@ -21,60 +21,27 @@
 
 namespace duckdb {
 
-// Helper: Ensure a column flows through all operators between source_get and target_op
-// Returns the final output binding, or invalid if the column cannot flow through
-// This function may modify operators (e.g., add to aggregate groups) to ensure the column flows through
-static ColumnBinding EnsureColumnFlowsThrough(LogicalOperator *target_op, LogicalGet &source_get,
-                                              const string &column_name, idx_t source_col_proj_idx,
-                                              LogicalType &out_type) {
-	// First, get the column's type from source
-	auto col_index = source_get.GetColumnIds()[source_col_proj_idx];
-	out_type = source_get.GetColumnType(col_index);
+// Helper: Ensure a binding flows through all operators between target_op and the operator
+// identified by source_table_index. Matches both LogicalGet and LogicalProjection by table_index.
+// May modify operators (e.g., add to aggregate groups) to ensure the binding flows through.
+static ColumnBinding EnsureBindingFlowsThrough(LogicalOperator *target_op, idx_t source_table_index,
+                                               ColumnBinding source_binding, LogicalType source_type) {
+	ColumnBinding invalid(DConstants::INVALID_INDEX, DConstants::INVALID_INDEX);
 
-	// Determine the correct output binding for the source_get
-	// When projection_ids is non-empty, bindings use projection_ids values
-	// When projection_ids is empty, bindings are sequential [0, 1, 2, ...]
-	idx_t output_col_idx;
-	if (source_get.projection_ids.empty()) {
-		output_col_idx = source_col_proj_idx;
-	} else {
-		// Find the projection_id that corresponds to source_col_proj_idx
-		// projection_ids[i] = j means "the i-th output column comes from column_ids[j]"
-		// We need to find i where projection_ids[i] == source_col_proj_idx
-		output_col_idx = DConstants::INVALID_INDEX;
-		for (idx_t i = 0; i < source_get.projection_ids.size(); i++) {
-			if (source_get.projection_ids[i] == source_col_proj_idx) {
-				output_col_idx = source_get.projection_ids[i]; // Use the projection_id value as binding
-				break;
-			}
-		}
-		if (output_col_idx == DConstants::INVALID_INDEX) {
-			// Column is in column_ids but not in projection_ids - we need to add it
-#if PAC_DEBUG
-			PAC_DEBUG_PRINT("EnsureColumnFlowsThrough: Column at position " + std::to_string(source_col_proj_idx) +
-			                " not in projection_ids, adding it");
-#endif
-			source_get.projection_ids.push_back(source_col_proj_idx);
-			output_col_idx = source_col_proj_idx; // The binding uses the projection_id value
-			// Resolve types to update the types vector
-			source_get.ResolveOperatorTypes();
-		}
-	}
-
-	ColumnBinding source_binding(source_get.table_index, output_col_idx);
-
-	// Find path from target_op down to source_get and ensure column flows through
 	std::function<ColumnBinding(LogicalOperator *)> ensure_flow = [&](LogicalOperator *op) -> ColumnBinding {
+		// Base case: match any operator by table_index
 		if (op->type == LogicalOperatorType::LOGICAL_GET) {
-			auto &get = op->Cast<LogicalGet>();
-			if (get.table_index == source_get.table_index) {
+			if (op->Cast<LogicalGet>().table_index == source_table_index) {
 				return source_binding;
 			}
-			return ColumnBinding(DConstants::INVALID_INDEX, DConstants::INVALID_INDEX);
+		} else if (op->type == LogicalOperatorType::LOGICAL_PROJECTION) {
+			if (op->Cast<LogicalProjection>().table_index == source_table_index) {
+				return source_binding;
+			}
 		}
 
 		// Recursively find and trace through children
-		ColumnBinding child_result(DConstants::INVALID_INDEX, DConstants::INVALID_INDEX);
+		ColumnBinding child_result = invalid;
 		for (auto &child : op->children) {
 			child_result = ensure_flow(child.get());
 			if (child_result.table_index != DConstants::INVALID_INDEX) {
@@ -86,12 +53,10 @@ static ColumnBinding EnsureColumnFlowsThrough(LogicalOperator *target_op, Logica
 			return child_result;
 		}
 
-		// Handle how the column passes through this operator
+		// Handle how the binding passes through this operator
 		switch (op->type) {
-		case LogicalOperatorType::LOGICAL_FILTER: {
-			// Filters pass through all columns
+		case LogicalOperatorType::LOGICAL_FILTER:
 			return child_result;
-		}
 		case LogicalOperatorType::LOGICAL_PROJECTION: {
 			auto &proj = op->Cast<LogicalProjection>();
 			for (idx_t i = 0; i < proj.expressions.size(); i++) {
@@ -102,12 +67,11 @@ static ColumnBinding EnsureColumnFlowsThrough(LogicalOperator *target_op, Logica
 					}
 				}
 			}
-			// Column not projected - return invalid
-			return ColumnBinding(DConstants::INVALID_INDEX, DConstants::INVALID_INDEX);
+			return invalid;
 		}
 		case LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY: {
 			auto &agg = op->Cast<LogicalAggregate>();
-			// Check if column is already in groups
+			// Check if binding is already in groups
 			for (idx_t i = 0; i < agg.groups.size(); i++) {
 				if (agg.groups[i]->type == ExpressionType::BOUND_COLUMN_REF) {
 					auto &col_ref = agg.groups[i]->Cast<BoundColumnRefExpression>();
@@ -116,29 +80,11 @@ static ColumnBinding EnsureColumnFlowsThrough(LogicalOperator *target_op, Logica
 					}
 				}
 			}
-			// Column not in groups - we need to ADD it to the groups
-			// This is safe when the column is functionally dependent on existing groups
-			// (e.g., user_id is functionally dependent on id if id is the PK)
-			//
-			// We add the column to the aggregate's groups so it passes through
-#if PAC_DEBUG
-			PAC_DEBUG_PRINT("AddColumnToDelimJoin: Adding column to aggregate groups (binding [" +
-			                std::to_string(child_result.table_index) + "." + std::to_string(child_result.column_index) +
-			                "])");
-#endif
-			// Create a column ref expression for the group
-			auto group_col_ref = make_uniq<BoundColumnRefExpression>(out_type, child_result);
+			// Add to groups so it passes through
+			auto group_col_ref = make_uniq<BoundColumnRefExpression>(source_type, child_result);
 			idx_t new_group_idx = agg.groups.size();
 			agg.groups.push_back(std::move(group_col_ref));
-
-			// After modifying groups, we need to resolve types again
 			agg.ResolveOperatorTypes();
-
-#if PAC_DEBUG
-			PAC_DEBUG_PRINT("AddColumnToDelimJoin: Added column as group " + std::to_string(new_group_idx) +
-			                ", output binding [" + std::to_string(agg.group_index) + "." +
-			                std::to_string(new_group_idx) + "]");
-#endif
 			return ColumnBinding(agg.group_index, new_group_idx);
 		}
 		default:
@@ -149,25 +95,20 @@ static ColumnBinding EnsureColumnFlowsThrough(LogicalOperator *target_op, Logica
 	return ensure_flow(target_op);
 }
 
-DelimColumnResult AddColumnToDelimJoin(unique_ptr<LogicalOperator> &plan, LogicalGet &source_get,
-                                       const string &column_name, LogicalAggregate *target_agg) {
-	// Find the DELIM_JOIN that is an ancestor of the target aggregate
-	// The DELIM_JOIN connects the outer query (containing source_get) to the subquery (containing target_agg)
+// Helper: find the DELIM_JOIN that connects source_table_index (in left child) to target_agg (in right child)
+static LogicalComparisonJoin *FindDelimJoinForSource(LogicalOperator *root, idx_t source_table_index,
+                                                     LogicalAggregate *target_agg) {
+	LogicalComparisonJoin *result = nullptr;
 
-	// First, find the DELIM_JOIN by walking up from the root
-	LogicalComparisonJoin *delim_join = nullptr;
-	std::function<bool(LogicalOperator *)> find_delim_join = [&](LogicalOperator *op) -> bool {
+	std::function<bool(LogicalOperator *)> search = [&](LogicalOperator *op) -> bool {
 		if (!op) {
 			return false;
 		}
 
 		if (op->type == LogicalOperatorType::LOGICAL_DELIM_JOIN) {
-			// Check if this DELIM_JOIN has the target aggregate in its subtree
-			// and the source_get in the other subtree
 			auto &join = op->Cast<LogicalComparisonJoin>();
 
-			// Check if target_agg is in children[1] (the subquery side)
-			bool agg_in_right = false;
+			// Check if target_agg is in children[1] (subquery side)
 			std::function<bool(LogicalOperator *)> find_agg = [&](LogicalOperator *child) -> bool {
 				if (child == target_agg) {
 					return true;
@@ -179,17 +120,16 @@ DelimColumnResult AddColumnToDelimJoin(unique_ptr<LogicalOperator> &plan, Logica
 				}
 				return false;
 			};
+			bool agg_in_right = join.children.size() >= 2 && find_agg(join.children[1].get());
 
-			if (join.children.size() >= 2) {
-				agg_in_right = find_agg(join.children[1].get());
-			}
-
-			// Check if source_get is in children[0] (the outer query side)
-			bool source_in_left = false;
+			// Check if source is in children[0] (outer query side) by table_index
 			std::function<bool(LogicalOperator *)> find_source = [&](LogicalOperator *child) -> bool {
 				if (child->type == LogicalOperatorType::LOGICAL_GET) {
-					auto &get = child->Cast<LogicalGet>();
-					if (get.table_index == source_get.table_index) {
+					if (child->Cast<LogicalGet>().table_index == source_table_index) {
+						return true;
+					}
+				} else if (child->type == LogicalOperatorType::LOGICAL_PROJECTION) {
+					if (child->Cast<LogicalProjection>().table_index == source_table_index) {
 						return true;
 					}
 				}
@@ -200,179 +140,185 @@ DelimColumnResult AddColumnToDelimJoin(unique_ptr<LogicalOperator> &plan, Logica
 				}
 				return false;
 			};
-
-			if (!join.children.empty()) {
-				source_in_left = find_source(join.children[0].get());
-			}
+			bool source_in_left = !join.children.empty() && find_source(join.children[0].get());
 
 			if (agg_in_right && source_in_left) {
-				delim_join = &join;
+				result = &join;
 				return true;
 			}
 		}
 
 		for (auto &child : op->children) {
-			if (find_delim_join(child.get())) {
+			if (search(child.get())) {
 				return true;
 			}
 		}
 		return false;
 	};
 
-	find_delim_join(plan.get());
+	search(root);
+	return result;
+}
 
+// Helper: find the DELIM_GET in an aggregate's subtree
+static LogicalDelimGet *FindDelimGetInSubtree(LogicalOperator *op) {
+	if (!op) {
+		return nullptr;
+	}
+	if (op->type == LogicalOperatorType::LOGICAL_DELIM_GET) {
+		return &op->Cast<LogicalDelimGet>();
+	}
+	for (auto &child : op->children) {
+		auto *found = FindDelimGetInSubtree(child.get());
+		if (found) {
+			return found;
+		}
+	}
+	return nullptr;
+}
+
+// Core function: add a binding to a DELIM_JOIN's duplicate_eliminated_columns
+DelimColumnResult AddBindingToDelimJoin(unique_ptr<LogicalOperator> &plan, idx_t source_table_index,
+                                        ColumnBinding source_binding, LogicalType source_type,
+                                        LogicalAggregate *target_agg) {
 	DelimColumnResult invalid_result;
 	invalid_result.binding = ColumnBinding(DConstants::INVALID_INDEX, DConstants::INVALID_INDEX);
 	invalid_result.type = LogicalType::INVALID;
 
+	auto *delim_join = FindDelimJoinForSource(plan.get(), source_table_index, target_agg);
 	if (!delim_join) {
-		// No DELIM_JOIN found - return invalid result
 #if PAC_DEBUG
-		PAC_DEBUG_PRINT("AddColumnToDelimJoin: No DELIM_JOIN found");
+		PAC_DEBUG_PRINT("AddBindingToDelimJoin: No DELIM_JOIN found for source #" + std::to_string(source_table_index));
 #endif
 		return invalid_result;
 	}
 
 #if PAC_DEBUG
-	PAC_DEBUG_PRINT("AddColumnToDelimJoin: Found DELIM_JOIN, source_get.table_index=" +
-	                std::to_string(source_get.table_index) + ", column=" + column_name);
-	PAC_DEBUG_PRINT("AddColumnToDelimJoin: DELIM_JOIN has " +
-	                std::to_string(delim_join->duplicate_eliminated_columns.size()) +
-	                " existing duplicate_eliminated_columns");
+	PAC_DEBUG_PRINT("AddBindingToDelimJoin: Found DELIM_JOIN, source_table_index=" +
+	                std::to_string(source_table_index) + " binding=[" + std::to_string(source_binding.table_index) +
+	                "." + std::to_string(source_binding.column_index) + "]");
+	PAC_DEBUG_PRINT("AddBindingToDelimJoin: Left child type=" +
+	                std::to_string(static_cast<int>(delim_join->children[0]->type)));
+#endif
+
+	// Trace the binding through the left child of DELIM_JOIN
+	auto *left_child = delim_join->children[0].get();
+	ColumnBinding output_binding =
+	    EnsureBindingFlowsThrough(left_child, source_table_index, source_binding, source_type);
+
+	if (output_binding.table_index == DConstants::INVALID_INDEX) {
+#if PAC_DEBUG
+		PAC_DEBUG_PRINT("AddBindingToDelimJoin: EnsureBindingFlowsThrough failed");
+#endif
+		return invalid_result;
+	}
+
+#if PAC_DEBUG
+	PAC_DEBUG_PRINT("AddBindingToDelimJoin: output_binding=[" + std::to_string(output_binding.table_index) + "." +
+	                std::to_string(output_binding.column_index) + "]");
+	PAC_DEBUG_PRINT("AddBindingToDelimJoin: duplicate_eliminated_columns.size()=" +
+	                std::to_string(delim_join->duplicate_eliminated_columns.size()));
 	for (idx_t i = 0; i < delim_join->duplicate_eliminated_columns.size(); i++) {
-		PAC_DEBUG_PRINT("  dup_elim_col[" + std::to_string(i) +
-		                "]: " + delim_join->duplicate_eliminated_columns[i]->ToString());
+		auto &dec = delim_join->duplicate_eliminated_columns[i];
+		PAC_DEBUG_PRINT("AddBindingToDelimJoin: existing dup_elim[" + std::to_string(i) + "] = " + dec->ToString() +
+		                " type=" + dec->return_type.ToString());
+	}
+	// Dump DELIM_JOIN conditions
+	auto &dj = delim_join->Cast<LogicalComparisonJoin>();
+	for (idx_t i = 0; i < dj.conditions.size(); i++) {
+		PAC_DEBUG_PRINT("AddBindingToDelimJoin: condition[" + std::to_string(i) +
+		                "] left=" + dj.conditions[i].left->ToString() + " right=" + dj.conditions[i].right->ToString());
 	}
 #endif
+
+	// Add to DELIM_JOIN's duplicate_eliminated_columns
+	auto col_ref = make_uniq<BoundColumnRefExpression>(source_type, output_binding);
+	idx_t new_col_idx = delim_join->duplicate_eliminated_columns.size();
+	delim_join->duplicate_eliminated_columns.push_back(std::move(col_ref));
+
+	// Update all DELIM_GETs in the subquery to include the new column type
+	std::function<void(LogicalOperator *)> update_delim_gets = [&](LogicalOperator *op) {
+		if (!op) {
+			return;
+		}
+		if (op->type == LogicalOperatorType::LOGICAL_DELIM_GET) {
+			auto &dg = op->Cast<LogicalDelimGet>();
+#if PAC_DEBUG
+			PAC_DEBUG_PRINT("AddBindingToDelimJoin: Updating DELIM_GET #" + std::to_string(dg.table_index) +
+			                " chunk_types before=" + std::to_string(dg.chunk_types.size()));
+#endif
+			dg.chunk_types.push_back(source_type);
+			op->ResolveOperatorTypes();
+#if PAC_DEBUG
+			PAC_DEBUG_PRINT("AddBindingToDelimJoin: DELIM_GET #" + std::to_string(dg.table_index) +
+			                " chunk_types after=" + std::to_string(dg.chunk_types.size()) +
+			                " types after=" + std::to_string(dg.types.size()));
+#endif
+		}
+		for (auto &child : op->children) {
+			update_delim_gets(child.get());
+		}
+	};
+	if (delim_join->children.size() >= 2) {
+		update_delim_gets(delim_join->children[1].get());
+	}
+
+	// Find DELIM_GET in aggregate's subtree and return binding
+	auto *delim_get = FindDelimGetInSubtree(target_agg);
+	if (!delim_get) {
+		return invalid_result;
+	}
+
+#if PAC_DEBUG
+	PAC_DEBUG_PRINT("AddBindingToDelimJoin: DELIM_GET #" + std::to_string(delim_get->table_index) + " now has " +
+	                std::to_string(delim_get->chunk_types.size()) + " chunk_types, " +
+	                std::to_string(delim_get->types.size()) + " types");
+#endif
+
+	DelimColumnResult result;
+	result.binding = ColumnBinding(delim_get->table_index, new_col_idx);
+	result.type = source_type;
+	return result;
+}
+
+// Thin wrapper: resolve column name to binding, then delegate to AddBindingToDelimJoin
+DelimColumnResult AddColumnToDelimJoin(unique_ptr<LogicalOperator> &plan, LogicalGet &source_get,
+                                       const string &column_name, LogicalAggregate *target_agg) {
+	DelimColumnResult invalid_result;
+	invalid_result.binding = ColumnBinding(DConstants::INVALID_INDEX, DConstants::INVALID_INDEX);
+	invalid_result.type = LogicalType::INVALID;
 
 	// Ensure the column is projected in source_get
 	idx_t col_proj_idx = EnsureProjectedColumn(source_get, column_name);
 	if (col_proj_idx == DConstants::INVALID_INDEX) {
-#if PAC_DEBUG
-		PAC_DEBUG_PRINT("AddColumnToDelimJoin: Failed to project column " + column_name + " in source_get");
-#endif
 		return invalid_result;
 	}
-
-#if PAC_DEBUG
-	PAC_DEBUG_PRINT("AddColumnToDelimJoin: Column " + column_name + " projected at index " +
-	                std::to_string(col_proj_idx) + " in source_get");
-#endif
 
 	// Get the column type
 	auto col_index = source_get.GetColumnIds()[col_proj_idx];
 	auto col_type = source_get.GetColumnType(col_index);
 
-	// CRITICAL FIX: The duplicate_eliminated_columns expressions must reference the OUTPUT
-	// of the DELIM_JOIN's left child, not the original scan. If there are intermediate
-	// operators (like aggregates) between the scan and the DELIM_JOIN, we need to trace
-	// the column through them (and potentially add to aggregate groups).
-
-	// Get the left child of DELIM_JOIN
-	auto *left_child = delim_join->children[0].get();
-
-#if PAC_DEBUG
-	PAC_DEBUG_PRINT("AddColumnToDelimJoin: Left child type=" + std::to_string(static_cast<int>(left_child->type)));
-#endif
-
-	// Trace the column through the left child to find the output binding
-	// This may ADD the column to aggregate groups if needed
-	LogicalType traced_type;
-	ColumnBinding output_binding =
-	    EnsureColumnFlowsThrough(left_child, source_get, column_name, col_proj_idx, traced_type);
-
-	if (output_binding.table_index == DConstants::INVALID_INDEX) {
-#if PAC_DEBUG
-		PAC_DEBUG_PRINT("AddColumnToDelimJoin: Column " + column_name +
-		                " does not flow through to DELIM_JOIN left child output");
-#endif
-		return invalid_result;
-	}
-
-#if PAC_DEBUG
-	PAC_DEBUG_PRINT("AddColumnToDelimJoin: Column flows through with output binding [" +
-	                std::to_string(output_binding.table_index) + "." + std::to_string(output_binding.column_index) +
-	                "]");
-#endif
-
-	// Create a column reference expression using the OUTPUT binding (not the scan binding)
-	auto col_ref = make_uniq<BoundColumnRefExpression>(col_type, output_binding);
-
-#if PAC_DEBUG
-	PAC_DEBUG_PRINT("AddColumnToDelimJoin: Adding column ref " + col_ref->ToString() +
-	                " to duplicate_eliminated_columns");
-#endif
-
-	// Add to DELIM_JOIN's duplicate_eliminated_columns
-	idx_t new_col_idx = delim_join->duplicate_eliminated_columns.size();
-	delim_join->duplicate_eliminated_columns.push_back(std::move(col_ref));
-
-	// Find and update all DELIM_GETs in the subquery that reference this DELIM_JOIN
-	// We need to add the new column type to their chunk_types
-	std::function<void(LogicalOperator *)> update_delim_gets = [&](LogicalOperator *op) {
-		if (!op) {
-			return;
-		}
-
-		if (op->type == LogicalOperatorType::LOGICAL_DELIM_GET) {
-			auto &delim_get = op->Cast<LogicalDelimGet>();
-			// Add the new column type
-			delim_get.chunk_types.push_back(col_type);
-#if PAC_DEBUG
-			PAC_DEBUG_PRINT("AddColumnToDelimJoin: Updated DELIM_GET #" + std::to_string(delim_get.table_index) +
-			                " with new column type");
-#endif
-		}
-
-		for (auto &child : op->children) {
-			update_delim_gets(child.get());
-		}
-	};
-
-	// Only update DELIM_GETs in the subquery side (children[1])
-	if (delim_join->children.size() >= 2) {
-		update_delim_gets(delim_join->children[1].get());
-	}
-
-	// Find the DELIM_GET that the aggregate can access and return the binding for the new column
-	// Walk from aggregate to find the closest DELIM_GET
-	std::function<LogicalDelimGet *(LogicalOperator *)> find_delim_get = [&](LogicalOperator *op) -> LogicalDelimGet * {
-		if (!op) {
-			return nullptr;
-		}
-
-		if (op->type == LogicalOperatorType::LOGICAL_DELIM_GET) {
-			return &op->Cast<LogicalDelimGet>();
-		}
-
-		for (auto &child : op->children) {
-			auto result = find_delim_get(child.get());
-			if (result) {
-				return result;
+	// Determine the output binding for the source_get
+	idx_t output_col_idx;
+	if (source_get.projection_ids.empty()) {
+		output_col_idx = col_proj_idx;
+	} else {
+		output_col_idx = DConstants::INVALID_INDEX;
+		for (idx_t i = 0; i < source_get.projection_ids.size(); i++) {
+			if (source_get.projection_ids[i] == col_proj_idx) {
+				output_col_idx = source_get.projection_ids[i];
+				break;
 			}
 		}
-		return nullptr;
-	};
-
-	auto *delim_get = find_delim_get(target_agg);
-	if (!delim_get) {
-#if PAC_DEBUG
-		PAC_DEBUG_PRINT("AddColumnToDelimJoin: No DELIM_GET found in aggregate subtree");
-#endif
-		return invalid_result;
+		if (output_col_idx == DConstants::INVALID_INDEX) {
+			source_get.projection_ids.push_back(col_proj_idx);
+			output_col_idx = col_proj_idx;
+			source_get.ResolveOperatorTypes();
+		}
 	}
 
-#if PAC_DEBUG
-	PAC_DEBUG_PRINT("AddColumnToDelimJoin: Found DELIM_GET #" + std::to_string(delim_get->table_index) +
-	                ", returning binding [" + std::to_string(delim_get->table_index) + "." +
-	                std::to_string(new_col_idx) + "]");
-#endif
-
-	// Return binding and type for the new column in the DELIM_GET
-	DelimColumnResult result;
-	result.binding = ColumnBinding(delim_get->table_index, new_col_idx);
-	result.type = col_type;
-	return result;
+	ColumnBinding source_binding(source_get.table_index, output_col_idx);
+	return AddBindingToDelimJoin(plan, source_get.table_index, source_binding, col_type, target_agg);
 }
 
 } // namespace duckdb

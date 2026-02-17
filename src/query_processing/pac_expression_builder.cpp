@@ -3,17 +3,21 @@
 //
 
 #include "query_processing/pac_expression_builder.hpp"
+#include "query_processing/pac_plan_traversal.hpp"
 #include "pac_debug.hpp"
 
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
+#include "duckdb/planner/operator/logical_projection.hpp"
 #include "duckdb/function/function_binder.hpp"
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/aggregate_function_catalog_entry.hpp"
 #include "duckdb/common/constants.hpp"
 #include "duckdb/optimizer/optimizer.hpp"
+#include "duckdb/optimizer/column_binding_replacer.hpp"
+#include "duckdb/planner/binder.hpp"
 
 namespace duckdb {
 
@@ -146,7 +150,21 @@ void AddRowIDColumn(LogicalGet &get) {
 	get.ResolveOperatorTypes();
 }
 
-// Build XOR(pk1, pk2, ...) then hash(...) bound expression for the given LogicalGet's PKs
+// Hash one or more column expressions: hash(c1) XOR hash(c2) XOR ...
+// Works for any column type (VARCHAR, INTEGER, etc.)
+unique_ptr<Expression> BuildXorHash(OptimizerExtensionInput &input, vector<unique_ptr<Expression>> cols) {
+	if (cols.empty()) {
+		throw InternalException("PAC compiler: BuildXorHash called with empty column list");
+	}
+	auto left = input.optimizer.BindScalarFunction("hash", std::move(cols[0]));
+	for (size_t i = 1; i < cols.size(); ++i) {
+		auto right = input.optimizer.BindScalarFunction("hash", std::move(cols[i]));
+		left = input.optimizer.BindScalarFunction("xor", std::move(left), std::move(right));
+	}
+	return left;
+}
+
+// Build hash expression for the given LogicalGet's primary key columns
 unique_ptr<Expression> BuildXorHashFromPKs(OptimizerExtensionInput &input, LogicalGet &get, const vector<string> &pks) {
 	vector<unique_ptr<Expression>> pk_cols;
 	for (auto &pk : pks) {
@@ -159,23 +177,85 @@ unique_ptr<Expression> BuildXorHashFromPKs(OptimizerExtensionInput &input, Logic
 		auto &col_type = get.GetColumnType(col_index_obj);
 		pk_cols.push_back(make_uniq<BoundColumnRefExpression>(col_type, col_binding));
 	}
+	return BuildXorHash(input, std::move(pk_cols));
+}
 
-	// If there is only one PK, no XOR needed
-	unique_ptr<Expression> xor_expr;
-	if (pk_cols.size() == 1) {
-		xor_expr = std::move(pk_cols[0]);
+ColumnBinding InsertHashProjectionAboveGet(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
+                                           LogicalGet &get, const vector<string> &key_columns, bool use_rowid) {
+	// 1. Build hash expression from the get's columns
+	unique_ptr<Expression> hash_expr;
+	if (use_rowid) {
+		AddRowIDColumn(get);
+		auto rowid_binding = ColumnBinding(get.table_index, get.GetColumnIds().size() - 1);
+		auto rowid_col = make_uniq<BoundColumnRefExpression>(LogicalType::BIGINT, rowid_binding);
+		hash_expr = input.optimizer.BindScalarFunction("hash", std::move(rowid_col));
 	} else {
-		// Build chain using optimizer.BindScalarFunction with operator "^" (bitwise XOR)
-		auto left = std::move(pk_cols[0]);
-		for (size_t i = 1; i < pk_cols.size(); ++i) {
-			auto right = std::move(pk_cols[i]);
-			left = input.optimizer.BindScalarFunction("^", std::move(left), std::move(right));
-		}
-		xor_expr = std::move(left);
+		AddPKColumns(get, key_columns);
+		hash_expr = BuildXorHashFromPKs(input, get, key_columns);
 	}
 
-	// Finally bind the hash over the xor_expr
-	return input.optimizer.BindScalarFunction("hash", std::move(xor_expr));
+	// 2. Find the unique_ptr slot holding this get in the plan tree
+	vector<unique_ptr<LogicalOperator> *> get_nodes;
+	FindAllNodesByTableIndex(&plan, get.table_index, get_nodes);
+	if (get_nodes.empty()) {
+		throw InternalException("PAC compiler: InsertHashProjectionAboveGet could not find get #" +
+		                        std::to_string(get.table_index));
+	}
+	auto &get_slot = *get_nodes[0];
+
+	// 3. Collect old output bindings before we wrap the get
+	auto old_bindings = get_slot->GetColumnBindings();
+	idx_t num_get_cols = old_bindings.size();
+
+	// 4. Create projection with passthrough + hash column
+	auto &binder = input.optimizer.binder;
+	idx_t proj_table_index = binder.GenerateTableIndex();
+	vector<unique_ptr<Expression>> proj_expressions;
+
+	// Passthrough expressions for each existing get output column
+	for (idx_t i = 0; i < num_get_cols; i++) {
+		auto &binding = old_bindings[i];
+		auto col_type = get_slot->types[i];
+		proj_expressions.push_back(make_uniq<BoundColumnRefExpression>(col_type, binding));
+	}
+
+	// Hash expression as the last column
+	proj_expressions.push_back(std::move(hash_expr));
+
+	auto projection = make_uniq<LogicalProjection>(proj_table_index, std::move(proj_expressions));
+
+	// 5. Move get into projection as child, place projection in slot
+	projection->children.push_back(std::move(get_slot));
+	projection->ResolveOperatorTypes();
+
+	// Before placing projection in slot, set it up
+	LogicalOperator *proj_ptr = projection.get();
+	get_slot = std::move(projection);
+
+	// 6. Use ColumnBindingReplacer to remap [get.table_index, i] → [proj.table_index, i]
+	ColumnBindingReplacer replacer;
+	for (idx_t i = 0; i < num_get_cols; i++) {
+		ColumnBinding old_b = old_bindings[i];
+		ColumnBinding new_b(proj_table_index, i);
+		replacer.replacement_bindings.emplace_back(old_b, new_b);
+	}
+	replacer.stop_operator = proj_ptr;
+	replacer.VisitOperator(*plan);
+
+	// 7. Return binding for the hash column (last expression in projection)
+	return ColumnBinding(proj_table_index, num_get_cols);
+}
+
+ColumnBinding GetOrInsertHashProjection(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
+                                        LogicalGet &get, const vector<string> &key_columns, bool use_rowid,
+                                        std::unordered_map<idx_t, ColumnBinding> &cache) {
+	auto it = cache.find(get.table_index);
+	if (it != cache.end()) {
+		return it->second;
+	}
+	auto binding = InsertHashProjectionAboveGet(input, plan, get, key_columns, use_rowid);
+	cache[get.table_index] = binding;
+	return binding;
 }
 
 // Build AND expression from multiple hash expressions (for multiple PUs)

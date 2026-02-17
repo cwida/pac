@@ -33,6 +33,13 @@ struct DelimColumnResult {
 DelimColumnResult AddColumnToDelimJoin(unique_ptr<LogicalOperator> &plan, LogicalGet &source_get,
                                        const string &column_name, LogicalAggregate *target_agg);
 
+// Add a pre-computed binding (e.g., from a hash projection) to a DELIM_JOIN.
+// Similar to AddColumnToDelimJoin but takes a binding + type instead of LogicalGet + column name.
+// The source_table_index is used to locate the source operator in the DELIM_JOIN's left child.
+DelimColumnResult AddBindingToDelimJoin(unique_ptr<LogicalOperator> &plan, idx_t source_table_index,
+                                        ColumnBinding source_binding, LogicalType source_type,
+                                        LogicalAggregate *target_agg);
+
 } // namespace duckdb
 
 #endif // PAC_SUBQUERY_HANDLER_HPP

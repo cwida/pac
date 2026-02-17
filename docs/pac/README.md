@@ -212,7 +212,7 @@ These compile-time flags control algorithm variants:
 | `src/aggregates/pac_sum.cpp` | pac_sum and pac_avg implementation |
 | `src/aggregates/pac_count.cpp` | pac_count implementation |
 | `src/aggregates/pac_min_max.cpp` | pac_min and pac_max implementation |
-| `src/aggregates/pac_aggregate_hash.cpp` | Hash expression building |
+
 | `src/compiler/pac_bitslice_compiler.cpp` | Query transformation logic |
 | `src/query_processing/pac_expression_builder.cpp` | Expression transformation |
 

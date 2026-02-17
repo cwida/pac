@@ -22,8 +22,23 @@ void AddPKColumns(LogicalGet &get, const vector<string> &pks);
 // Helper to ensure rowid is present in the output columns of a LogicalGet
 void AddRowIDColumn(LogicalGet &get);
 
-// Build XOR(pk1, pk2, ...) then hash(...) bound expression for the given LogicalGet's PKs
+// Hash one or more column expressions: hash(c1) XOR hash(c2) XOR ...
+unique_ptr<Expression> BuildXorHash(OptimizerExtensionInput &input, vector<unique_ptr<Expression>> cols);
+
+// Build hash expression for the given LogicalGet's primary key columns
 unique_ptr<Expression> BuildXorHashFromPKs(OptimizerExtensionInput &input, LogicalGet &get, const vector<string> &pks);
+
+// Insert a LogicalProjection above a LogicalGet that computes hash(key_columns) as an extra column.
+// Remaps all existing references to the get's bindings using ColumnBindingReplacer.
+// Returns the ColumnBinding for the new hash column in the projection's output.
+ColumnBinding InsertHashProjectionAboveGet(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
+                                           LogicalGet &get, const vector<string> &key_columns, bool use_rowid);
+
+// Caching wrapper around InsertHashProjectionAboveGet. Keyed by get.table_index.
+// Returns cached binding if hash projection was already inserted for this get.
+ColumnBinding GetOrInsertHashProjection(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
+                                        LogicalGet &get, const vector<string> &key_columns, bool use_rowid,
+                                        std::unordered_map<idx_t, ColumnBinding> &cache);
 
 // Build AND expression from multiple hash expressions (for multiple PUs)
 unique_ptr<Expression> BuildAndFromHashes(OptimizerExtensionInput &input, vector<unique_ptr<Expression>> &hash_exprs);

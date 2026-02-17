@@ -35,7 +35,7 @@ set(EXTENSION_SOURCES
     src/metadata/pac_metadata_manager.cpp
     src/metadata/pac_metadata_serialization.cpp
     src/aggregates/pac_aggregate.cpp
-    src/aggregates/pac_aggregate_hash.cpp
+
     src/aggregates/pac_count.cpp
     src/aggregates/pac_min_max.cpp
     src/aggregates/pac_sum.cpp
