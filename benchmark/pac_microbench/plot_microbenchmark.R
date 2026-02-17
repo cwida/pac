@@ -390,7 +390,7 @@ plot_sum_optimizations <- function(platform, platform_name, results_dir, output_
   # Paper plot settings (wider for more variants)
   width <- 4800
   height <- 1700
-  res <- 200
+  res <- 225
   base_size <- 40
   base_family <- "Linux Libertine"
 
@@ -404,12 +404,12 @@ plot_sum_optimizations <- function(platform, platform_name, results_dir, output_
     # Regular time labels on top of bars
     geom_text(aes(label = time_label, color = variant_name),
               position = position_dodge(width = 0.9),
-              vjust = -0.3, size = base_size * 0.18, fontface = 'bold') +
+              vjust = -0.3, size = base_size * 0.17, fontface = 'bold') +
     # FAILED labels inside bars - vertical like count plot
     geom_text(data = df %>% filter(is_timeout) %>% mutate(label_y = y_max, variant_name = factor(variant_name, levels = SUM_VARIANT_ORDER)),
               aes(x = group_label, y = label_y, label = 'FAILED', fill = variant_name),
               position = position_dodge(width = 0.8),
-              vjust = 0.5, hjust = 0.5,
+              vjust = 0.5, hjust = 0.65,
               size = base_size * 0.22, fontface = 'bold',
               color = 'white', angle = 90, show.legend = FALSE) +
     scale_fill_manual(values = SUM_VARIANT_COLORS, name = NULL) +
@@ -423,11 +423,11 @@ plot_sum_optimizations <- function(platform, platform_name, results_dir, output_
       panel.grid.major = element_line(linewidth = 1.0),
       panel.grid.minor = element_blank(),
       legend.position = 'top',
-      legend.justification = 'left',
+      legend.justification = 'right',
       legend.direction = 'horizontal',
       legend.margin = margin(0, 0, 0, 0),
       legend.box.margin = margin(0, 0, -10, 0),
-      legend.text = element_text(size = base_size),
+      legend.text = element_text(size = base_size - 2),
       axis.text.x = element_text(angle = 0, hjust = 0.5, size = base_size + 2),
       axis.text.y = element_text(size = base_size + 2),
       axis.title.x = element_text(size = base_size + 4, margin = margin(t = 5)),
@@ -877,8 +877,8 @@ main <- function() {
 
     message("\n--- ", platform_name, " ---")
 
-    #plot_count_optimizations(platform, platform_name, results_dir, output_dir)
-    #plot_sum_optimizations(platform, platform_name, results_dir, output_dir)
+    plot_count_optimizations(platform, platform_name, results_dir, output_dir)
+    plot_sum_optimizations(platform, platform_name, results_dir, output_dir)
     plot_minmax_optimizations(platform, platform_name, results_dir, output_dir)
   }
 

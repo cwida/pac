@@ -83,6 +83,8 @@ raw <- raw %>% mutate(mode = case_when(
 
 # Ordered query list
 query_order <- raw %>% distinct(query, qnum) %>% arrange(qnum) %>% pull(query)
+# Convert query labels to uppercase
+query_labels <- toupper(query_order)
 
 # Slowdown report
 baseline_df <- raw %>% filter(mode == "DuckDB") %>% select(query, baseline_time = median_ms)
@@ -153,10 +155,10 @@ plot_data <- plot_data %>%
 # Component ordering: PU-key join on top, core on bottom, DuckDB separate
 if (has_simple_hash) {
   comp_levels <- c("PU-key join", "PAC", "DuckDB")
-  comp_colors <- c("DuckDB" = "#1f77b4", "PAC" = "#ff7f0e", "PU-key join" = "#d62728")
+  comp_colors <- c("DuckDB" = "#95a5a6", "PAC" = "#4dff4d", "PU-key join" = "#009900")
 } else {
   comp_levels <- c("DuckDB", "PAC")
-  comp_colors <- c("DuckDB" = "#1f77b4", "PAC" = "#ff7f0e")
+  comp_colors <- c("DuckDB" = "#95a5a6", "PAC" = "#4dff4d")
 }
 plot_data$component <- factor(plot_data$component, levels = comp_levels)
 
@@ -181,20 +183,20 @@ if (has_simple_hash) {
     geom_col(data = pac_core, aes(x = x_pos, y = time, fill = component), width = 0.35) +
     scale_fill_manual(values = comp_colors, name = NULL,
                       breaks = c("DuckDB", "PAC", "PU-key join")) +
-    scale_x_continuous(breaks = seq_along(query_order), labels = query_order) +
+    scale_x_continuous(breaks = seq_along(query_order), labels = query_labels) +
     scale_y_log10(labels = scales::comma) +
     labs(x = "TPC-H Query", y = "Time (ms, log scale)")
 } else {
   p <- ggplot(plot_data, aes(x = x_pos, y = time, fill = component, width = 0.35)) +
     geom_col() +
     scale_fill_manual(values = comp_colors, name = NULL) +
-    scale_x_continuous(breaks = seq_along(query_order), labels = query_order) +
+    scale_x_continuous(breaks = seq_along(query_order), labels = query_labels) +
     scale_y_log10(labels = scales::comma) +
     labs(x = "TPC-H Query", y = "Time (ms, log scale)")
 }
 
 p <- p +
-  theme_bw(base_size = 40) +
+  theme_bw(base_size = 40, base_family = "Linux Libertine") +
   theme(
     panel.grid.major = element_line(linewidth = 1.0),
     panel.grid.minor = element_blank(),
@@ -205,7 +207,7 @@ p <- p +
     legend.box.margin = margin(0, 0, -15, 0),
     axis.text.x = element_text(angle = 45, hjust = 1, size = 24),
     axis.text.y = element_text(size = 28),
-    axis.title = element_blank(),
+    axis.title = element_text(size = 32),
     plot.title = element_blank(),
     plot.margin = margin(5, 5, 5, 5)
   )
@@ -213,5 +215,7 @@ p <- p +
 sf_for_name <- ifelse(is.na(sf_str), "unknown", gsub("\\.", "_", sf_str))
 out_file <- file.path(output_dir, paste0("tpch_benchmark_plot_sf", sf_for_name, ".png"))
 
-ggsave(filename = out_file, plot = p, width = 18, height = 8, dpi = 300)
+png(filename = out_file, width = 4000, height = 1800, res = 350)
+  print(p)
+ dev.off()
 message("Plot saved to: ", out_file)
