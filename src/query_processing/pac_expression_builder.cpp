@@ -194,6 +194,13 @@ ColumnBinding InsertHashProjectionAboveGet(OptimizerExtensionInput &input, uniqu
 		hash_expr = BuildXorHashFromPKs(input, get, key_columns);
 	}
 
+	// 1b. Optionally wrap in pac_hash() to guarantee exactly 32 bits set
+	Value pac_hash_val;
+	if (input.context.TryGetCurrentSetting("pac_hash", pac_hash_val) && !pac_hash_val.IsNull() &&
+	    pac_hash_val.GetValue<bool>()) {
+		hash_expr = input.optimizer.BindScalarFunction("pac_hash", std::move(hash_expr));
+	}
+
 	// 2. Find the unique_ptr slot holding this get in the plan tree
 	vector<unique_ptr<LogicalOperator> *> get_nodes;
 	FindAllNodesByTableIndex(&plan, get.table_index, get_nodes);

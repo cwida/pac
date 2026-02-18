@@ -442,21 +442,18 @@ void RegisterPacAggregateFunctions(ExtensionLoader &loader) {
 #define PAC_HASH_PRIME 0xB2833106536E95DFULL
 
 static uint64_t hash32_32(uint64_t num) {
-	for (int round = 0; round < 8; ++round) {
+	for (int round = 0; round < 16; ++round) {
+		uint64_t next = PAC_HASH_PRIME * (num ^ PAC_HASH_PRIME);
 		int pop = pac_popcount64(num);
-
-		// Negate if overfull
-		if (pop > 32) {
+		if (pop > 32) { // Negate if overfull
 			num = ~num;
 			pop = 64 - pop;
 		}
-
-		uint64_t next = PAC_HASH_PRIME * (num ^ PAC_HASH_PRIME);
-
 		if (pop >= 26) {
 			for (int iter = 0; iter < 10; ++iter) {
-				if (pop == 32) return num;
-
+				if (pop == 32) {
+					return num;
+				}
 				uint64_t mask = 1ULL << ((next >> (6 * iter)) & 63);
 				if ((num & mask) == 0) {
 					num |= mask;
@@ -464,7 +461,6 @@ static uint64_t hash32_32(uint64_t num) {
 				}
 			}
 		}
-
 		num = next; // fallback to next hash if repair fails
 	}
 	return 0xAAAAAAAAAAAAAAAAULL; // 1010...10 pattern: exactly 32 bits set
@@ -473,9 +469,7 @@ static uint64_t hash32_32(uint64_t num) {
 static void PacHashFunction(DataChunk &args, ExpressionState &, Vector &result) {
 	auto &input = args.data[0];
 	auto count = args.size();
-
-	UnaryExecutor::Execute<uint64_t, uint64_t>(input, result, count,
-	                                           [](uint64_t val) { return hash32_32(val); });
+	UnaryExecutor::Execute<uint64_t, uint64_t>(input, result, count, [](uint64_t val) { return hash32_32(val); });
 }
 
 void RegisterPacHashFunction(ExtensionLoader &loader) {
