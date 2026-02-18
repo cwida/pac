@@ -43,10 +43,10 @@ static string ReadFileToString(const string &path);
 
 // new helper: try to discover the absolute path to the R plotting script
 static string FindPlotScriptAbsolute() {
-    // 1) try cwd/benchmark/plot_tpch_results.R
+    // 1) try cwd/benchmark/tpch/plot_tpch_results.R
     char cwd[PATH_MAX];
     if (getcwd(cwd, sizeof(cwd))) {
-        string p = string(cwd) + "/benchmark/plot_tpch_results.R";
+        string p = string(cwd) + "/benchmark/tpch/plot_tpch_results.R";
         if (FileExists(p)) {
             char rbuf[PATH_MAX];
             if (realpath(p.c_str(), rbuf)) {
@@ -66,10 +66,10 @@ static string FindPlotScriptAbsolute() {
         if (pos != string::npos) {
             dir = dir.substr(0, pos);
         }
-        // walk up several levels searching for benchmark/plot_tpch_results.R
+        // walk up several levels searching for benchmark/tpch/plot_tpch_results.R
         string try_dir = dir;
         for (int i = 0; i < 6; ++i) {
-            string cand = try_dir + "/benchmark/plot_tpch_results.R";
+            string cand = try_dir + "/benchmark/tpch/plot_tpch_results.R";
             if (FileExists(cand)) {
                 char rbuf[PATH_MAX];
                 if (realpath(cand.c_str(), rbuf)) {
@@ -85,7 +85,7 @@ static string FindPlotScriptAbsolute() {
         }
     }
     // 3) try some common relative locations
-    vector<string> rels = {"benchmark/plot_tpch_results.R", "./benchmark/plot_tpch_results.R", "../benchmark/plot_tpch_results.R", "../../benchmark/plot_tpch_results.R"};
+    vector<string> rels = {"benchmark/tpch/plot_tpch_results.R", "./benchmark/tpch/plot_tpch_results.R", "../benchmark/tpch/plot_tpch_results.R", "../../benchmark/tpch/plot_tpch_results.R"};
     for (auto &r : rels) {
         if (FileExists(r)) {
             char rbuf[PATH_MAX];
@@ -201,12 +201,10 @@ static string FindSchemaFile(const string &filename) {
     // Try common relative locations
     vector<string> candidates = {
         filename,
-        "./" + filename,
-        "../" + filename,
-        "../../" + filename,
-        "benchmark/" + filename,
-        "../benchmark/" + filename,
-        "../../benchmark/" + filename
+        "./tpch/" + filename,
+        "benchmark/tpch/" + filename,
+        "../benchmark/tpch/" + filename,
+        "../../benchmark/tpch/" + filename
     };
 
     for (auto &cand : candidates) {
@@ -227,7 +225,7 @@ static string FindSchemaFile(const string &filename) {
         }
 
         for (int i = 0; i < 6; ++i) {
-            string cand = dir + "/benchmark/" + filename;
+            string cand = dir + "/benchmark/tpch/" + filename;
             if (FileExists(cand)) {
                 return cand;
             }
@@ -342,7 +340,7 @@ int RunTPCHBenchmark(const string &db_path, const string &queries_dir, double sf
             sf_token.erase(std::remove(sf_token.begin(), sf_token.end(), '_'), sf_token.end());
             char ofn[256];
             // use 'tpch_benchmark_results' (expanded 'benchmark')
-            snprintf(ofn, sizeof(ofn), "benchmark/tpch_benchmark_results_sf%s.csv", sf_token.c_str());
+            snprintf(ofn, sizeof(ofn), "benchmark/tpch/tpch_benchmark_results_sf%s.csv", sf_token.c_str());
             actual_out = string(ofn);
         }
 
