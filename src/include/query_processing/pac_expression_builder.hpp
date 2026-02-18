@@ -9,6 +9,7 @@
 #include "duckdb/optimizer/optimizer_extension.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/planner/operator/logical_aggregate.hpp"
+#include "duckdb/planner/operator/logical_cteref.hpp"
 
 namespace duckdb {
 
@@ -39,6 +40,12 @@ ColumnBinding InsertHashProjectionAboveGet(OptimizerExtensionInput &input, uniqu
 ColumnBinding GetOrInsertHashProjection(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
                                         LogicalGet &get, const vector<string> &key_columns, bool use_rowid,
                                         std::unordered_map<idx_t, ColumnBinding> &cache);
+
+// Insert a hash projection above a CTE_SCAN (LogicalCTERef) node.
+// The CTE_SCAN must expose the key columns by name in its bound_columns.
+// Returns the ColumnBinding for the hash column, or INVALID if key columns not found.
+ColumnBinding InsertHashProjectionAboveCTERef(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
+                                              LogicalCTERef &cte_ref, const vector<string> &key_columns);
 
 // Build AND expression from multiple hash expressions (for multiple PUs)
 unique_ptr<Expression> BuildAndFromHashes(OptimizerExtensionInput &input, vector<unique_ptr<Expression>> &hash_exprs);

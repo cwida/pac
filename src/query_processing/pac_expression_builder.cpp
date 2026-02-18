@@ -6,6 +6,7 @@
 #include "query_processing/pac_plan_traversal.hpp"
 #include "pac_debug.hpp"
 
+#include "duckdb/planner/operator/logical_cteref.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
@@ -263,6 +264,108 @@ ColumnBinding GetOrInsertHashProjection(OptimizerExtensionInput &input, unique_p
 	auto binding = InsertHashProjectionAboveGet(input, plan, get, key_columns, use_rowid);
 	cache[get.table_index] = binding;
 	return binding;
+}
+
+// Insert a hash projection above a CTE_SCAN (LogicalCTERef) node.
+// The CTE_SCAN must expose the key columns by name in its bound_columns.
+// Returns the ColumnBinding for the new hash column, or INVALID if key columns not found.
+// Find the unique_ptr slot holding a CTE_REF with the given table_index in the plan tree.
+static unique_ptr<LogicalOperator> *FindCTERefSlot(unique_ptr<LogicalOperator> &root, idx_t table_index) {
+	if (!root)
+		return nullptr;
+	if (root->type == LogicalOperatorType::LOGICAL_CTE_REF) {
+		auto &ref = root->Cast<LogicalCTERef>();
+		if (ref.table_index == table_index) {
+			return &root;
+		}
+	}
+	for (auto &child : root->children) {
+		auto *result = FindCTERefSlot(child, table_index);
+		if (result)
+			return result;
+	}
+	return nullptr;
+}
+
+ColumnBinding InsertHashProjectionAboveCTERef(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
+                                              LogicalCTERef &cte_ref, const vector<string> &key_columns) {
+#if PAC_DEBUG
+	PAC_DEBUG_PRINT("InsertHashProjectionAboveCTERef: CTE_SCAN table_index=" + std::to_string(cte_ref.table_index) +
+	                " cte_index=" + std::to_string(cte_ref.cte_index));
+#endif
+
+	// 1. Resolve key column indices in the CTE_SCAN's bound_columns
+	vector<unique_ptr<Expression>> key_col_exprs;
+	for (auto &key : key_columns) {
+		bool found = false;
+		for (idx_t i = 0; i < cte_ref.bound_columns.size(); i++) {
+			if (cte_ref.bound_columns[i] == key) {
+				auto binding = ColumnBinding(cte_ref.table_index, i);
+				key_col_exprs.push_back(make_uniq<BoundColumnRefExpression>(cte_ref.chunk_types[i], binding));
+				found = true;
+				break;
+			}
+		}
+		if (!found) {
+#if PAC_DEBUG
+			PAC_DEBUG_PRINT("InsertHashProjectionAboveCTERef: key column '" + key + "' not found in bound_columns");
+#endif
+			return ColumnBinding(DConstants::INVALID_INDEX, 0);
+		}
+	}
+
+	// 2. Build hash expression: hash(c1) XOR hash(c2) XOR ...
+	auto hash_expr = BuildXorHash(input, std::move(key_col_exprs));
+
+	// Optionally wrap in pac_hash() to guarantee exactly 32 bits set
+	Value pac_hash_val;
+	if (input.context.TryGetCurrentSetting("pac_hash", pac_hash_val) && !pac_hash_val.IsNull() &&
+	    pac_hash_val.GetValue<bool>()) {
+		hash_expr = input.optimizer.BindScalarFunction("pac_hash", std::move(hash_expr));
+	}
+
+	// 3. Find the unique_ptr slot holding this CTE_SCAN in the plan tree
+	auto *cte_slot_ptr = FindCTERefSlot(plan, cte_ref.table_index);
+	if (!cte_slot_ptr) {
+		throw InternalException("PAC compiler: InsertHashProjectionAboveCTERef could not find CTE_SCAN #" +
+		                        std::to_string(cte_ref.table_index));
+	}
+	auto &cte_slot = *cte_slot_ptr;
+
+	// 4. Create projection: passthrough all CTE columns + hash column
+	auto old_bindings = cte_slot->GetColumnBindings();
+	idx_t num_cte_cols = old_bindings.size();
+
+	auto &binder = input.optimizer.binder;
+	idx_t proj_table_index = binder.GenerateTableIndex();
+	vector<unique_ptr<Expression>> proj_expressions;
+	for (idx_t i = 0; i < num_cte_cols; i++) {
+		proj_expressions.push_back(make_uniq<BoundColumnRefExpression>(cte_slot->types[i], old_bindings[i]));
+	}
+	proj_expressions.push_back(std::move(hash_expr));
+
+	auto projection = make_uniq<LogicalProjection>(proj_table_index, std::move(proj_expressions));
+	projection->children.push_back(std::move(cte_slot));
+	projection->ResolveOperatorTypes();
+
+	// 5. Replace CTE_SCAN slot with the new projection and remap bindings
+	LogicalOperator *proj_ptr = projection.get();
+	cte_slot = std::move(projection);
+
+	ColumnBindingReplacer replacer;
+	for (idx_t i = 0; i < num_cte_cols; i++) {
+		replacer.replacement_bindings.emplace_back(old_bindings[i], ColumnBinding(proj_table_index, i));
+	}
+	replacer.stop_operator = proj_ptr;
+	replacer.VisitOperator(*plan);
+
+#if PAC_DEBUG
+	PAC_DEBUG_PRINT("InsertHashProjectionAboveCTERef: inserted hash projection (table_index=" +
+	                std::to_string(proj_table_index) + ") above CTE_SCAN #" + std::to_string(cte_ref.table_index) +
+	                ", hash at column " + std::to_string(num_cte_cols));
+#endif
+
+	return ColumnBinding(proj_table_index, num_cte_cols);
 }
 
 // Build AND expression from multiple hash expressions (for multiple PUs)

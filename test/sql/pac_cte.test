@@ -1,0 +1,316 @@
+# name: test/sql/pac_cte.test
+# description: Test PAC bitslice compiler with Common Table Expressions (CTEs)
+# group: [sql]
+
+require pac
+
+statement ok
+PRAGMA clear_pac_metadata;
+
+statement ok
+SET pac_seed = 42
+
+statement ok
+SET pac_deterministic_noise = true
+
+statement ok
+SET threads = 1
+
+statement ok
+SET pac_mi = 0
+
+# Create TPC-H-like schema with proper PK-FK relationships
+
+# Nation table
+statement ok
+CREATE TABLE nation(
+    n_nationkey INTEGER PRIMARY KEY,
+    n_name VARCHAR,
+    n_regionkey INTEGER
+);
+
+statement ok
+INSERT INTO nation VALUES
+    (0, 'FRANCE', 0),
+    (1, 'GERMANY', 0),
+    (2, 'JAPAN', 1),
+    (3, 'CHINA', 1),
+    (4, 'USA', 2);
+
+# Customer table (Privacy Unit)
+statement ok
+CREATE TABLE customer(
+    c_custkey INTEGER PRIMARY KEY,
+    c_name VARCHAR,
+    c_nationkey INTEGER,
+    FOREIGN KEY (c_nationkey) REFERENCES nation(n_nationkey)
+);
+
+statement ok
+INSERT INTO customer VALUES
+    (1, 'Customer#001', 0),
+    (2, 'Customer#002', 1),
+    (3, 'Customer#003', 0),
+    (4, 'Customer#004', 1),
+    (5, 'Customer#005', 2),
+    (6, 'Customer#006', 0),
+    (7, 'Customer#007', 1),
+    (8, 'Customer#008', 2);
+
+# Supplier table
+statement ok
+CREATE TABLE supplier(
+    s_suppkey INTEGER PRIMARY KEY,
+    s_name VARCHAR,
+    s_nationkey INTEGER,
+    FOREIGN KEY (s_nationkey) REFERENCES nation(n_nationkey)
+);
+
+statement ok
+INSERT INTO supplier VALUES
+    (1, 'Supplier#001', 0),
+    (2, 'Supplier#002', 1),
+    (3, 'Supplier#003', 0),
+    (4, 'Supplier#004', 1);
+
+# Orders table
+statement ok
+CREATE TABLE orders(
+    o_orderkey INTEGER PRIMARY KEY,
+    o_custkey INTEGER,
+    o_orderdate DATE,
+    o_comment VARCHAR,
+    FOREIGN KEY (o_custkey) REFERENCES customer(c_custkey)
+);
+
+statement ok
+INSERT INTO orders VALUES
+    (1, 1, '1995-03-15', 'regular'),
+    (2, 2, '1995-06-20', 'urgent'),
+    (3, 3, '1995-09-10', 'regular'),
+    (4, 4, '1996-01-05', 'regular'),
+    (5, 5, '1996-04-12', 'urgent'),
+    (6, 1, '1996-07-18', 'regular'),
+    (7, 2, '1995-11-22', 'regular'),
+    (8, 3, '1996-03-30', 'urgent'),
+    (9, 6, '1995-05-14', 'regular'),
+    (10, 7, '1996-08-25', 'regular'),
+    (11, 1, '1995-12-01', 'urgent'),
+    (12, 8, '1996-02-17', 'regular');
+
+# Lineitem table
+statement ok
+CREATE TABLE lineitem(
+    l_orderkey INTEGER,
+    l_linenumber INTEGER,
+    l_suppkey INTEGER,
+    l_quantity DECIMAL(15,2),
+    l_extendedprice DECIMAL(15,2),
+    l_discount DECIMAL(15,2),
+    l_shipdate DATE,
+    PRIMARY KEY (l_orderkey, l_linenumber),
+    FOREIGN KEY (l_orderkey) REFERENCES orders(o_orderkey),
+    FOREIGN KEY (l_suppkey) REFERENCES supplier(s_suppkey)
+);
+
+statement ok
+INSERT INTO lineitem VALUES
+    (1, 1, 1, 10.00, 1000.00, 0.05, '1995-03-20'),
+    (1, 2, 2, 15.00, 1500.00, 0.10, '1995-03-22'),
+    (2, 1, 2, 20.00, 2000.00, 0.05, '1995-06-25'),
+    (3, 1, 1, 25.00, 2500.00, 0.00, '1995-09-15'),
+    (4, 1, 3, 30.00, 3000.00, 0.10, '1996-01-10'),
+    (5, 1, 4, 12.00, 1200.00, 0.05, '1996-04-15'),
+    (6, 1, 1, 18.00, 1800.00, 0.00, '1996-07-20'),
+    (7, 1, 2, 22.00, 2200.00, 0.05, '1995-11-25'),
+    (8, 1, 3, 16.00, 1600.00, 0.10, '1996-04-05'),
+    (9, 1, 1, 14.00, 1400.00, 0.05, '1995-05-18'),
+    (10, 1, 4, 20.00, 2000.00, 0.00, '1996-08-28'),
+    (11, 1, 2, 25.00, 2500.00, 0.10, '1995-12-05'),
+    (12, 1, 3, 30.00, 3000.00, 0.05, '1996-02-20');
+
+statement ok
+ALTER TABLE customer SET PU;
+
+# ============================================================
+# Test 1: TPC-H Q15-style CTE with aggregate in subquery on CTE
+# (moved from pac_bitslice_compiler_uncorrelated_subqueries.test)
+# Tests: CTE with aggregate, subquery that computes max() from CTE
+# The aggregate in the subquery should NOT be converted to pac_max
+# because it operates on already-aggregated CTE data, not base tables
+# ============================================================
+query IIII
+WITH revenue AS (
+    SELECT
+        l_suppkey AS supplier_no,
+        SUM(l_extendedprice * (1 - l_discount)) AS total_revenue
+    FROM
+        lineitem
+            JOIN orders ON lineitem.l_orderkey = orders.o_orderkey
+    WHERE
+        l_shipdate >= CAST('1996-01-01' AS DATE)
+        AND l_shipdate < CAST('1996-04-01' AS DATE)
+    GROUP BY
+        l_suppkey
+)
+SELECT
+    s_suppkey,
+    s_name,
+    total_revenue,
+    NULL as placeholder
+FROM
+    supplier
+        JOIN revenue ON s_suppkey = supplier_no
+WHERE
+    total_revenue = (
+        SELECT max(total_revenue)
+        FROM revenue
+    )
+ORDER BY
+    s_suppkey;
+----
+3	Supplier#003	5387.0592	NULL
+
+# ============================================================
+# Test 2: Q13 pattern rewritten as explicit CTE
+# Tests: CTE with inner aggregate grouping by PU key (c_custkey),
+# outer aggregate on CTE_SCAN should be PAC-transformed
+# Same result as Q13 subquery in uncorrelated_subqueries test
+# ============================================================
+query II
+WITH c_orders AS (
+    SELECT
+        c_custkey,
+        COUNT(o_orderkey) AS c_count
+    FROM
+        customer
+    LEFT OUTER JOIN orders ON
+        c_custkey = o_custkey
+        AND o_comment NOT LIKE '%urgent%'
+    GROUP BY
+        c_custkey
+)
+SELECT
+    c_count,
+    COUNT(*) AS custdist
+FROM c_orders
+GROUP BY
+    c_count
+ORDER BY
+    custdist DESC,
+    c_count DESC;
+----
+2	8
+4	2
+NULL	2
+
+# ============================================================
+# Test 3: Simple CTE wrapping PU table with outer aggregate
+# Tests: CTE directly wraps customer (PU), outer COUNT should be PAC-transformed
+# ============================================================
+query I
+WITH cust AS (
+    SELECT c_custkey, c_name, c_nationkey FROM customer
+)
+SELECT COUNT(*) FROM cust;
+----
+12
+
+# ============================================================
+# Test 4: CTE with join exposing PU columns, outer aggregate
+# Tests: CTE joins customer (PU) with orders, outer SUM on CTE_SCAN
+# ============================================================
+query I
+WITH customer_orders AS (
+    SELECT c_custkey, c_name, o_orderkey, o_orderdate
+    FROM customer JOIN orders ON c_custkey = o_custkey
+)
+SELECT COUNT(*) FROM customer_orders;
+----
+20
+
+# ============================================================
+# Test 5: CTE with FK chain, aggregate on CTE results
+# Tests: CTE joins lineitem -> orders (FK to customer PU),
+# outer aggregate should be PAC-transformed via CTE path
+# ============================================================
+query I
+WITH order_amounts AS (
+    SELECT o_custkey, l_extendedprice, l_discount
+    FROM lineitem
+    JOIN orders ON l_orderkey = o_orderkey
+)
+SELECT SUM(l_extendedprice * (1 - l_discount)) FROM order_amounts;
+----
+40173.5680
+
+# ============================================================
+# Test 6: Multiple CTEs, only one references PU table
+# Tests: Two CTEs, one with PU table and one without
+# ============================================================
+query II
+WITH supplier_revenue AS (
+    SELECT s_suppkey, s_name, s_nationkey
+    FROM supplier
+),
+customer_orders AS (
+    SELECT c_custkey, o_orderkey
+    FROM customer JOIN orders ON c_custkey = o_custkey
+)
+SELECT
+    (SELECT COUNT(*) FROM supplier_revenue) AS supplier_count,
+    (SELECT COUNT(*) FROM customer_orders) AS order_count;
+----
+4	20
+
+# ============================================================
+# Test 7: CTE referenced multiple times
+# Tests: Single CTE referenced in both main query and subquery
+# ============================================================
+query I
+WITH cust_orders AS (
+    SELECT c_custkey, COUNT(o_orderkey) AS order_count
+    FROM customer
+    LEFT JOIN orders ON c_custkey = o_custkey
+    GROUP BY c_custkey
+)
+SELECT COUNT(*)
+FROM cust_orders
+WHERE order_count > (SELECT AVG(order_count) FROM cust_orders);
+----
+NULL
+
+# ============================================================
+# Test 8: Nested CTE - CTE B references CTE A which references PU table
+# Tests: Transitive CTE resolution - CTE B -> CTE A -> customer
+# ============================================================
+query I
+WITH cust_base AS (
+    SELECT c_custkey, c_nationkey FROM customer
+),
+cust_nation AS (
+    SELECT c_custkey, n_name
+    FROM cust_base JOIN nation ON c_nationkey = n_nationkey
+)
+SELECT COUNT(*) FROM cust_nation;
+----
+12
+
+# Cleanup
+statement ok
+DROP TABLE lineitem;
+
+statement ok
+DROP TABLE orders;
+
+statement ok
+DROP TABLE supplier;
+
+statement ok
+DROP TABLE customer;
+
+statement ok
+DROP TABLE nation;
+
+statement ok
+PRAGMA clear_pac_metadata;

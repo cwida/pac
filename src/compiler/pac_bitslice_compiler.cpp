@@ -27,6 +27,7 @@
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/planner/operator/logical_aggregate.hpp"
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
+#include "duckdb/planner/operator/logical_cteref.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/optimizer/optimizer.hpp"
@@ -242,7 +243,7 @@ static vector<string> GetRequiredColumnsForTable(const PACCompatibilityResult &c
 void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtensionInput &input,
                          unique_ptr<LogicalOperator> &plan, const vector<string> &gets_missing,
                          const vector<string> &gets_present, const vector<string> &fk_path,
-                         const vector<string> &privacy_units) {
+                         const vector<string> &privacy_units, const CTETableMap &cte_map) {
 	// Note: we assume we don't use rowid
 
 	// Check if join elimination is enabled
@@ -995,7 +996,7 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 	// (e.g., GROUP BY c_custkey where customer is the PU). In this case, we noise the outer
 	// aggregate instead of the inner one.
 	vector<LogicalAggregate *> target_aggregates =
-	    FilterTargetAggregatesWithPUKeyCheck(all_aggregates, fk_linked_tables_vec, check, privacy_units);
+	    FilterTargetAggregatesWithPUKeyCheck(all_aggregates, fk_linked_tables_vec, check, privacy_units, cte_map);
 
 	if (target_aggregates.empty()) {
 		throw InternalException("PAC Compiler: no aggregate nodes with FK-linked tables found in plan");
@@ -1666,8 +1667,91 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
  *   - Inner: Has customer (PU) -> pac_sum(hash(c_custkey), customer_col)
  *   - Outer: No PU tables, only depends on subquery result -> Regular sum(), NOT transformed
  */
+
+// Check if a CTE_SCAN's bound_columns include all the given column names.
+static bool CTERefExposesColumns(const LogicalCTERef &ref, const vector<string> &columns) {
+	for (auto &col : columns) {
+		bool found = false;
+		for (auto &bound_col : ref.bound_columns) {
+			if (bound_col == col) {
+				found = true;
+				break;
+			}
+		}
+		if (!found)
+			return false;
+	}
+	return true;
+}
+
+// Result of searching for a CTE_SCAN node that can provide hash columns for a PU.
+struct CTEHashMatch {
+	LogicalCTERef *cte_ref;
+	vector<string> hash_columns; // columns to hash (PU PKs or FK cols)
+	CTEHashMatch() : cte_ref(nullptr) {
+	}
+	CTEHashMatch(LogicalCTERef *r, vector<string> cols) : cte_ref(r), hash_columns(std::move(cols)) {
+	}
+	explicit operator bool() const {
+		return cte_ref != nullptr;
+	}
+};
+
+// Walk an operator's subtree to find a CTE_SCAN that can provide hash columns for a PU.
+// Two paths are tried for each CTE_SCAN:
+//   1. CTE directly contains the PU table → hash PU PK columns
+//   2. CTE contains an FK-linked table → hash the FK columns that lead to the PU
+static CTEHashMatch FindCTEHashSource(LogicalOperator *op, const string &pu_table_name, const vector<string> &pu_pks,
+                                      const CTETableMap &cte_map, const PACCompatibilityResult &check) {
+	if (!op)
+		return CTEHashMatch();
+
+	if (op->type == LogicalOperatorType::LOGICAL_CTE_REF) {
+		auto &ref = op->Cast<LogicalCTERef>();
+		auto cte_it = cte_map.find(ref.cte_index);
+		if (cte_it != cte_map.end()) {
+			auto &cte_tables = cte_it->second;
+
+			// Path 1: CTE directly contains PU table → use PU PK columns
+			if (cte_tables.count(pu_table_name) > 0 && CTERefExposesColumns(ref, pu_pks)) {
+				return CTEHashMatch(&ref, pu_pks);
+			}
+
+			// Path 2: CTE contains FK-linked table → use FK columns
+			for (auto &fk_kv : check.fk_paths) {
+				auto &fk_table = fk_kv.first;
+				auto &fk_path = fk_kv.second;
+				if (fk_path.empty() || fk_path.back() != pu_table_name)
+					continue;
+				if (cte_tables.count(fk_table) == 0)
+					continue;
+
+				auto fk_meta_it = check.table_metadata.find(fk_table);
+				if (fk_meta_it == check.table_metadata.end())
+					continue;
+
+				// Find FK columns referencing the next table in the path toward the PU
+				string next_table = fk_path.size() > 1 ? fk_path[1] : pu_table_name;
+				for (auto &fk : fk_meta_it->second.fks) {
+					if (fk.first == next_table && !fk.second.empty() && CTERefExposesColumns(ref, fk.second)) {
+						return CTEHashMatch(&ref, fk.second);
+					}
+				}
+			}
+		}
+	}
+
+	for (auto &child : op->children) {
+		auto match = FindCTEHashSource(child.get(), pu_table_name, pu_pks, cte_map, check);
+		if (match)
+			return match;
+	}
+	return CTEHashMatch();
+}
+
 void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
-                      const vector<string> &pu_table_names, const PACCompatibilityResult &check) {
+                      const vector<string> &pu_table_names, const PACCompatibilityResult &check,
+                      const CTETableMap &cte_map) {
 
 	// Find ALL aggregate nodes in the plan first
 	vector<LogicalAggregate *> all_aggregates;
@@ -1691,6 +1775,12 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 
 	// Add FK-linked tables from the compatibility check results
 	for (auto &kv : check.fk_paths) {
+		// Add the FK table itself (the source table with the foreign key)
+		if (relevant_tables_set.find(kv.first) == relevant_tables_set.end()) {
+			relevant_tables.push_back(kv.first);
+			relevant_tables_set.insert(kv.first);
+		}
+		// Add tables along the FK path
 		auto &path = kv.second;
 		for (auto &table : path) {
 			if (relevant_tables_set.find(table) == relevant_tables_set.end()) {
@@ -1711,7 +1801,7 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 	// (e.g., GROUP BY c_custkey where customer is the PU). In this case, we noise the outer
 	// aggregate instead of the inner one.
 	vector<LogicalAggregate *> target_aggregates =
-	    FilterTargetAggregatesWithPUKeyCheck(all_aggregates, relevant_tables, check, pu_table_names);
+	    FilterTargetAggregatesWithPUKeyCheck(all_aggregates, relevant_tables, check, pu_table_names, cte_map);
 
 	if (target_aggregates.empty()) {
 		throw InternalException("PAC Compiler: no aggregate nodes with privacy unit tables found in plan");
@@ -1905,8 +1995,64 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 			}
 		}
 
+		// If no hash expressions were built via direct scan or FK paths,
+		// try the CTE path: find CTE_SCAN nodes that transitively reference PU tables
+		// (directly or through FK chains) and expose the relevant key columns
+		if (hash_exprs.empty() && !cte_map.empty()) {
+#if PAC_DEBUG
+			PAC_DEBUG_PRINT("ModifyPlanWithPU: no hash via direct/FK path, trying CTE path");
+#endif
+			for (auto &pu_table_name : pu_table_names) {
+				vector<string> pu_pks;
+				auto it = check.table_metadata.find(pu_table_name);
+				if (it != check.table_metadata.end() && !it->second.pks.empty()) {
+					pu_pks = it->second.pks;
+				}
+				if (pu_pks.empty()) {
+					continue;
+				}
+
+				auto match = FindCTEHashSource(target_agg, pu_table_name, pu_pks, cte_map, check);
+				if (!match) {
+#if PAC_DEBUG
+					PAC_DEBUG_PRINT("ModifyPlanWithPU: no CTE_SCAN found exposing PU/FK key for " + pu_table_name);
+#endif
+					continue;
+				}
+
+#if PAC_DEBUG
+				PAC_DEBUG_PRINT("ModifyPlanWithPU: found CTE_SCAN #" + std::to_string(match.cte_ref->table_index) +
+				                " (cte_index=" + std::to_string(match.cte_ref->cte_index) + ") with hash columns for " +
+				                pu_table_name);
+#endif
+
+				auto hash_binding = InsertHashProjectionAboveCTERef(input, plan, *match.cte_ref, match.hash_columns);
+				if (hash_binding.table_index == DConstants::INVALID_INDEX) {
+					continue;
+				}
+
+				auto propagated = PropagateSingleBinding(*plan, hash_binding.table_index, hash_binding,
+				                                         LogicalType::UBIGINT, target_agg);
+				if (propagated.table_index == DConstants::INVALID_INDEX) {
+#if PAC_DEBUG
+					PAC_DEBUG_PRINT("ModifyPlanWithPU: CTE hash propagation failed for " + pu_table_name);
+#endif
+					continue;
+				}
+
+				auto hash_ref = make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT, propagated);
+				hash_exprs.push_back(std::move(hash_ref));
+#if PAC_DEBUG
+				PAC_DEBUG_PRINT("ModifyPlanWithPU: successfully built hash via CTE path for " + pu_table_name);
+#endif
+			}
+		}
+
 		// Skip if no hash expressions were built for this aggregate
 		if (hash_exprs.empty()) {
+#if PAC_DEBUG
+			PAC_DEBUG_PRINT("ModifyPlanWithPU: no hash expressions built for target aggregate, skipping");
+#endif
 			continue;
 		}
 
@@ -1962,57 +2108,62 @@ void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExten
 	// b.2) we join the chain of tables from the scanned table to each PU table (deduplicating)
 	// b.3) we hash the PK(s) as in a) and AND them together
 
-	bool pu_present_in_tree = false;
+	// Build the CTE table map once — used for both routing and aggregate filtering
+	auto cte_map = BuildAndResolveCTETableMap(plan.get());
 
-	if (!check.scanned_pu_tables.empty()) {
-		pu_present_in_tree = true;
+	// Determine if a PU table is reachable from the plan (directly scanned, via CTE, or via FK+CTE)
+	bool pu_present_in_tree = !check.scanned_pu_tables.empty();
+	bool pu_via_cte = false;
+
+	if (!pu_present_in_tree) {
+		for (auto &cte_kv : cte_map) {
+			auto &cte_tables = cte_kv.second;
+			for (auto &pu : privacy_units) {
+				if (cte_tables.count(pu) > 0) {
+					pu_via_cte = true;
+					break;
+				}
+			}
+			if (!pu_via_cte) {
+				for (auto &fk_kv : check.fk_paths) {
+					if (cte_tables.count(fk_kv.first) > 0) {
+						pu_via_cte = true;
+						break;
+					}
+				}
+			}
+			if (pu_via_cte)
+				break;
+		}
+		pu_present_in_tree = pu_via_cte;
 	}
-
-	// NOTE: The plan coming in is already optimized WITHOUT COLUMN_LIFETIME and COMPRESSED_MATERIALIZATION
-	// because the pre-optimizer (PACPreOptimizeFunction) disabled them before built-in optimizers ran.
-	// We'll run those optimizers ourselves at the end of this function after PAC transformation.
 
 #if PAC_DEBUG
 	PAC_DEBUG_PRINT("=== PLAN BEFORE PAC TRANSFORMATION ===");
 	plan->Print();
 #endif
 
-	// Build two vectors: present (GETs already in the plan) and missing (GETs to create)
-	vector<string> gets_present;
-	vector<string> gets_missing;
-
-	// For multi-PU support, we need to gather FK paths and missing tables for all PUs
-	// and deduplicate the tables that need to be joined
-	std::unordered_set<string> all_missing_tables;
-	// We'll use the first FK path as the base
-
 	if (pu_present_in_tree) {
-		// Case a) query scans PU table(s) - all PUs are in scanned_pu_tables
-		ModifyPlanWithPU(input, plan, check.scanned_pu_tables, check);
+		// Case a) PU reachable: scanned directly, via CTE, or via CTE+FK chain
+		auto &pu_names = pu_via_cte ? privacy_units : check.scanned_pu_tables;
+		ModifyPlanWithPU(input, plan, pu_names, check, cte_map);
 	} else if (!check.fk_paths.empty()) {
-		// Case b) query does not scan PU table(s): follow FK paths
-		// Note: Tables with protected columns are now treated as implicit privacy units,
-		// so their paths are included in fk_paths automatically.
+		// Case b) PU not reachable from plan: follow FK paths and join missing tables
 		string start_table;
 		vector<string> target_pus;
+		vector<string> gets_present, gets_missing;
 		PopulateGetsFromFKPath(check, gets_present, gets_missing, start_table, target_pus);
 
-		// Collect all missing tables across all FK paths (deduplicate)
-		for (auto &table : gets_missing) {
-			all_missing_tables.insert(table);
-		}
-
-		// Extract the ordered fk_path from the compatibility result (use first path as base)
 		auto it = check.fk_paths.find(start_table);
 		if (it == check.fk_paths.end() || it->second.empty()) {
 			throw InvalidInputException("PAC compiler: expected fk_path for start table " + start_table);
 		}
-		vector<string> fk_path_to_use = it->second;
 
-		// Convert set back to vector for ModifyPlanWithoutPU
-		vector<string> unique_gets_missing(all_missing_tables.begin(), all_missing_tables.end());
+		// Deduplicate missing tables
+		std::unordered_set<string> missing_set(gets_missing.begin(), gets_missing.end());
+		vector<string> unique_gets_missing(missing_set.begin(), missing_set.end());
 
-		ModifyPlanWithoutPU(check, input, plan, unique_gets_missing, gets_present, fk_path_to_use, privacy_units);
+		ModifyPlanWithoutPU(check, input, plan, unique_gets_missing, gets_present, it->second, privacy_units, cte_map);
 	}
 
 	// ============================================================================

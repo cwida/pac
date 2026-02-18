@@ -30,7 +30,6 @@ endif()
 set(EXTENSION_SOURCES
     src/core/pac_extension.cpp
     src/core/pac_optimizer.cpp
-    src/core/pac_privacy_unit.cpp
     src/metadata/pac_compatibility_check.cpp
     src/metadata/pac_metadata_manager.cpp
     src/metadata/pac_metadata_serialization.cpp
@@ -88,4 +87,8 @@ if(NOT EMSCRIPTEN AND NOT WIN32)
     # ClickHouse/ClickBench benchmark runner
     add_executable(pac_clickhouse_benchmark benchmark/clickbench/pac_clickhouse_benchmark.cpp)
     target_link_libraries(pac_clickhouse_benchmark ${EXTENSION_NAME})
+
+    # SQLStorm benchmark runner
+    add_executable(pac_sqlstorm_benchmark benchmark/sqlstorm/pac_sqlstorm_benchmark.cpp)
+    target_link_libraries(pac_sqlstorm_benchmark ${EXTENSION_NAME})
 endif()

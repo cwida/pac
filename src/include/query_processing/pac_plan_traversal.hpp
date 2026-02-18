@@ -12,7 +12,13 @@
 #include "duckdb/planner/operator/logical_projection.hpp"
 #include "metadata/pac_compatibility_check.hpp"
 
+#include <unordered_map>
+#include <unordered_set>
+
 namespace duckdb {
+
+// Map from CTE table_index to the set of base table names referenced in that CTE's definition.
+using CTETableMap = std::unordered_map<idx_t, std::unordered_set<string>>;
 
 // Find the first LogicalGet node in `plan`. Returns a pointer to the unique_ptr that holds the
 // found node (so it can be replaced). If pu_table_name is provided, only returns a LogicalGet
@@ -44,13 +50,20 @@ LogicalProjection *FindParentProjection(unique_ptr<LogicalOperator> &root, Logic
 unique_ptr<LogicalOperator> *FindNodeRefByTable(unique_ptr<LogicalOperator> *root, const string &table_name,
                                                 LogicalOperator **parent_out = nullptr, idx_t *child_idx_out = nullptr);
 
-// Check if an operator has any LogicalGet nodes (base table scans) in its subtree.
-// Returns false if the subtree only contains CTE scans or no table scans at all.
+// Check if an operator has any leaf data source nodes (base table scans or CTE refs) in its subtree.
 bool HasBaseTableInSubtree(LogicalOperator *op);
 
 // Check if an operator has a specific table (by name) in its subtree.
 // Returns true if there's a LogicalGet for the given table name in the subtree.
 bool HasTableInSubtree(LogicalOperator *op, const string &table_name);
+
+// Build the CTE table map from a plan root. Maps cte_index -> set of base table names
+// that the CTE definition transitively references (including through nested CTE refs).
+CTETableMap BuildAndResolveCTETableMap(LogicalOperator *plan_root);
+
+// CTE-aware version of HasTableInSubtree. Follows CTE_REF nodes through the cte_map
+// to check if the referenced CTE transitively contains the target table.
+bool HasTableInSubtreeCTE(LogicalOperator *op, const string &table_name, const CTETableMap &cte_map);
 
 // Find all LogicalGet nodes for a specific table name in the plan tree.
 // Returns a vector of pointers to the unique_ptrs holding the LogicalGet nodes.
@@ -68,7 +81,8 @@ void FindAllNodesByTableIndex(unique_ptr<LogicalOperator> *root, idx_t table_ind
 // AND have base tables in their DIRECT children (not through nested aggregates).
 // This filters out outer aggregates that only depend on inner aggregate results.
 vector<LogicalAggregate *> FilterTargetAggregates(const vector<LogicalAggregate *> &all_aggregates,
-                                                  const vector<string> &target_table_names);
+                                                  const vector<string> &target_table_names,
+                                                  const CTETableMap &cte_map = {});
 
 // Extended version of FilterTargetAggregates that handles the edge case where inner aggregate
 // groups by PU key (PAC key/PK of Privacy Unit or FK referencing it).
@@ -78,7 +92,8 @@ vector<LogicalAggregate *> FilterTargetAggregates(const vector<LogicalAggregate 
 vector<LogicalAggregate *> FilterTargetAggregatesWithPUKeyCheck(const vector<LogicalAggregate *> &all_aggregates,
                                                                 const vector<string> &target_table_names,
                                                                 const PACCompatibilityResult &check,
-                                                                const vector<string> &privacy_units);
+                                                                const vector<string> &privacy_units,
+                                                                const CTETableMap &cte_map = {});
 
 // Check if an aggregate's GROUP BY keys contain the PU's primary key columns or FK columns
 // referencing a PU. This is used to detect the edge case where inner aggregate groups by PU key.

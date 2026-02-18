@@ -307,6 +307,88 @@ JOIN nation ON t.c_nationkey = n_nationkey;
 ----
 logical_opt	<REGEX>:.*pac_mean.*
 
+# ============================================================
+# CTE plan tests
+# ============================================================
+
+# Test 8: CTE wrapping PU table - outer COUNT should become pac_count
+query II
+EXPLAIN WITH cust AS (
+    SELECT c_custkey, c_name, c_nationkey FROM customer
+)
+SELECT COUNT(*) FROM cust;
+----
+logical_opt	<REGEX>:.*pac_count.*
+
+# Test 9: CTE with join exposing PU columns - outer COUNT should become pac_count
+query II
+EXPLAIN WITH customer_orders AS (
+    SELECT c_custkey, c_name, o_orderkey, o_orderdate
+    FROM customer JOIN orders ON c_custkey = o_custkey
+)
+SELECT COUNT(*) FROM customer_orders;
+----
+logical_opt	<REGEX>:.*pac_count.*
+
+# Test 10: CTE with FK chain - outer SUM should become pac_sum
+query II
+EXPLAIN WITH order_amounts AS (
+    SELECT o_custkey, l_extendedprice, l_discount
+    FROM lineitem JOIN orders ON l_orderkey = o_orderkey
+)
+SELECT SUM(l_extendedprice * (1 - l_discount)) FROM order_amounts;
+----
+logical_opt	<REGEX>:.*pac_sum.*
+
+# Test 11: Q13 as CTE - inner aggregate groups by PU key, outer should be pac_count
+query II
+EXPLAIN WITH c_orders AS (
+    SELECT c_custkey, COUNT(o_orderkey) AS c_count
+    FROM customer
+    LEFT OUTER JOIN orders ON c_custkey = o_custkey
+        AND o_comment NOT LIKE '%urgent%'
+    GROUP BY c_custkey
+)
+SELECT c_count, COUNT(*) AS custdist
+FROM c_orders
+GROUP BY c_count
+ORDER BY custdist DESC, c_count DESC;
+----
+logical_opt	<REGEX>:.*pac_count.*
+
+# Test 12: Q15-style CTE with already-aggregated data
+# The inner CTE aggregate (SUM) should be pac_sum,
+# but the outer max() on CTE results should NOT be pac_max
+query II
+EXPLAIN WITH revenue AS (
+    SELECT
+        l_suppkey AS supplier_no,
+        SUM(l_extendedprice * (1 - l_discount)) AS total_revenue
+    FROM lineitem JOIN orders ON lineitem.l_orderkey = orders.o_orderkey
+    WHERE l_shipdate >= CAST('1996-01-01' AS DATE)
+        AND l_shipdate < CAST('1996-04-01' AS DATE)
+    GROUP BY l_suppkey
+)
+SELECT s_suppkey, s_name, total_revenue
+FROM supplier JOIN revenue ON s_suppkey = supplier_no
+WHERE total_revenue = (SELECT max(total_revenue) FROM revenue)
+ORDER BY s_suppkey;
+----
+logical_opt	<REGEX>:.*pac_sum.*
+
+# Test 13: Nested CTEs - CTE B references CTE A which references PU table
+query II
+EXPLAIN WITH cust_base AS (
+    SELECT c_custkey, c_nationkey FROM customer
+),
+cust_nation AS (
+    SELECT c_custkey, n_name
+    FROM cust_base JOIN nation ON c_nationkey = n_nationkey
+)
+SELECT COUNT(*) FROM cust_nation;
+----
+logical_opt	<REGEX>:.*pac_count.*
+
 statement ok
 SET explain_output='physical_only';
 

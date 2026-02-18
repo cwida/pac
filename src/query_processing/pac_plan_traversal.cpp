@@ -9,11 +9,14 @@
 #include "duckdb/planner/operator/logical_aggregate.hpp"
 #include "duckdb/planner/operator/logical_projection.hpp"
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
+#include "duckdb/planner/operator/logical_cteref.hpp"
+#include "duckdb/planner/operator/logical_materialized_cte.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
+#include "pac_debug.hpp"
 
 namespace duckdb {
 
@@ -176,8 +179,7 @@ unique_ptr<LogicalOperator> *FindNodeRefByTable(unique_ptr<LogicalOperator> *roo
 	return nullptr;
 }
 
-// Check if an operator has any LogicalGet nodes (base table scans) in its subtree.
-// Returns false if the subtree only contains CTE scans or no table scans at all.
+// Check if an operator has any leaf data source nodes (base table scans or CTE refs) in its subtree.
 // IMPORTANT: This function stops at aggregates, because aggregates consume base table
 // bindings and produce new output bindings. Base tables behind an aggregate are not
 // directly accessible from operators above the aggregate.
@@ -188,6 +190,12 @@ bool HasBaseTableInSubtree(LogicalOperator *op) {
 
 	// Check if this is a base table scan
 	if (op->type == LogicalOperatorType::LOGICAL_GET) {
+		return true;
+	}
+
+	// CTE refs are leaf nodes that produce bindings from a materialized CTE,
+	// functionally equivalent to a base table scan for this check
+	if (op->type == LogicalOperatorType::LOGICAL_CTE_REF) {
 		return true;
 	}
 
@@ -226,6 +234,142 @@ bool HasTableInSubtree(LogicalOperator *op, const string &table_name) {
 	// Recursively check children
 	for (auto &child : op->children) {
 		if (HasTableInSubtree(child.get(), table_name)) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+// ---- CTE-aware helpers ----
+
+// Collect all table names referenced by LOGICAL_GET nodes in a subtree.
+static void CollectTableNamesInSubtree(LogicalOperator *op, std::unordered_set<string> &table_names) {
+	if (!op) {
+		return;
+	}
+	if (op->type == LogicalOperatorType::LOGICAL_GET) {
+		auto &get = op->Cast<LogicalGet>();
+		auto tblptr = get.GetTable();
+		if (tblptr) {
+			table_names.insert(tblptr->name);
+		}
+	}
+	for (auto &child : op->children) {
+		CollectTableNamesInSubtree(child.get(), table_names);
+	}
+}
+
+// Build a map from cte_index -> set of base table names that the CTE definition references.
+// Also resolves transitive CTE references (CTE A references CTE B's tables).
+void BuildCTETableMap(LogicalOperator *op, CTETableMap &cte_map) {
+	if (!op) {
+		return;
+	}
+
+	if (op->type == LogicalOperatorType::LOGICAL_MATERIALIZED_CTE) {
+		auto &cte = op->Cast<LogicalMaterializedCTE>();
+		idx_t cte_idx = cte.table_index;
+
+		// children[0] = CTE definition, children[1] = consumer
+		if (!cte.children.empty()) {
+			std::unordered_set<string> tables;
+			CollectTableNamesInSubtree(cte.children[0].get(), tables);
+			cte_map[cte_idx] = std::move(tables);
+		}
+	}
+
+	for (auto &child : op->children) {
+		BuildCTETableMap(child.get(), cte_map);
+	}
+}
+
+// Merge tables from referenced CTEs into a target CTE's table set.
+// Walks a subtree looking for CTE_REF nodes and merges their resolved tables.
+static void MergeCTERefsIntoSet(LogicalOperator *op, idx_t target_cte_idx, CTETableMap &cte_map) {
+	if (!op)
+		return;
+	if (op->type == LogicalOperatorType::LOGICAL_CTE_REF) {
+		auto &ref = op->Cast<LogicalCTERef>();
+		auto it = cte_map.find(ref.cte_index);
+		if (it != cte_map.end()) {
+			cte_map[target_cte_idx].insert(it->second.begin(), it->second.end());
+		}
+	}
+	for (auto &child : op->children) {
+		MergeCTERefsIntoSet(child.get(), target_cte_idx, cte_map);
+	}
+}
+
+// Resolve transitive CTE references. Must be called after BuildCTETableMap.
+// For each MATERIALIZED_CTE, merges tables from any CTE_REF nodes in its definition.
+static void ResolveCTERefsInDefinitions(LogicalOperator *op, CTETableMap &cte_map) {
+	if (!op)
+		return;
+	if (op->type == LogicalOperatorType::LOGICAL_MATERIALIZED_CTE) {
+		auto &cte = op->Cast<LogicalMaterializedCTE>();
+		if (!cte.children.empty()) {
+			MergeCTERefsIntoSet(cte.children[0].get(), cte.table_index, cte_map);
+		}
+	}
+	for (auto &child : op->children) {
+		ResolveCTERefsInDefinitions(child.get(), cte_map);
+	}
+}
+
+// Fully build and resolve CTE table map from a plan root.
+// First collects direct table names per CTE, then resolves transitive CTE references.
+CTETableMap BuildAndResolveCTETableMap(LogicalOperator *plan_root) {
+	CTETableMap cte_map;
+	BuildCTETableMap(plan_root, cte_map);
+	// Resolve transitive refs: CTEs that reference other CTEs get their tables merged
+	ResolveCTERefsInDefinitions(plan_root, cte_map);
+
+#if PAC_DEBUG
+	if (!cte_map.empty()) {
+		PAC_DEBUG_PRINT("CTE table map (" + std::to_string(cte_map.size()) + " CTEs):");
+		for (auto &kv : cte_map) {
+			string tables_str;
+			for (auto &t : kv.second) {
+				if (!tables_str.empty())
+					tables_str += ", ";
+				tables_str += t;
+			}
+			PAC_DEBUG_PRINT("  CTE index " + std::to_string(kv.first) + ": {" + tables_str + "}");
+		}
+	}
+#endif
+
+	return cte_map;
+}
+
+// CTE-aware version of HasTableInSubtree.
+// Follows CTE_REF nodes through the cte_map to check if the referenced CTE
+// transitively contains the target table.
+bool HasTableInSubtreeCTE(LogicalOperator *op, const string &table_name, const CTETableMap &cte_map) {
+	if (!op) {
+		return false;
+	}
+
+	if (op->type == LogicalOperatorType::LOGICAL_GET) {
+		auto &get = op->Cast<LogicalGet>();
+		auto tblptr = get.GetTable();
+		if (tblptr && tblptr->name == table_name) {
+			return true;
+		}
+	}
+
+	// Follow CTE references through the map
+	if (op->type == LogicalOperatorType::LOGICAL_CTE_REF) {
+		auto &ref = op->Cast<LogicalCTERef>();
+		auto it = cte_map.find(ref.cte_index);
+		if (it != cte_map.end() && it->second.count(table_name) > 0) {
+			return true;
+		}
+	}
+
+	for (auto &child : op->children) {
+		if (HasTableInSubtreeCTE(child.get(), table_name, cte_map)) {
 			return true;
 		}
 	}
@@ -308,14 +452,18 @@ void FindAllNodesByTableIndex(unique_ptr<LogicalOperator> *root, idx_t table_ind
 // AND have base tables in their DIRECT children (not through nested aggregates).
 // This filters out outer aggregates that only depend on inner aggregate results.
 vector<LogicalAggregate *> FilterTargetAggregates(const vector<LogicalAggregate *> &all_aggregates,
-                                                  const vector<string> &target_table_names) {
+                                                  const vector<string> &target_table_names,
+                                                  const CTETableMap &cte_map) {
 	vector<LogicalAggregate *> target_aggregates;
 
 	for (auto *agg : all_aggregates) {
 		// Check if this aggregate has at least one target table in its subtree
+		// Use CTE-aware version if we have a CTE map
 		bool has_target_table = false;
 		for (auto &table_name : target_table_names) {
-			if (HasTableInSubtree(agg, table_name)) {
+			bool found =
+			    cte_map.empty() ? HasTableInSubtree(agg, table_name) : HasTableInSubtreeCTE(agg, table_name, cte_map);
+			if (found) {
 				has_target_table = true;
 				break;
 			}
@@ -326,7 +474,7 @@ vector<LogicalAggregate *> FilterTargetAggregates(const vector<LogicalAggregate 
 		}
 
 		// Check if this aggregate has base tables in its DIRECT children (not nested aggregates)
-		// If it only depends on another aggregate's output, skip it
+		// HasBaseTableInSubtree already recognizes CTE_REF as a valid leaf data source
 		bool has_direct_base_table = false;
 		for (auto &child : agg->children) {
 			// Skip if the child is another aggregate
@@ -617,7 +765,8 @@ bool AggregateGroupsByPUKey(LogicalAggregate *agg, const PACCompatibilityResult 
 vector<LogicalAggregate *> FilterTargetAggregatesWithPUKeyCheck(const vector<LogicalAggregate *> &all_aggregates,
                                                                 const vector<string> &target_table_names,
                                                                 const PACCompatibilityResult &check,
-                                                                const vector<string> &privacy_units) {
+                                                                const vector<string> &privacy_units,
+                                                                const CTETableMap &cte_map) {
 	vector<LogicalAggregate *> target_aggregates;
 
 	// First, identify which aggregates have inner aggregates that group by PU key
@@ -664,31 +813,44 @@ vector<LogicalAggregate *> FilterTargetAggregatesWithPUKeyCheck(const vector<Log
 	for (auto *agg : all_aggregates) {
 		// Skip aggregates that are marked to be skipped (inner aggregates that group by PU key)
 		if (skip_aggregates.count(agg) > 0) {
+#if PAC_DEBUG
+			PAC_DEBUG_PRINT("FilterTargetAggregatesWithPUKeyCheck: skipping aggregate (inner groups by PU key)");
+#endif
 			continue;
 		}
 
 		// Check if this aggregate should be included because its inner aggregate groups by PU key
 		if (include_outer_aggregates.count(agg) > 0) {
 			// Include this outer aggregate - it needs to be noised instead of the inner one
+#if PAC_DEBUG
+			PAC_DEBUG_PRINT("FilterTargetAggregatesWithPUKeyCheck: including outer aggregate (inner groups by PU key)");
+#endif
 			target_aggregates.push_back(agg);
 			continue;
 		}
 
 		// Standard filtering logic: check if this aggregate has target tables in its subtree
+		// Use CTE-aware version if we have a CTE map
 		bool has_target_table = false;
 		for (auto &table_name : target_table_names) {
-			if (HasTableInSubtree(agg, table_name)) {
+			bool found =
+			    cte_map.empty() ? HasTableInSubtree(agg, table_name) : HasTableInSubtreeCTE(agg, table_name, cte_map);
+			if (found) {
 				has_target_table = true;
 				break;
 			}
 		}
 
 		if (!has_target_table) {
+#if PAC_DEBUG
+			PAC_DEBUG_PRINT(
+			    "FilterTargetAggregatesWithPUKeyCheck: aggregate has no target tables in subtree, skipping");
+#endif
 			continue;
 		}
 
 		// Check if this aggregate has base tables in its DIRECT children (not nested aggregates)
-		// If it only depends on another aggregate's output, skip it (unless it's in include_outer_aggregates)
+		// HasBaseTableInSubtree already recognizes CTE_REF as a valid leaf data source
 		bool has_direct_base_table = false;
 		for (auto &child : agg->children) {
 			// Skip if the child is another aggregate
@@ -702,9 +864,23 @@ vector<LogicalAggregate *> FilterTargetAggregatesWithPUKeyCheck(const vector<Log
 		}
 
 		if (has_direct_base_table) {
+#if PAC_DEBUG
+			PAC_DEBUG_PRINT("FilterTargetAggregatesWithPUKeyCheck: including aggregate (has target tables + direct "
+			                "base table/CTE ref)");
+#endif
 			target_aggregates.push_back(agg);
+		} else {
+#if PAC_DEBUG
+			PAC_DEBUG_PRINT(
+			    "FilterTargetAggregatesWithPUKeyCheck: aggregate has target tables but no direct base table, skipping");
+#endif
 		}
 	}
+
+#if PAC_DEBUG
+	PAC_DEBUG_PRINT("FilterTargetAggregatesWithPUKeyCheck: selected " + std::to_string(target_aggregates.size()) +
+	                " of " + std::to_string(all_aggregates.size()) + " aggregates");
+#endif
 
 	return target_aggregates;
 }
