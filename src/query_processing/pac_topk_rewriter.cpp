@@ -14,6 +14,7 @@
 #include "duckdb/planner/operator/logical_top_n.hpp"
 #include "duckdb/planner/operator/logical_aggregate.hpp"
 #include "duckdb/planner/operator/logical_projection.hpp"
+#include "duckdb/planner/operator/logical_order.hpp"
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
@@ -383,6 +384,16 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 	PAC_DEBUG_PRINT("PACTopKRule: Found " + std::to_string(pac_aggs.size()) + " PAC aggregates to rewrite");
 #endif
 
+	// Save original TopN orders for the ORDER BY we'll add on top after rewriting.
+	// After TopN selects the right top-k groups by true means, and NoisedProj applies
+	// noise, we need to re-sort the results so the output is ordered by noised values.
+	vector<BoundOrderByNode> saved_orders;
+	for (auto &order : ctx.topn->orders) {
+		saved_orders.push_back(order.Copy());
+	}
+	// Maps original column bindings to NoisedProj bindings (populated by PATH A or B)
+	unordered_map<uint64_t, ColumnBinding> order_remap;
+
 	auto &binder = input.optimizer.binder;
 	auto &agg = *ctx.aggregate;
 	auto list_type = LogicalType::LIST(PacFloatLogicalType());
@@ -661,10 +672,15 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 
 		auto noised_proj = make_uniq<LogicalProjection>(noised_proj_idx, std::move(noised_proj_exprs));
 
+		// Build order remap: original outermost projection columns -> NoisedProj columns
+		for (idx_t i = 0; i < original_outermost_col_count; i++) {
+			order_remap[HashBinding(ColumnBinding(outermost->table_index, i))] = ColumnBinding(noised_proj_idx, i);
+		}
+
 		// ------------------------------------------------------------------
 		// Step A6: Reassemble the plan tree.
 		// Before: plan(TopN) -> Proj_outer -> ... -> Proj_inner -> MeanProj -> Agg
-		// After:  NoisedProj -> TopN -> Proj_outer -> ... -> Proj_inner -> MeanProj -> Agg
+		// After:  OrderBy -> NoisedProj -> TopN -> Proj_outer -> ... -> Proj_inner -> MeanProj -> Agg
 		// ------------------------------------------------------------------
 #if PAC_DEBUG
 		PAC_DEBUG_PRINT("PACTopKRule: Step A6 - Reassembling plan tree (with intermediate projections)");
@@ -739,6 +755,11 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 
 		auto noised_proj = make_uniq<LogicalProjection>(noised_proj_idx, std::move(noised_proj_exprs));
 
+		// Build order remap: original aggregate bindings -> NoisedProj columns
+		for (idx_t i = 0; i < agg_bindings.size(); i++) {
+			order_remap[HashBinding(agg_bindings[i])] = ColumnBinding(noised_proj_idx, i);
+		}
+
 		// Step B3: Reassemble
 #if PAC_DEBUG
 		PAC_DEBUG_PRINT("PACTopKRule: Step B3 - Reassembling plan tree (no intermediate projections)");
@@ -755,6 +776,33 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 		noised_proj->ResolveOperatorTypes();
 		plan = std::move(noised_proj);
 	}
+
+	// ==========================================================================
+	// Final Step: Add ORDER BY on top to re-sort by noised values.
+	// TopN selected the right top-k groups using true means, but after
+	// NoisedProj applies noise the output values no longer match the sort order.
+	// Re-sorting the small top-k result set by noised values is cheap.
+	// ==========================================================================
+	vector<BoundOrderByNode> final_orders;
+	for (auto &saved : saved_orders) {
+		auto expr = saved.expression->Copy();
+		std::function<void(unique_ptr<Expression> &)> RemapToNoised = [&](unique_ptr<Expression> &e) {
+			if (e->type == ExpressionType::BOUND_COLUMN_REF) {
+				auto &ref = e->Cast<BoundColumnRefExpression>();
+				auto it = order_remap.find(HashBinding(ref.binding));
+				if (it != order_remap.end()) {
+					ref.binding = it->second;
+				}
+			}
+			ExpressionIterator::EnumerateChildren(*e, RemapToNoised);
+		};
+		RemapToNoised(expr);
+		final_orders.push_back(BoundOrderByNode(saved.type, saved.null_order, std::move(expr)));
+	}
+	auto order_by = make_uniq<LogicalOrder>(std::move(final_orders));
+	order_by->children.push_back(std::move(plan));
+	order_by->ResolveOperatorTypes();
+	plan = std::move(order_by);
 
 #if PAC_DEBUG
 	PAC_DEBUG_PRINT("PACTopKRule: Successfully rewrote plan for top-k pushdown");

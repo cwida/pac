@@ -598,6 +598,8 @@ static void PacNoisedFunction(DataChunk &args, ExpressionState &state, Vector &r
 		query_hash = bind_data.query_hash;
 	}
 
+	std::mt19937_64 gen(seed);
+
 	UnifiedVectorFormat list_data;
 	list_vec.ToUnifiedFormat(count, list_data);
 
@@ -647,10 +649,6 @@ static void PacNoisedFunction(DataChunk &args, ExpressionState &state, Vector &r
 			result_validity.SetInvalid(i);
 			continue;
 		}
-
-		// Use per-row deterministic RNG seeded by both seed and key_hash
-		std::mt19937_64 gen(seed ^ key_hash);
-
 		// Check if we should return NULL based on key_hash (uses mi and correction)
 		if (PacNoiseInNull(key_hash, mi, correction, gen)) {
 			result_validity.SetInvalid(i);

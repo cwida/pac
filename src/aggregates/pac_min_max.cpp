@@ -94,7 +94,6 @@ static void PacMinMaxFinalize(Vector &states, AggregateInputData &input, Vector 
 	auto data = FlatVector::GetData<T>(result);
 	auto &result_mask = FlatVector::Validity(result);
 
-	uint64_t seed = input.bind_data ? input.bind_data->Cast<PacBindData>().seed : std::random_device {}();
 	double mi = input.bind_data ? input.bind_data->Cast<PacBindData>().mi : 0.0;
 	double correction = input.bind_data ? input.bind_data->Cast<PacBindData>().correction : 1.0;
 	uint64_t query_hash = input.bind_data ? input.bind_data->Cast<PacBindData>().query_hash : 0;
@@ -107,9 +106,7 @@ static void PacMinMaxFinalize(Vector &states, AggregateInputData &input, Vector 
 		auto *s = state_ptrs[i]->GetState();
 		// Check if we should return NULL based on key_hash
 		uint64_t key_hash = s ? s->key_hash : 0;
-		// Use per-group deterministic RNG seeded by both pac_seed and key_hash
-		// This ensures each group gets the same noise regardless of processing order
-		std::mt19937_64 gen(seed ^ key_hash);
+		std::mt19937_64 gen(input.bind_data->Cast<PacBindData>().seed);
 		// mi controls noise mode, correction reduces NULL probability (but does NOT scale min/max values)
 		if (PacNoiseInNull(key_hash, mi, correction, gen)) {
 			result_mask.SetInvalid(offset + i);

@@ -404,7 +404,6 @@ void PacSumFinalize(Vector &states, AggregateInputData &input, Vector &result, i
 	auto state_ptrs = FlatVector::GetData<State *>(states);
 	auto data = FlatVector::GetData<ACC_TYPE>(result);
 	auto &result_mask = FlatVector::Validity(result);
-	uint64_t seed = input.bind_data ? input.bind_data->Cast<PacBindData>().seed : std::random_device {}();
 	double mi = input.bind_data ? input.bind_data->Cast<PacBindData>().mi : 0.0;
 	double correction = input.bind_data ? input.bind_data->Cast<PacBindData>().correction : 1.0;
 	uint64_t query_hash = input.bind_data ? input.bind_data->Cast<PacBindData>().query_hash : 0;
@@ -425,7 +424,7 @@ void PacSumFinalize(Vector &states, AggregateInputData &input, Vector &result, i
 		// This ensures each group gets the same noise regardless of processing order
 		uint64_t key_hash = pos->key_hash;
 		uint64_t update_count = pos->update_count;
-		std::mt19937_64 gen(seed ^ key_hash);
+		std::mt19937_64 gen(input.bind_data->Cast<PacBindData>().seed);
 		if (PacNoiseInNull(key_hash, mi, correction, gen)) {
 			result_mask.SetInvalid(offset + i); // return NULL (probabilistic decision)
 			continue;
