@@ -70,7 +70,6 @@ private:
 
 // Configuration helpers that read PAC-related settings from the client's context and
 // return a canonicalized value or a default when not configured.
-string GetPacPrivacyFile(ClientContext &context, const string &default_filename = "pac_tables.csv");
 string GetPacCompiledPath(ClientContext &context, const string &default_path = ".");
 int64_t GetPacM(ClientContext &context, int64_t default_m = 128);
 bool IsPacNoiseEnabled(ClientContext &context, bool default_value = true);
@@ -78,10 +77,6 @@ string GetPacCompileMethod(ClientContext &context, const string &default_method 
 
 // Helper to safely retrieve boolean settings with defaults
 bool GetBooleanSetting(ClientContext &context, const string &setting_name, bool default_value);
-
-// Helper to convert ReadPacTablesFile's unordered_set into a deterministic vector (sorted)
-// so callers don't need to repeat this conversion.
-vector<string> PacTablesSetToVector(const std::unordered_set<string> &set);
 
 // Return true if the given ColumnBinding in a logical plan ultimately originates from the
 // specified base table name (i.e., from a LogicalGet of that table), false otherwise.

@@ -604,15 +604,6 @@ ReplanGuard::~ReplanGuard() {
 }
 
 // Configuration helpers
-string GetPacPrivacyFile(ClientContext &context, const string &default_filename) {
-	Value v;
-	context.TryGetCurrentSetting("pac_privacy_file", v);
-	if (!v.IsNull()) {
-		return v.ToString();
-	}
-	return default_filename;
-}
-
 string GetPacCompiledPath(ClientContext &context, const string &default_path) {
 	Value v;
 	context.TryGetCurrentSetting("pac_compiled_path", v);
@@ -649,16 +640,6 @@ bool IsPacNoiseEnabled(ClientContext &context, bool default_value) {
 	} catch (...) {
 		return default_value;
 	}
-}
-
-vector<string> PacTablesSetToVector(const std::unordered_set<string> &set) {
-	vector<string> out;
-	out.reserve(set.size());
-	for (auto &s : set) {
-		out.push_back(s);
-	}
-	std::sort(out.begin(), out.end());
-	return out;
 }
 
 // Add implementation for GetPacCompileMethod

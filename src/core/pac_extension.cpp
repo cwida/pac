@@ -15,7 +15,6 @@
 #include "duckdb/common/vector_operations/unary_executor.hpp"
 #include "duckdb/common/types.hpp"
 #include "core/pac_optimizer.hpp"
-#include "core/pac_privacy_unit.hpp"
 #include "aggregates/pac_aggregate.hpp"
 #include "aggregates/pac_count.hpp"
 #include "aggregates/pac_sum.hpp"
@@ -71,11 +70,6 @@ static void ClearPACMetadataPragma(ClientContext &context, const FunctionParamet
 }
 
 static void LoadInternal(ExtensionLoader &loader) {
-	// Register scalar helper to delete file (tests use this cleanup helper)
-	auto delete_privacy_unit_file = ScalarFunction("delete_privacy_unit_file", {LogicalType::VARCHAR},
-	                                               LogicalType::VARCHAR, DeletePrivacyUnitFileFun);
-	loader.RegisterFunction(delete_privacy_unit_file);
-
 	// Try to automatically load PAC metadata from database directory if it exists
 	auto &db = loader.GetDatabaseInstance();
 	try {
@@ -175,7 +169,6 @@ static void LoadInternal(ExtensionLoader &loader) {
 	pac_topk_rule.optimizer_info = pac_info;
 	db.config.optimizer_extensions.push_back(pac_topk_rule);
 
-	db.config.AddExtensionOption("pac_privacy_file", "path for privacy units", LogicalType::VARCHAR);
 	// Add option to enable/disable PAC noise application (this is useful for testing, since noise affects result
 	// determinism)
 	db.config.AddExtensionOption("pac_noise", "apply PAC noise", LogicalType::BOOLEAN);

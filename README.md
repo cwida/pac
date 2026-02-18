@@ -147,7 +147,6 @@ PRAGMA clear_pac_metadata;
 | `pac_deterministic_noise` | BOOLEAN | false | Use deterministic noise (for testing) |
 | `pac_conservative_mode` | BOOLEAN | true | Throw errors on unsupported queries |
 | `pac_compiled_path` | VARCHAR | "." | Output path for compiled PAC SQL |
-| `pac_privacy_file` | VARCHAR | "" | Path to CSV file listing PAC tables |
 
 ### Example Configuration
 

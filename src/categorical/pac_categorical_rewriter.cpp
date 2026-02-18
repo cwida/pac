@@ -1099,6 +1099,34 @@ static void ReplaceBindingInExpression(Expression &expr, const ColumnBinding &ol
 	}
 }
 
+// Wrap PAC aggregate column references in HAVING expressions with pac_noised.
+// When the categorical rewriter converts pac_sum → pac_sum_counters (LIST<FLOAT> output),
+// HAVING clause expressions still reference the aggregate with the original type (e.g. DECIMAL).
+// This wraps those references with pac_noised() to convert back to scalar, then casts to original type.
+static void WrapHavingPacRefsWithNoised(unique_ptr<Expression> &expr, const vector<PacBindingInfo> &pac_bindings,
+                                        OptimizerExtensionInput &input) {
+	if (expr->type == ExpressionType::BOUND_COLUMN_REF) {
+		auto &col_ref = expr->Cast<BoundColumnRefExpression>();
+		for (auto &bi : pac_bindings) {
+			if (col_ref.binding == bi.binding) {
+				auto original_type = col_ref.return_type;
+				// Update column ref type to match rewritten aggregate output
+				col_ref.return_type = LogicalType::LIST(PacFloatLogicalType());
+				// Wrap with pac_noised to produce scalar
+				unique_ptr<Expression> noised = input.optimizer.BindScalarFunction("pac_noised", expr->Copy());
+				// Cast back to original type if needed (e.g., DECIMAL for sum, BIGINT for count)
+				if (original_type != PacFloatLogicalType()) {
+					noised = BoundCastExpression::AddDefaultCastToType(std::move(noised), original_type);
+				}
+				expr = std::move(noised);
+				return;
+			}
+		}
+	}
+	ExpressionIterator::EnumerateChildren(
+	    *expr, [&](unique_ptr<Expression> &child) { WrapHavingPacRefsWithNoised(child, pac_bindings, input); });
+}
+
 // Rewrite a single projection expression: update col_ref types, build list_transform + terminal.
 static void RewriteProjectionExpression(OptimizerExtensionInput &input, LogicalProjection &proj, idx_t i,
                                         LogicalOperator *plan_root, bool is_filter_pattern, bool is_terminal,
@@ -1390,6 +1418,37 @@ static void RewriteBottomUp(unique_ptr<LogicalOperator> &op_ptr, OptimizerExtens
 						filter.expressions[expr_idx] = std::move(result);
 					}
 				}
+			}
+		}
+		// Handle HAVING clause expressions: wrap PAC aggregate column references with pac_noised
+		// so that counter lists (LIST<FLOAT>) are converted back to scalar for comparison.
+		// These are excluded from pattern_lookup (not categorical patterns) but still need type fixup
+		// after the aggregate below was converted to pac_*_counters.
+		{
+			auto &filter = op->Cast<LogicalFilter>();
+			auto handled_it = pattern_lookup.find(op);
+			for (idx_t fi = 0; fi < filter.expressions.size(); fi++) {
+				// Skip expressions already handled by pattern_lookup above
+				if (handled_it != pattern_lookup.end() && handled_it->second.count(fi)) {
+					continue;
+				}
+				auto pac_bindings = FindAllPacBindingsInExpression(filter.expressions[fi].get(), plan_root);
+				if (pac_bindings.empty()) {
+					continue;
+				}
+				// Check if all PAC bindings are HAVING clause patterns
+				bool all_having = true;
+				for (auto &bi : pac_bindings) {
+					ColumnBinding traced = ResolveBindingSource(bi.binding, plan_root);
+					if (!IsHavingClausePattern(op, traced, plan_root)) {
+						all_having = false;
+						break;
+					}
+				}
+				if (!all_having) {
+					continue;
+				}
+				WrapHavingPacRefsWithNoised(filter.expressions[fi], pac_bindings, input);
 			}
 		}
 	} else if (op->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN ||

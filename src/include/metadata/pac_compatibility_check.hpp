@@ -43,7 +43,6 @@ struct PACCompatibilityResult {
 // Returns a PACCompatibilityResult with fk_paths empty when no PAC rewrite is needed.
 // If `replan_in_progress` is true the function will return an empty result immediately to avoid recursion.
 PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, ClientContext &context,
-                                            const vector<string> &pac_tables,
                                             PACOptimizerInfo *optimizer_info = nullptr);
 
 void CountScans(const LogicalOperator &op, std::unordered_map<string, idx_t> &counts);

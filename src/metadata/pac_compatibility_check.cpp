@@ -83,6 +83,18 @@ static bool ContainsWindowFunction(const LogicalOperator &op) {
 	return false;
 }
 
+static bool ContainsRecursiveCTE(const LogicalOperator &op) {
+	if (op.type == LogicalOperatorType::LOGICAL_RECURSIVE_CTE) {
+		return true;
+	}
+	for (auto &child : op.children) {
+		if (ContainsRecursiveCTE(*child)) {
+			return true;
+		}
+	}
+	return false;
+}
+
 static bool ContainsLogicalDistinct(const LogicalOperator &op) {
 	// Only check for explicit DISTINCT operator (SELECT DISTINCT), not aggregate DISTINCT
 	if (op.type == LogicalOperatorType::LOGICAL_DISTINCT) {
@@ -746,7 +758,7 @@ static bool DetectCycleInFKGraph(ClientContext &context, const vector<string> &s
 }
 
 PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, ClientContext &context,
-                                            const vector<string> &pac_tables, PACOptimizerInfo *optimizer_info) {
+                                            PACOptimizerInfo *optimizer_info) {
 	PACCompatibilityResult result;
 
 	// If a replan/compilation is already in progress by the optimizer extension, skip compatibility checks
@@ -759,13 +771,6 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 	std::unordered_map<string, idx_t> scan_counts;
 	CountScans(*plan, scan_counts);
 
-	// Record which configured PAC tables were scanned in this plan
-	for (auto &t : pac_tables) {
-		if (scan_counts[t] > 0) {
-			result.scanned_pu_tables.push_back(t);
-		}
-	}
-
 	// Build a vector of scanned table names
 	vector<string> scanned_tables;
 	for (auto &kv : scan_counts) {
@@ -773,17 +778,6 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 	}
 	// Sort for deterministic behavior across platforms (unordered_map iteration order is not guaranteed)
 	std::sort(scanned_tables.begin(), scanned_tables.end());
-
-	// Record scanned tables that are NOT configured PAC tables
-	// This is needed for the compiler to correctly identify present tables
-	std::unordered_set<string> pac_tables_set(pac_tables.begin(), pac_tables.end());
-	for (auto &kv : scan_counts) {
-		if (kv.second > 0 && pac_tables_set.find(kv.first) == pac_tables_set.end()) {
-			result.scanned_non_pu_tables.push_back(kv.first);
-		}
-	}
-	// Sort for deterministic behavior across platforms
-	std::sort(result.scanned_non_pu_tables.begin(), result.scanned_non_pu_tables.end());
 
 	// Discover tables with PROTECTED columns in PAC metadata
 	// Note: Tables with protected columns are NOT automatically privacy units anymore.
@@ -808,6 +802,17 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 	// Sort for deterministic behavior across platforms
 	std::sort(tables_with_protected_columns.begin(), tables_with_protected_columns.end());
 	std::sort(result.scanned_pu_tables.begin(), result.scanned_pu_tables.end());
+
+	// Record scanned tables that are NOT privacy unit tables
+	{
+		std::unordered_set<string> pu_set(result.scanned_pu_tables.begin(), result.scanned_pu_tables.end());
+		for (auto &kv : scan_counts) {
+			if (kv.second > 0 && pu_set.find(kv.first) == pu_set.end()) {
+				result.scanned_non_pu_tables.push_back(kv.first);
+			}
+		}
+		std::sort(result.scanned_non_pu_tables.begin(), result.scanned_non_pu_tables.end());
+	}
 
 	// Also check tables reachable via PAC_LINKs for protected columns
 	// (FindForeignKeys already includes PAC_LINKs, but we need to find protected columns
@@ -849,17 +854,10 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 	result.tables_with_protected_columns = tables_with_protected_columns;
 	bool has_protected_columns = !tables_with_protected_columns.empty();
 
-	// Build the combined privacy unit list:
-	// 1. Configured PAC tables (pac_tables from the CSV file)
-	// 2. Tables explicitly marked as privacy units (is_privacy_unit = true via CREATE PU TABLE or ALTER TABLE SET PAC)
+	// Build the combined privacy unit list from metadata (is_privacy_unit = true)
 	// Note: Tables with protected columns are NOT automatically privacy units anymore
 	// A table is a privacy unit only if it has is_privacy_unit = true (via CREATE PU TABLE or ALTER TABLE SET PAC)
-	vector<string> all_privacy_units = pac_tables;
-	for (auto &t : result.scanned_pu_tables) {
-		if (std::find(all_privacy_units.begin(), all_privacy_units.end(), t) == all_privacy_units.end()) {
-			all_privacy_units.push_back(t);
-		}
-	}
+	vector<string> all_privacy_units(result.scanned_pu_tables.begin(), result.scanned_pu_tables.end());
 	// Also include ALL tables from metadata that have is_privacy_unit=true (even if not scanned)
 	for (const auto &table_name : metadata_mgr.GetAllTableNames()) {
 		auto *table_metadata = metadata_mgr.GetTableMetadata(table_name);
@@ -1057,6 +1055,12 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 			return result;
 		}
 
+		if (ContainsRecursiveCTE(*plan)) {
+			if (is_conservative) {
+				throw InvalidInputException("PAC rewrite: recursive CTEs are not supported for PAC compilation");
+			}
+			return result;
+		}
 		if (ContainsWindowFunction(*plan)) {
 			if (is_conservative) {
 				throw InvalidInputException("PAC rewrite: window functions are not supported for PAC compilation");

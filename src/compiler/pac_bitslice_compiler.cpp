@@ -287,7 +287,7 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 		if (missing_set.find(table) != missing_set.end()) {
 			auto it = check.table_metadata.find(table);
 			if (it == check.table_metadata.end()) {
-				throw InternalException("PAC compiler: missing table metadata for missing GET: " + table);
+				throw InvalidInputException("PAC compiler: missing table metadata for missing GET: " + table);
 			}
 			vector<string> pks = it->second.pks;
 			// Get required columns for this table (PKs and relevant FKs)
@@ -371,11 +371,11 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 	}
 
 	if (all_connecting_nodes.empty() && !connecting_table.empty()) {
-		throw InternalException("PAC compiler: could not find any LogicalGet for table " + connecting_table);
+		throw InvalidInputException("PAC compiler: could not find any LogicalGet for table " + connecting_table);
 	}
 
 	if (all_connecting_nodes.empty()) {
-		throw InternalException("PAC compiler: could not find any connecting table in the plan");
+		throw InvalidInputException("PAC compiler: could not find any connecting table in the plan");
 	}
 
 	// For each instance of the connecting table, add the join chain
@@ -501,7 +501,7 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 			for (auto &table : tables_to_join_for_instance) {
 				auto it = check.table_metadata.find(table);
 				if (it == check.table_metadata.end()) {
-					throw InternalException("PAC compiler: missing table metadata for table: " + table);
+					throw InvalidInputException("PAC compiler: missing table metadata for table: " + table);
 				}
 				vector<string> pks = it->second.pks;
 				// Get required columns for this table (PKs and relevant FKs)
@@ -894,8 +894,8 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 								for (auto &table_to_add : full_tables_to_add) {
 									auto it = check.table_metadata.find(table_to_add);
 									if (it == check.table_metadata.end()) {
-										throw InternalException("PAC compiler: missing table metadata for table: " +
-										                        table_to_add);
+										throw InvalidInputException("PAC compiler: missing table metadata for table: " +
+										                            table_to_add);
 									}
 
 									auto local_idx = binder.GenerateTableIndex();
@@ -949,7 +949,7 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 				for (auto &table : tables_to_add) {
 					auto it = check.table_metadata.find(table);
 					if (it == check.table_metadata.end()) {
-						throw InternalException("PAC compiler: missing table metadata for table: " + table);
+						throw InvalidInputException("PAC compiler: missing table metadata for table: " + table);
 					}
 					vector<string> pks = it->second.pks;
 					// Get required columns for this table (PKs and relevant FKs)
@@ -2005,7 +2005,7 @@ void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExten
 		// Extract the ordered fk_path from the compatibility result (use first path as base)
 		auto it = check.fk_paths.find(start_table);
 		if (it == check.fk_paths.end() || it->second.empty()) {
-			throw InternalException("PAC compiler: expected fk_path for start table " + start_table);
+			throw InvalidInputException("PAC compiler: expected fk_path for start table " + start_table);
 		}
 		vector<string> fk_path_to_use = it->second;
 

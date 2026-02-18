@@ -7,8 +7,6 @@
 #include <string>
 #include <algorithm>
 
-// Include public helper to access the configured PAC tables filename and read helper
-#include "core/pac_privacy_unit.hpp"
 #include "utils/pac_helpers.hpp"
 // Include PAC bitslice compiler
 #include "compiler/pac_bitslice_compiler.hpp"
@@ -148,17 +146,12 @@ void PACRewriteRule::PACPreOptimizeFunction(OptimizerExtensionInput &input, uniq
 	    check_plan->type != LogicalOperatorType::LOGICAL_MATERIALIZED_CTE) {
 		return;
 	}
-	// Load configured PAC tables once
-	string pac_privacy_file = GetPacPrivacyFile(input.context);
-	auto pac_tables = ReadPacTablesFile(pac_privacy_file);
-	vector<string> pac_table_list = PacTablesSetToVector(pac_tables);
-
 	// For EXPLAIN queries, we need to operate on the child plan
 	bool is_explain = (plan->type == LogicalOperatorType::LOGICAL_EXPLAIN && !plan->children.empty());
 	unique_ptr<LogicalOperator> &target_plan = is_explain ? plan->children[0] : plan;
 
 	// Delegate compatibility checks (including detecting PAC table presence and internal sample scans)
-	PACCompatibilityResult check = PACRewriteQueryCheck(target_plan, input.context, pac_table_list, pac_info);
+	PACCompatibilityResult check = PACRewriteQueryCheck(target_plan, input.context, pac_info);
 	if (check.fk_paths.empty() && check.scanned_pu_tables.empty()) {
 		return;
 	}
