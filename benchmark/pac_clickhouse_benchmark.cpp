@@ -356,12 +356,12 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
         for (int run = 1; run <= num_runs; ++run) {
             Log(string("=== Run ") + std::to_string(run) + " of " + std::to_string(num_runs) + " ===");
 
+            // Single connection for all queries in this run
+            Connection con(db);
+
             for (size_t q = 0; q < queries.size(); ++q) {
                 int qnum = static_cast<int>(q + 1);
                 const string &query = queries[q];
-
-                // Open connection for this query's cold/warm/pac sequence
-                Connection con(db);
 
                 // ------------------------------------------------------------------
                 // Cold run (baseline, not recorded)
@@ -372,6 +372,9 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
                     auto r = con.Query(query);
                     if (r && r->HasError()) {
                         Log(string("Q") + std::to_string(qnum) + " cold run error: " + r->GetError());
+                    } else {
+                        // Consume result
+                        while (r->Fetch()) {}
                     }
                 }
 
@@ -383,6 +386,10 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
 
                     auto t0 = std::chrono::steady_clock::now();
                     auto r = con.Query(query);
+                    // Consume result
+                    if (r && !r->HasError()) {
+                        while (r->Fetch()) {}
+                    }
                     auto t1 = std::chrono::steady_clock::now();
                     double time_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
 
@@ -415,6 +422,10 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
 
                     auto t0 = std::chrono::steady_clock::now();
                     auto r = con.Query(query);
+                    // Consume result
+                    if (r && !r->HasError()) {
+                        while (r->Fetch()) {}
+                    }
                     auto t1 = std::chrono::steady_clock::now();
                     double time_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
 
@@ -449,12 +460,10 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
                     con.Query("ALTER PU TABLE hits DROP PROTECTED (UserID, ClientIP);");
                     con.Query("ALTER TABLE hits UNSET PU;");
                 }
-
-                // Force checkpoint to release memory before next query
-                con.Query("CHECKPOINT;");
-
-                // Connection closed here when con goes out of scope
             }
+
+            // Force checkpoint to release memory after each run
+            con.Query("CHECKPOINT;");
         }
 
         // =====================================================================

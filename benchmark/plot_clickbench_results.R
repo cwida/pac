@@ -119,8 +119,8 @@ if (length(query_order) == 0) query_order <- unique(summary_df$query)
 
 summary_df$query <- factor(summary_df$query, levels = query_order)
 
-# Provide a plotting-safe mean time for log scale (replace non-positive values with a tiny positive number)
-summary_df <- summary_df %>% mutate(mean_time_plot = ifelse(mean_time <= 0 | is.na(mean_time), 1e-3, mean_time))
+# Provide a plotting-safe mean time for log scale (floor at 1.5 ms)
+summary_df <- summary_df %>% mutate(mean_time_plot = ifelse(mean_time < 1.5, 1.5, mean_time))
 
 # ============================================================================
 # Compute slowdown statistics for PAC compared to baseline
@@ -195,6 +195,12 @@ method_colors <- c(
   "PAC" = "#ff7f0e"
 )
 
+# Paper color palette (matches TPC-H paper style)
+paper_colors <- c(
+  "DuckDB" = "#95a5a6",
+  "PAC" = "#4dff4d"
+)
+
 # Build plot function for standard output
 build_plot <- function(df, out_file, plot_title, width = 4000, height = 2000, res = 200, base_size = 36, base_family = "sans") {
  failed_queries <- df %>% filter(all_failed) %>% pull(query) %>% unique()
@@ -224,31 +230,34 @@ build_plot <- function(df, out_file, plot_title, width = 4000, height = 2000, re
   message("Plot saved to: ", out_file)
 }
 
-# Build plot function for paper (higher quality, Linux Libertine font)
-build_plot_paper <- function(df, out_file, plot_title, width = 2400, height = 1000, res = 200, base_size = 36, base_family = "Linux Libertine") {
+# Build plot function for paper (matches TPC-H paper style)
+build_plot_paper <- function(df, out_file, plot_title, width = 4000, height = 1800, res = 350, base_size = 40, base_family = "Linux Libertine") {
   # Only plot queries where all modes succeeded
-  # Find queries where any mode failed
   failed_queries <- df %>% filter(all_failed) %>% pull(query) %>% unique()
   df_success <- df %>% filter(!query %in% failed_queries)
 
+  # Rename "baseline" to "DuckDB" to match TPC-H style
+  df_success <- df_success %>% mutate(mode = ifelse(mode == "baseline", "DuckDB", mode))
+
   p <- ggplot(df_success, aes(x = query, y = mean_time_plot, fill = mode)) +
     geom_col(position = position_dodge(width = 0.8), width = 0.7) +
-    scale_fill_manual(values = method_colors, name = "Mode") +
+    scale_fill_manual(values = paper_colors, name = NULL) +
     scale_y_log10(labels = scales::comma) +
-    labs(x = "Query", y = "Time (ms, log scale)", fill = "Mode") +
+    labs(x = "Query", y = "Time (ms, log scale)") +
     theme_bw(base_size = base_size, base_family = base_family) +
     theme(
-      panel.grid.major = element_line(linewidth = 0.8),
+      panel.grid.major = element_line(linewidth = 1.0),
       panel.grid.minor = element_blank(),
       legend.position = "top",
+      legend.title = element_blank(),
+      legend.text = element_text(size = 28),
       legend.margin = margin(0, 0, 0, 0),
-      legend.box.margin = margin(0, 0, -10, 0),
-      legend.title = element_text(size = base_size - 10),
-      legend.text = element_text(size = base_size - 12),
-      axis.text.x = element_text(angle = 45, hjust = 1, size = base_size - 14),
-      axis.text.y = element_text(size = base_size - 10),
-      axis.title = element_text(size = base_size - 8),
-      plot.margin = margin(5, 10, 5, 5)
+      legend.box.margin = margin(0, 0, -15, 0),
+      axis.text.x = element_text(angle = 45, hjust = 1, size = 24),
+      axis.text.y = element_text(size = 28),
+      axis.title = element_text(size = 32),
+      plot.title = element_blank(),
+      plot.margin = margin(5, 5, 5, 5)
     )
 
   png(filename = out_file, width = width, height = height, res = res)
