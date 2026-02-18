@@ -8,6 +8,8 @@
 #include "categorical/pac_categorical_rewriter.hpp"
 #include "aggregates/pac_aggregate.hpp"
 #include "pac_debug.hpp"
+#include "utils/pac_helpers.hpp"
+#include "duckdb/optimizer/column_binding_replacer.hpp"
 
 namespace duckdb {
 
@@ -27,6 +29,9 @@ static string TracePacAggregateFromBinding(const ColumnBinding &binding, Logical
 		}
 		auto &proj = source_op->Cast<LogicalProjection>();
 		if (binding.column_index < proj.expressions.size()) { // Recursively search this expression for PAC aggregates
+			if (IsAlreadyWrappedInPacNoised(proj.expressions[binding.column_index].get())) {
+				return ""; // PAC terminal (pac_select, pac_filter, pac_noised) — don't trace further
+			}
 			return FindPacAggregateInExpression(proj.expressions[binding.column_index].get(), plan_root);
 		}
 	} else if (source_op->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
@@ -190,10 +195,43 @@ static LogicalOperator *FindScalarWrapperForBinding(const ColumnBinding &binding
 
 // Recursively search the plan for categorical patterns (plan-aware version)
 // Now detects ANY filter expression containing a PAC aggregate, not just comparisons
+// outer_pac_hash: if an outer PAC aggregate was found above, this is the hash binding resolved to the current level
 void FindCategoricalPatternsInOperator(LogicalOperator *op, LogicalOperator *plan_root,
-                                       vector<CategoricalPatternInfo> &patterns, bool inside_aggregate) {
+                                       vector<CategoricalPatternInfo> &patterns, bool inside_aggregate,
+                                       ColumnBinding outer_pac_hash = ColumnBinding()) {
 	// Track if we're entering an aggregate
 	bool now_inside_aggregate = inside_aggregate || (op->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY);
+
+	// Track outer PAC hash for children: updated when we find a PAC aggregate or pass through a projection
+	ColumnBinding hash_for_children = outer_pac_hash;
+
+	// When entering a PAC aggregate, extract the hash binding (first child of first PAC aggregate)
+	if (op->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+		auto &agg = op->Cast<LogicalAggregate>();
+		for (auto &agg_expr : agg.expressions) {
+			if (agg_expr->type == ExpressionType::BOUND_AGGREGATE) {
+				auto &bound_agg = agg_expr->Cast<BoundAggregateExpression>();
+				if (IsPacAggregate(bound_agg.function.name) && !bound_agg.children.empty() &&
+				    bound_agg.children[0]->type == ExpressionType::BOUND_COLUMN_REF) {
+					hash_for_children = bound_agg.children[0]->Cast<BoundColumnRefExpression>().binding;
+					break;
+				}
+			}
+		}
+	}
+
+	// Resolve hash binding through projections (follow col_ref chains)
+	if (hash_for_children.table_index != DConstants::INVALID_INDEX &&
+	    op->type == LogicalOperatorType::LOGICAL_PROJECTION) {
+		auto &proj = op->Cast<LogicalProjection>();
+		if (hash_for_children.table_index == proj.table_index &&
+		    hash_for_children.column_index < proj.expressions.size()) {
+			auto &expr = proj.expressions[hash_for_children.column_index];
+			if (expr->type == ExpressionType::BOUND_COLUMN_REF) {
+				hash_for_children = expr->Cast<BoundColumnRefExpression>().binding;
+			}
+		}
+	}
 
 	// Track patterns count before checking this operator AND its children.
 	// Used at the end to strip scalar wrappers when any new patterns were found.
@@ -234,6 +272,8 @@ void FindCategoricalPatternsInOperator(LogicalOperator *op, LogicalOperator *pla
 				info.has_pac_binding = true;
 				info.aggregate_name = first_aggregate_name;
 				info.pac_bindings = std::move(pac_bindings);
+				info.outer_pac_hash = hash_for_children;
+				info.has_outer_pac_hash = (hash_for_children.table_index != DConstants::INVALID_INDEX);
 
 				// Check if this binding goes through a scalar subquery wrapper
 				info.scalar_wrapper_op = FindScalarWrapperForBinding(first_non_having_binding, plan_root);
@@ -265,6 +305,8 @@ void FindCategoricalPatternsInOperator(LogicalOperator *op, LogicalOperator *pla
 				info.parent_op = op;
 				info.expr_index = i;
 				info.aggregate_name = left_pac;
+				info.outer_pac_hash = hash_for_children;
+				info.has_outer_pac_hash = (hash_for_children.table_index != DConstants::INVALID_INDEX);
 				if (cond.left->type == ExpressionType::BOUND_COLUMN_REF) {
 					auto &col_ref = cond.left->Cast<BoundColumnRefExpression>();
 					info.scalar_wrapper_op = FindScalarWrapperForBinding(col_ref.binding, plan_root);
@@ -274,6 +316,8 @@ void FindCategoricalPatternsInOperator(LogicalOperator *op, LogicalOperator *pla
 				info.parent_op = op;
 				info.expr_index = i;
 				info.aggregate_name = right_pac;
+				info.outer_pac_hash = hash_for_children;
+				info.has_outer_pac_hash = (hash_for_children.table_index != DConstants::INVALID_INDEX);
 				if (cond.right->type == ExpressionType::BOUND_COLUMN_REF) {
 					auto &col_ref = cond.right->Cast<BoundColumnRefExpression>();
 					info.scalar_wrapper_op = FindScalarWrapperForBinding(col_ref.binding, plan_root);
@@ -333,7 +377,7 @@ void FindCategoricalPatternsInOperator(LogicalOperator *op, LogicalOperator *pla
 		}
 	}
 	for (auto &child : op->children) {
-		FindCategoricalPatternsInOperator(child.get(), plan_root, patterns, now_inside_aggregate);
+		FindCategoricalPatternsInOperator(child.get(), plan_root, patterns, now_inside_aggregate, hash_for_children);
 	}
 	// On the way back up: if patterns were found in this subtree, strip scalar wrappers in direct children.
 	if (patterns.size() > patterns_before_all) {
@@ -898,14 +942,16 @@ static Expression *StripCasts(Expression *expr) {
 	return expr;
 }
 
-/// Try to rewrite a filter comparison into pac_filter_<cmp>(scalar, counters).
-// Always returns the (possibly simplified) expression. If successful, the result is a
-// pac_filter_<cmp> call; otherwise it's a comparison with algebraically simplified operands
-// that the lambda path can still benefit from. Returns nullptr only if the expression is
-// not a comparison or doesn't have exactly one PAC binding (i.e., no work was possible).
+/// Try to rewrite a filter comparison into pac_filter_<cmp>(scalar, counters) or
+/// pac_select_<cmp>(hash, scalar, counters). Returns the (possibly simplified) expression.
+/// If successful, the result is a pac_{filter,select}_<cmp> call; otherwise a comparison
+/// with algebraically simplified operands for the lambda path. Returns nullptr if the
+/// expression is not a comparison or doesn't have exactly one PAC binding.
 static unique_ptr<Expression> TryRewriteFilterComparison(OptimizerExtensionInput &input,
                                                          const vector<PacBindingInfo> &pac_bindings, Expression *expr,
-                                                         LogicalOperator *plan_root) {
+                                                         LogicalOperator *plan_root,
+                                                         PacWrapKind wrap_kind = PacWrapKind::PAC_FILTER,
+                                                         ColumnBinding pac_hash = ColumnBinding()) {
 	if (pac_bindings.size() != 1 || expr->GetExpressionClass() != ExpressionClass::BOUND_COMPARISON) {
 		return nullptr; // Only works with a comparison against a single PAC binding
 	}
@@ -976,18 +1022,41 @@ static unique_ptr<Expression> TryRewriteFilterComparison(OptimizerExtensionInput
 	if (pac_name.empty()) {
 		return make_uniq<BoundComparisonExpression>(cmp_type, std::move(scalar_side), std::move(list_side));
 	}
-	// Build pac_filter_<cmp>(scalar_side, counters)
-	const char *func_name = GetPacFilterCmpName(cmp_type);
+	// Build pac_{filter,select}_<cmp>(scalar_side, counters) or pac_select_<cmp>(hash, scalar, counters)
+	const char *func_name =
+	    (wrap_kind == PacWrapKind::PAC_SELECT) ? GetPacSelectCmpName(cmp_type) : GetPacFilterCmpName(cmp_type);
 	if (!func_name) {
 		return make_uniq<BoundComparisonExpression>(cmp_type, std::move(scalar_side), std::move(list_side));
-	} // Cast scalar_side to PAC_FLOAT if needed
+	}
 	if (scalar_side->return_type != PacFloatLogicalType()) {
 		scalar_side = BoundCastExpression::AddDefaultCastToType(std::move(scalar_side), PacFloatLogicalType());
 	}
-	// Build counter list reference
 	auto counters_ref =
 	    make_uniq<BoundColumnRefExpression>("pac_var", LogicalType::LIST(PacFloatLogicalType()), col_ref.binding);
 
+	if (wrap_kind == PacWrapKind::PAC_SELECT) {
+		// pac_select_<cmp>(hash, scalar, counters) — 3 args, need manual binding
+		auto hash_ref = make_uniq<BoundColumnRefExpression>("pac_hash", LogicalType::UBIGINT, pac_hash);
+		vector<unique_ptr<Expression>> args;
+		args.push_back(std::move(hash_ref));
+		args.push_back(std::move(scalar_side));
+		args.push_back(std::move(counters_ref));
+		vector<LogicalType> arg_types;
+		for (auto &a : args) {
+			arg_types.push_back(a->return_type);
+		}
+		auto &catalog = Catalog::GetSystemCatalog(input.context);
+		auto &entry = catalog.GetEntry<ScalarFunctionCatalogEntry>(input.context, DEFAULT_SCHEMA, func_name);
+		ErrorData error;
+		FunctionBinder func_binder(input.context);
+		auto best = func_binder.BindFunction(func_name, entry.functions, arg_types, error);
+		if (best.IsValid()) {
+			auto func = entry.functions.GetFunctionByOffset(best.GetIndex());
+			auto bind_info = func.bind ? func.bind(input.context, func, args) : nullptr;
+			return make_uniq<BoundFunctionExpression>(func.return_type, func, std::move(args), std::move(bind_info));
+		}
+		return nullptr;
+	}
 	return input.optimizer.BindScalarFunction(func_name, std::move(scalar_side), std::move(counters_ref));
 }
 
@@ -995,27 +1064,30 @@ static unique_ptr<Expression> TryRewriteFilterComparison(OptimizerExtensionInput
 // pac_bindings: all PAC aggregate bindings in the expression
 // expr: the expression to transform (boolean for filter, numeric for projection)
 // wrap_kind: determines terminal function and type parameters
-// target_type: for PAC_NOISED, cast result to this type (ignored for PAC_FILTER)
+// target_type: for PAC_NOISED, cast result to this type (ignored for PAC_FILTER/PAC_SELECT)
+// pac_hash: for PAC_SELECT, the hash binding to pass to pac_select/pac_select_<cmp>
 static unique_ptr<Expression> RewriteExpressionWithCounters(OptimizerExtensionInput &input,
                                                             const vector<PacBindingInfo> &pac_bindings,
                                                             Expression *expr, LogicalOperator *plan_root,
                                                             PacWrapKind wrap_kind,
-                                                            const LogicalType &target_type = PacFloatLogicalType()) {
+                                                            const LogicalType &target_type = PacFloatLogicalType(),
+                                                            ColumnBinding pac_hash = ColumnBinding()) {
 	if (pac_bindings.empty()) {
 		return nullptr;
 	}
-	// Try optimized pac_filter_<cmp> for filter comparisons (single binding, simple comparison).
+	// Try optimized pac_{filter,select}_<cmp> for filter/select comparisons (single binding, simple comparison).
 	// TryRewriteFilterComparison always returns the (possibly simplified) expression when it can
-	// do any work. Check if the result is a pac_filter_<cmp> call (full optimization succeeded)
+	// do any work. Check if the result is a pac_{filter,select}_<cmp> call (full optimization succeeded)
 	// or a simplified comparison (partial — pass to lambda path which benefits from the rewriting).
 	unique_ptr<Expression> simplified_expr;
-	if (wrap_kind == PacWrapKind::PAC_FILTER) {
-		auto cmp_result = TryRewriteFilterComparison(input, pac_bindings, expr, plan_root);
+	if (wrap_kind == PacWrapKind::PAC_FILTER || wrap_kind == PacWrapKind::PAC_SELECT) {
+		auto cmp_result = TryRewriteFilterComparison(input, pac_bindings, expr, plan_root, wrap_kind, pac_hash);
 		if (cmp_result) {
 			if (cmp_result->GetExpressionClass() == ExpressionClass::BOUND_FUNCTION) {
 				auto &func = cmp_result->Cast<BoundFunctionExpression>();
-				if (func.function.name.rfind("pac_filter_", 0) == 0) {
-					return cmp_result; // Full optimization to pac_filter_<cmp>
+				if (func.function.name.rfind("pac_filter_", 0) == 0 ||
+				    func.function.name.rfind("pac_select_", 0) == 0) {
+					return cmp_result; // Full optimization to pac_{filter,select}_<cmp>
 				}
 			}
 			simplified_expr = std::move(cmp_result); // Partial simplification — use for the lambda path
@@ -1032,6 +1104,9 @@ static unique_ptr<Expression> RewriteExpressionWithCounters(OptimizerExtensionIn
 				noised = BoundCastExpression::AddDefaultCastToType(std::move(noised), target_type);
 			}
 			return noised;
+		} else if (wrap_kind == PacWrapKind::PAC_SELECT) {
+			auto hash_ref = make_uniq<BoundColumnRefExpression>("pac_hash", LogicalType::UBIGINT, pac_hash);
+			return input.optimizer.BindScalarFunction("pac_select", std::move(hash_ref), std::move(list_expr));
 		} else {
 			return input.optimizer.BindScalarFunction("pac_filter", std::move(list_expr));
 		}
@@ -1159,6 +1234,61 @@ static void InlineSavedExpressionsIntoExpr(unique_ptr<Expression> &expr,
 	    *expr, [&](unique_ptr<Expression> &child) { InlineSavedExpressionsIntoExpr(child, saved_exprs); });
 }
 
+// Insert a pass-through projection below filter_child_slot that replaces the hash column
+// with pac_select_expr. Returns the new hash binding in the projection's output.
+// Updates all bindings above via ColumnBindingReplacer.
+static ColumnBinding InsertPacSelectProjection(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
+                                               unique_ptr<LogicalOperator> &filter_child_slot,
+                                               const ColumnBinding &hash_binding,
+                                               unique_ptr<Expression> pac_select_expr) {
+	filter_child_slot->ResolveOperatorTypes();
+	auto old_bindings = filter_child_slot->GetColumnBindings();
+	idx_t num_cols = old_bindings.size();
+
+	idx_t proj_table_index = input.optimizer.binder.GenerateTableIndex();
+	vector<unique_ptr<Expression>> proj_expressions;
+
+	// Find which position the hash binding occupies
+	idx_t hash_position = num_cols;
+	for (idx_t i = 0; i < num_cols; i++) {
+		if (old_bindings[i] == hash_binding) {
+			hash_position = i;
+			break;
+		}
+	}
+	for (idx_t i = 0; i < num_cols; i++) {
+		if (i == hash_position) {
+			proj_expressions.push_back(nullptr); // placeholder — filled below
+		} else {
+			proj_expressions.push_back(
+			    make_uniq<BoundColumnRefExpression>(filter_child_slot->types[i], old_bindings[i]));
+		}
+	}
+	if (hash_position < num_cols) {
+		proj_expressions[hash_position] = std::move(pac_select_expr);
+	} else {
+		// Hash binding was not in direct output — append it
+		proj_expressions.push_back(std::move(pac_select_expr));
+	}
+
+	auto projection = make_uniq<LogicalProjection>(proj_table_index, std::move(proj_expressions));
+	projection->children.push_back(std::move(filter_child_slot));
+	projection->ResolveOperatorTypes();
+
+	LogicalOperator *proj_ptr = projection.get();
+	filter_child_slot = std::move(projection);
+
+	// Remap old bindings → new projection bindings
+	ColumnBindingReplacer replacer;
+	for (idx_t i = 0; i < num_cols; i++) {
+		replacer.replacement_bindings.emplace_back(old_bindings[i], ColumnBinding(proj_table_index, i));
+	}
+	replacer.stop_operator = proj_ptr;
+	replacer.VisitOperator(*plan);
+
+	return ColumnBinding(proj_table_index, hash_position);
+}
+
 // Single bottom-up rewrite pass.
 // Processes children first, then current operator. Handles:
 // - AGGREGATE: convert pac_sum → pac_sum_counters, then aggregate-over-counters → _list
@@ -1262,10 +1392,32 @@ static void RewriteBottomUp(unique_ptr<LogicalOperator> &op_ptr, OptimizerExtens
 				if (pac_bindings.empty()) {
 					continue;
 				}
+				// Determine wrap kind: PAC_SELECT if outer pac aggregate exists and setting enabled
+				PacWrapKind wrap_kind = PacWrapKind::PAC_FILTER;
+				ColumnBinding pattern_hash;
+				for (auto &p : patterns) {
+					if (p.parent_op == op && p.has_outer_pac_hash) {
+						pattern_hash = p.outer_pac_hash;
+						if (GetBooleanSetting(input.context, "pac_select", true)) {
+							wrap_kind = PacWrapKind::PAC_SELECT;
+						}
+						break;
+					}
+				}
 				auto result = RewriteExpressionWithCounters(input, pac_bindings, filter_expr.get(), plan_root,
-				                                            PacWrapKind::PAC_FILTER);
+				                                            wrap_kind, PacFloatLogicalType(), pattern_hash);
 				if (result) {
-					filter.expressions[expr_idx] = std::move(result);
+					if (wrap_kind == PacWrapKind::PAC_SELECT) {
+						// Insert projection below filter replacing hash with pac_select result
+						auto new_hash =
+						    InsertPacSelectProjection(input, plan, op->children[0], pattern_hash, std::move(result));
+						// Replace filter condition with pac_filter(new_hash) for majority-vote decision
+						filter.expressions[expr_idx] = input.optimizer.BindScalarFunction(
+						    "pac_filter",
+						    make_uniq<BoundColumnRefExpression>("pac_hash", LogicalType::UBIGINT, new_hash));
+					} else {
+						filter.expressions[expr_idx] = std::move(result);
+					}
 				}
 			}
 		}
@@ -1283,6 +1435,18 @@ static void RewriteBottomUp(unique_ptr<LogicalOperator> &op_ptr, OptimizerExtens
 		if (it == pattern_lookup.end()) {
 			return;
 		}
+		// Determine wrap kind for join patterns (same logic as FILTER above)
+		PacWrapKind join_wrap_kind = PacWrapKind::PAC_FILTER;
+		ColumnBinding join_pattern_hash;
+		for (auto &p : patterns) {
+			if (p.parent_op == op && p.has_outer_pac_hash) {
+				join_pattern_hash = p.outer_pac_hash;
+				if (GetBooleanSetting(input.context, "pac_select", true)) {
+					join_wrap_kind = PacWrapKind::PAC_SELECT;
+				}
+				break;
+			}
+		}
 		auto &join = op->Cast<LogicalComparisonJoin>();
 		for (auto expr_idx : it->second) {
 			if (expr_idx >= join.conditions.size()) {
@@ -1296,73 +1460,51 @@ static void RewriteBottomUp(unique_ptr<LogicalOperator> &op_ptr, OptimizerExtens
 			if (!left_is_list && !right_is_list) {
 				continue;
 			}
-			if (left_is_list && right_is_list) { // Both sides are lists: CROSS_PRODUCT + FILTER with list_zip
-				// Combine all PAC bindings, deduplicating by hash
-				vector<PacBindingInfo> all_bindings;
-				unordered_set<uint64_t> seen_hashes;
-				for (auto &b : left_bindings) {
-					uint64_t h = HashBinding(b.binding);
-					if (seen_hashes.insert(h).second) {
-						all_bindings.push_back(b);
-					}
+			// Collect PAC bindings (deduplicated)
+			vector<PacBindingInfo> all_bindings;
+			unordered_set<uint64_t> seen_hashes;
+			for (auto &b : left_bindings) {
+				uint64_t h = HashBinding(b.binding);
+				if (seen_hashes.insert(h).second) {
+					all_bindings.push_back(b);
 				}
-				for (auto &b : right_bindings) {
-					uint64_t h = HashBinding(b.binding);
-					if (seen_hashes.insert(h).second) {
-						all_bindings.push_back(b);
-					}
+			}
+			for (auto &b : right_bindings) {
+				uint64_t h = HashBinding(b.binding);
+				if (seen_hashes.insert(h).second) {
+					all_bindings.push_back(b);
 				}
-				for (idx_t j = 0; j < all_bindings.size(); j++) {
-					all_bindings[j].index = j;
-				}
-				auto comparison = // Build comparison expression from the join condition
-				    make_uniq<BoundComparisonExpression>(cond.comparison, cond.left->Copy(), cond.right->Copy());
-				auto pac_filter_expr = RewriteExpressionWithCounters(input, all_bindings, comparison.get(), plan_root,
-				                                                     PacWrapKind::PAC_FILTER);
-				if (pac_filter_expr) {
-					auto cross_product = // Convert COMPARISON_JOIN to CROSS_PRODUCT + FILTER
-					    LogicalCrossProduct::Create(std::move(join.children[0]), std::move(join.children[1]));
-					auto filter_op = make_uniq<LogicalFilter>();
-					filter_op->expressions.push_back(std::move(pac_filter_expr));
-					filter_op->children.push_back(std::move(cross_product));
+			}
+			for (idx_t j = 0; j < all_bindings.size(); j++) {
+				all_bindings[j].index = j;
+			}
+			auto comparison =
+			    make_uniq<BoundComparisonExpression>(cond.comparison, cond.left->Copy(), cond.right->Copy());
+			auto pac_expr = RewriteExpressionWithCounters(input, all_bindings, comparison.get(), plan_root,
+			                                              join_wrap_kind, PacFloatLogicalType(), join_pattern_hash);
+			if (pac_expr) {
+				auto cross_product =
+				    LogicalCrossProduct::Create(std::move(join.children[0]), std::move(join.children[1]));
+				auto filter_op = make_uniq<LogicalFilter>();
 
-					// Invalidate all patterns that pointed to the old join (now destroyed)
-					for (auto &p : patterns) {
-						if (p.parent_op == op) {
-							p.parent_op = nullptr;
-						}
-					}
-					op_ptr = std::move(filter_op);
-					break; // Replaced operator, can't process more conditions
+				if (join_wrap_kind == PacWrapKind::PAC_SELECT) {
+					// Insert projection below filter replacing hash with pac_select result
+					auto new_hash =
+					    InsertPacSelectProjection(input, plan, cross_product, join_pattern_hash, std::move(pac_expr));
+					filter_op->expressions.push_back(input.optimizer.BindScalarFunction(
+					    "pac_filter", make_uniq<BoundColumnRefExpression>("pac_hash", LogicalType::UBIGINT, new_hash)));
+				} else {
+					filter_op->expressions.push_back(std::move(pac_expr));
 				}
-			} else {
-				// One side is list: CROSS_PRODUCT + FILTER with pac_filter.
-				// We must use CROSS_PRODUCT + FILTER (not cond.left/right rewrite) because the
-				// pac_filter expression references bindings from BOTH join children, and DuckDB's
-				// ColumnBindingResolver resolves cond.left against left bindings only.
-				auto &pac_bindings = left_is_list ? left_bindings : right_bindings;
-				if (pac_bindings.empty()) {
-					continue;
-				}
-				auto comparison =
-				    make_uniq<BoundComparisonExpression>(cond.comparison, cond.left->Copy(), cond.right->Copy());
-				auto pac_filter_expr = RewriteExpressionWithCounters(input, pac_bindings, comparison.get(), plan_root,
-				                                                     PacWrapKind::PAC_FILTER);
-				if (pac_filter_expr) {
-					auto cross_product =
-					    LogicalCrossProduct::Create(std::move(join.children[0]), std::move(join.children[1]));
-					auto filter_op = make_uniq<LogicalFilter>();
-					filter_op->expressions.push_back(std::move(pac_filter_expr));
-					filter_op->children.push_back(std::move(cross_product));
+				filter_op->children.push_back(std::move(cross_product));
 
-					for (auto &p : patterns) {
-						if (p.parent_op == op) {
-							p.parent_op = nullptr;
-						}
+				for (auto &p : patterns) {
+					if (p.parent_op == op) {
+						p.parent_op = nullptr;
 					}
-					op_ptr = std::move(filter_op);
-					break;
 				}
+				op_ptr = std::move(filter_op);
+				break;
 			}
 		}
 	}

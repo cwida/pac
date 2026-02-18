@@ -196,6 +196,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// Controls probabilistic vs deterministic mode for noise/NULL decisions
 	db.config.AddExtensionOption("pac_categorical", "enable categorical query rewrites", LogicalType::BOOLEAN,
 	                             Value::BOOLEAN(true));
+	db.config.AddExtensionOption("pac_select", "use pac_select for categorical filters below pac aggregates",
+	                             LogicalType::BOOLEAN, Value::BOOLEAN(true));
 	db.config.AddExtensionOption("pac_mi", "mutual information parameter for PAC aggregates", LogicalType::DOUBLE,
 	                             Value::DOUBLE(1.0 / 128));
 	// Add option to set the correction factor for PAC aggregates (default 1.0)

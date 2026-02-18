@@ -89,6 +89,10 @@ struct CategoricalPatternInfo {
 	LogicalOperator *scalar_wrapper_op;
 	// Pre-collected PAC bindings from detection
 	vector<PacBindingInfo> pac_bindings;
+	// Hash binding from outer PAC aggregate (resolved to filter level)
+	ColumnBinding outer_pac_hash;
+	// True if an outer PAC aggregate was found above this pattern
+	bool has_outer_pac_hash = false;
 
 	CategoricalPatternInfo()
 	    : parent_op(nullptr), expr_index(0), has_pac_binding(false), original_return_type(LogicalType::DOUBLE),
@@ -99,7 +103,8 @@ struct CategoricalPatternInfo {
 // The kind of wrapping to apply after BuildCounterListTransform
 enum class PacWrapKind {
 	PAC_NOISED, // Projection: list_transform -> pac_noised -> optional cast
-	PAC_FILTER  // Filter/Join: list_transform -> pac_filter
+	PAC_FILTER, // Filter/Join: list_transform -> pac_filter
+	PAC_SELECT  // Filter/Join with outer PAC aggregate: pac_select_<cmp> or pac_select(hash, list<bool>)
 };
 
 // Detect and rewrite categorical query patterns to use counters and mask-based selection.
@@ -205,8 +210,10 @@ static inline bool IsAlreadyWrappedInPacNoised(Expression *expr) {
 		auto &func = expr->Cast<BoundFunctionExpression>();
 		// Check for all categorical rewrite terminal functions
 		if (func.function.name == "pac_noised" || func.function.name == "pac_filter" ||
-		    func.function.name == "pac_coalesce" || func.function.name == "list_transform" ||
-		    func.function.name == "list_zip" || StringUtil::StartsWith(func.function.name, "pac_filter_")) {
+		    func.function.name == "pac_select" || func.function.name == "pac_coalesce" ||
+		    func.function.name == "list_transform" || func.function.name == "list_zip" ||
+		    StringUtil::StartsWith(func.function.name, "pac_filter_") ||
+		    StringUtil::StartsWith(func.function.name, "pac_select_")) {
 			return true;
 		}
 	}
@@ -381,6 +388,26 @@ static inline const char *GetPacFilterCmpName(ExpressionType cmp_type) {
 		return "pac_filter_eq";
 	case ExpressionType::COMPARE_NOTEQUAL:
 		return "pac_filter_neq";
+	default:
+		return nullptr;
+	}
+}
+
+// Map ExpressionType comparison to pac_select_<cmp> function name
+static inline const char *GetPacSelectCmpName(ExpressionType cmp_type) {
+	switch (cmp_type) {
+	case ExpressionType::COMPARE_GREATERTHAN:
+		return "pac_select_gt";
+	case ExpressionType::COMPARE_GREATERTHANOREQUALTO:
+		return "pac_select_gte";
+	case ExpressionType::COMPARE_LESSTHAN:
+		return "pac_select_lt";
+	case ExpressionType::COMPARE_LESSTHANOREQUALTO:
+		return "pac_select_lte";
+	case ExpressionType::COMPARE_EQUAL:
+		return "pac_select_eq";
+	case ExpressionType::COMPARE_NOTEQUAL:
+		return "pac_select_neq";
 	default:
 		return nullptr;
 	}
