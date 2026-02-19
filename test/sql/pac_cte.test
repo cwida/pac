@@ -133,18 +133,9 @@ statement ok
 ALTER TABLE customer SET PU;
 
 # ============================================================
-# Diagnostic: EXPLAIN the Q15-style CTE with detailed profiling
+# Diagnostic: EXPLAIN the Q15-style CTE to compare plans across platforms
 # ============================================================
-statement ok
-SET explain_output = 'all';
-
-statement ok
-SET profiling_mode = 'detailed';
-
-statement ok
-PRAGMA enable_profiling = 'query_tree';
-
-statement ok
+query II nosort
 EXPLAIN
 WITH revenue AS (
     SELECT
@@ -174,12 +165,8 @@ WHERE
     )
 ORDER BY
     s_suppkey;
-
-statement ok
-PRAGMA disable_profiling;
-
-statement ok
-SET explain_output = 'physical_only';
+----
+physical_plan	<REGEX>:.*pac_sum.*
 
 # ============================================================
 # Test 1: TPC-H Q15-style CTE with aggregate in subquery on CTE
