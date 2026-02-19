@@ -6,6 +6,10 @@
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/transaction/meta_transaction.hpp"
 #include <type_traits>
+#include <mutex>
+#include <memory>
+#include <unordered_map>
+#include <cmath>
 
 // Cross-platform restrict keyword: MSVC uses __restrict, GCC/Clang use __restrict__
 #if defined(_MSC_VER)
@@ -84,6 +88,28 @@ static inline LogicalType PacFloatLogicalType() {
 // Forward-declare local state type (defined in pac_aggregate.cpp)
 struct PacAggregateLocalState;
 
+// ============================================================================
+// PacPState: per-query Bayesian posterior tracker for persistent secret composition
+// ============================================================================
+// Tracks a probability distribution p over the 64 worlds (bit positions).
+// Shared across all aggregates in the same query via shared_ptr, so that
+// noise calibration correctly composes information leaked by all cells.
+// See: get_noise_var() and update_p() from the collaborator's reference.
+struct PacPState {
+	std::mutex mtx;
+	double p[64];
+
+	PacPState() {
+		for (int i = 0; i < 64; i++) {
+			p[i] = 1.0 / 64.0;
+		}
+	}
+};
+
+// Global map for cross-aggregate PacPState sharing within a query.
+// Keyed by query_hash. Uses weak_ptr so lifetime is tied to PacBindData instances.
+std::shared_ptr<PacPState> GetOrCreatePState(uint64_t query_hash);
+
 // Compute the PAC noise variance (delta) from per-sample values and mutual information budget mi.
 // Throws InvalidInputException if mi < 0.
 double ComputeDeltaFromValues(const vector<PAC_FLOAT> &values, double mi);
@@ -102,9 +128,11 @@ void RegisterPacHashFunction(ExtensionLoader &loader);
 // is_null: bitmask where bit i=1 means counter i should be excluded (compacted out)
 // mi: mutual information parameter for noise calculation
 // correction: factor to multiply values by after compacting NULLs but before adding noise
+// pstate: optional shared p-tracking state for persistent secret composition (may be nullptr)
 PAC_FLOAT PacNoisySampleFrom64Counters(const PAC_FLOAT counters[64], double mi, double correction, std::mt19937_64 &gen,
                                        bool use_deterministic_noise = true, uint64_t is_null = 0,
-                                       uint64_t counter_selector = 0);
+                                       uint64_t counter_selector = 0,
+                                       std::shared_ptr<PacPState> pstate = nullptr);
 
 // PacNoisedSelect: returns true with probability proportional to popcount(key_hash)/64
 // Uses rnd&63 as threshold, returns true if bitcount > threshold
@@ -159,6 +187,11 @@ struct PacBindData : public FunctionData {
 	bool use_deterministic_noise; // if true, use platform-agnostic Box-Muller noise generation
 	bool hash_repair;             // if true, pac_hash() repairs hash to exactly 32 bits set
 
+	// Persistent secret p-tracking: shared across all aggregates in the same query (same query_hash).
+	// When active (mi > 0 and pac_ptracking enabled), noise calibration uses p-weighted variance
+	// and updates p after each noisy release for correct privacy composition.
+	std::shared_ptr<PacPState> pstate;
+
 	// Runtime diversity tracking (accumulated across groups during finalize, not bind-time config)
 	mutable uint64_t total_update_count;  // sum of update_counts across all finalized groups
 	mutable uint64_t suspicious_count;    // groups with [29..35] zero bits AND all-same-value
@@ -180,10 +213,22 @@ struct PacBindData : public FunctionData {
 			seed ^= PAC_MAGIC_HASH * static_cast<uint64_t>(ctx.ActiveTransaction().GetActiveQuery());
 		}
 		query_hash = (seed * PAC_MAGIC_HASH) ^ PAC_MAGIC_HASH;
+
+		// Initialize p-tracking if mi > 0 and pac_ptracking is enabled
+		if (mi > 0.0) {
+			Value pt_val;
+			bool ptracking_enabled = true; // default: enabled
+			if (ctx.TryGetCurrentSetting("pac_ptracking", pt_val) && !pt_val.IsNull()) {
+				ptracking_enabled = pt_val.GetValue<bool>();
+			}
+			if (ptracking_enabled) {
+				pstate = GetOrCreatePState(query_hash);
+			}
+		}
 	}
 
 	unique_ptr<FunctionData> Copy() const override {
-		auto copy = make_uniq<PacBindData>(*this); // uses implicit copy ctor (all fields are POD)
+		auto copy = make_uniq<PacBindData>(*this); // copies shared_ptr (shares pstate)
 		copy->total_update_count = 0;              // reset runtime diversity counters
 		copy->suspicious_count = 0;
 		copy->nonsuspicious_count = 0;

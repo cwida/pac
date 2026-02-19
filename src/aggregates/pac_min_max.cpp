@@ -95,6 +95,7 @@ static void PacMinMaxFinalize(Vector &states, AggregateInputData &input, Vector 
 	double mi = input.bind_data ? input.bind_data->Cast<PacBindData>().mi : 0.0;
 	double correction = input.bind_data ? input.bind_data->Cast<PacBindData>().correction : 1.0;
 	uint64_t query_hash = input.bind_data ? input.bind_data->Cast<PacBindData>().query_hash : 0;
+	auto pstate = input.bind_data ? input.bind_data->Cast<PacBindData>().pstate : nullptr;
 
 	for (idx_t i = 0; i < count; i++) {
 #ifndef PAC_NOBUFFERING
@@ -119,7 +120,8 @@ static void PacMinMaxFinalize(Vector &states, AggregateInputData &input, Vector 
 		CheckPacSampleDiversity(key_hash, buf, s ? s->update_count : 0, IS_MAX ? "pac_max" : "pac_min",
 		                        input.bind_data->Cast<PacBindData>());
 		// Pass mi for noise, 1.0 as correction (no value scaling for min/max)
-		data[offset + i] = FromDouble<T>(PacNoisySampleFrom64Counters(buf, mi, 1.0, gen, true, ~key_hash, query_hash));
+		data[offset + i] =
+		    FromDouble<T>(PacNoisySampleFrom64Counters(buf, mi, 1.0, gen, true, ~key_hash, query_hash, pstate));
 	}
 }
 

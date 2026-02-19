@@ -212,6 +212,12 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// Add option to control whether pac_hash() repairs hashes to exactly 32 bits set
 	db.config.AddExtensionOption("pac_hash_repair", "pac_hash() repairs hash to exactly 32 bits set",
 	                             LogicalType::BOOLEAN, Value::BOOLEAN(true));
+	// Add option to enable/disable persistent secret p-tracking for correct query-level privacy composition.
+	// When enabled (default), noise calibration tracks a Bayesian posterior over worlds across all cells
+	// in a query, providing query-level MIA protection. When disabled, each cell uses uniform variance
+	// independently (cell-level MIA only). Only active when pac_mi > 0.
+	db.config.AddExtensionOption("pac_ptracking", "enable persistent secret p-tracking for query-level MIA",
+	                             LogicalType::BOOLEAN, Value::BOOLEAN(true));
 
 	// Register pac_aggregate function(s)
 	RegisterPacAggregateFunctions(loader);

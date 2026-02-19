@@ -43,6 +43,7 @@ struct PacCategoricalBindData : public FunctionData {
 	double correction;
 	uint64_t seed;
 	uint64_t query_hash; // derived from seed: used as counter selector for NoisySample
+	std::shared_ptr<PacPState> pstate; // p-tracking state shared across query (may be nullptr)
 
 	// Primary constructor - reads seed from pac_seed setting, or uses default 42 if not set.
 	// When mi > 0, seed is randomized per query via the query number.
@@ -58,10 +59,21 @@ struct PacCategoricalBindData : public FunctionData {
 			seed ^= PAC_MAGIC_HASH * static_cast<uint64_t>(ctx.ActiveTransaction().GetActiveQuery());
 		}
 		query_hash = (seed * PAC_MAGIC_HASH) ^ PAC_MAGIC_HASH;
+		// Initialize p-tracking if mi > 0 and pac_ptracking is enabled
+		if (mi > 0.0) {
+			Value pt_val;
+			bool ptracking_enabled = true;
+			if (ctx.TryGetCurrentSetting("pac_ptracking", pt_val) && !pt_val.IsNull()) {
+				ptracking_enabled = pt_val.GetValue<bool>();
+			}
+			if (ptracking_enabled) {
+				pstate = GetOrCreatePState(query_hash);
+			}
+		}
 	}
 
 	unique_ptr<FunctionData> Copy() const override {
-		auto copy = make_uniq<PacCategoricalBindData>(*this); // uses implicit copy ctor (all fields are POD)
+		auto copy = make_uniq<PacCategoricalBindData>(*this); // copies shared_ptr (shares pstate)
 		return copy;
 	}
 
@@ -574,6 +586,7 @@ static void PacNoisedFunction(DataChunk &args, ExpressionState &state, Vector &r
 	double correction = 1.0;
 	uint64_t seed = 0;
 	uint64_t query_hash = 0;
+	std::shared_ptr<PacPState> pstate;
 	auto &function = state.expr.Cast<BoundFunctionExpression>();
 	if (function.bind_info) {
 		auto &bind_data = function.bind_info->Cast<PacCategoricalBindData>();
@@ -581,6 +594,7 @@ static void PacNoisedFunction(DataChunk &args, ExpressionState &state, Vector &r
 		correction = bind_data.correction;
 		seed = bind_data.seed;
 		query_hash = bind_data.query_hash;
+		pstate = bind_data.pstate;
 	}
 
 	std::mt19937_64 gen(seed);
@@ -642,7 +656,8 @@ static void PacNoisedFunction(DataChunk &args, ExpressionState &state, Vector &r
 
 		// Get noised sample from counters
 		// Note: No 2x multiplier here because _counters functions already apply it
-		PAC_FLOAT noised = PacNoisySampleFrom64Counters(counters, mi, correction, gen, true, ~key_hash, query_hash);
+		PAC_FLOAT noised =
+		    PacNoisySampleFrom64Counters(counters, mi, correction, gen, true, ~key_hash, query_hash, pstate);
 		result_data[i] = noised;
 	}
 }
