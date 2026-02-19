@@ -169,7 +169,7 @@ WHERE
 ORDER BY
     s_suppkey;
 ----
-3	Supplier#003	5387.0592	NULL
+3	Supplier#003	5688.5248	NULL
 
 # ============================================================
 # Test 2: Q13 pattern rewritten as explicit CTE
@@ -214,7 +214,7 @@ WITH cust AS (
 )
 SELECT COUNT(*) FROM cust;
 ----
-12
+8
 
 # ============================================================
 # Test 4: CTE with join exposing PU columns, outer aggregate
@@ -227,7 +227,7 @@ WITH customer_orders AS (
 )
 SELECT COUNT(*) FROM customer_orders;
 ----
-20
+12
 
 # ============================================================
 # Test 5: CTE with FK chain, aggregate on CTE results
@@ -242,7 +242,7 @@ WITH order_amounts AS (
 )
 SELECT SUM(l_extendedprice * (1 - l_discount)) FROM order_amounts;
 ----
-40173.5680
+25506.6112
 
 # ============================================================
 # Test 6: Multiple CTEs, only one references PU table
@@ -261,7 +261,7 @@ SELECT
     (SELECT COUNT(*) FROM supplier_revenue) AS supplier_count,
     (SELECT COUNT(*) FROM customer_orders) AS order_count;
 ----
-4	20
+4	12
 
 # ============================================================
 # Test 7: CTE referenced multiple times
@@ -294,7 +294,7 @@ cust_nation AS (
 )
 SELECT COUNT(*) FROM cust_nation;
 ----
-12
+8
 
 # Cleanup
 statement ok

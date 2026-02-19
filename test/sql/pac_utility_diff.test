@@ -58,9 +58,9 @@ SET pac_diffcols = '1'
 query II
 SELECT grp, SUM(val) AS total_val FROM diff_data GROUP BY grp ORDER BY grp
 ----
-1	0
-2	0
-3	0
+1	12
+2	12
+3	12
 
 statement ok
 SET pac_diffcols = NULL
@@ -75,7 +75,7 @@ SET pac_diffcols = '0'
 query I
 SELECT SUM(val) AS total_val FROM diff_data
 ----
-0
+12
 
 statement ok
 SET pac_diffcols = NULL
@@ -90,9 +90,9 @@ SET pac_diffcols = '1:/tmp/test_pac_utility.csv'
 query II
 SELECT grp, SUM(val) AS total_val FROM diff_data GROUP BY grp ORDER BY grp
 ----
-1	0
-2	0
-3	0
+1	12
+2	12
+3	12
 
 statement ok
 SET pac_diffcols = NULL

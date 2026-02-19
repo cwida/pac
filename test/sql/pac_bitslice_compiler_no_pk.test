@@ -37,7 +37,7 @@ ALTER TABLE bitslice_a SET PU;
 query I
 SELECT SUM(val) FROM bitslice_a
 ----
-84
+100
 
 query I
 SELECT COUNT(val) AS c FROM bitslice_a
@@ -49,7 +49,7 @@ query I
 SELECT SUM(a.val)
 FROM bitslice_a a JOIN bitslice_b b ON a.grp = b.grp
 ----
-420
+500
 
 # COUNT with JOIN + GROUP BY
 query II
@@ -59,7 +59,7 @@ GROUP BY b.other
 ORDER BY b.other
 LIMIT 1
 ----
-0	42
+0	38
 
 # ========== LEFT JOIN TEST CASES ==========
 
@@ -72,7 +72,7 @@ GROUP BY b.other
 ORDER BY b.other
 LIMIT 1
 ----
-0	42
+0	38
 
 # Test LEFT JOIN with NULL handling (no PK)
 statement ok
@@ -104,12 +104,12 @@ ALTER TABLE bitslice_with_rowid SET PU;
 query I
 SELECT SUM(val) FROM bitslice_with_rowid
 ----
-44
+40
 
 query I
 SELECT COUNT(rowid) FROM bitslice_with_rowid
 ----
-14
+10
 
 # Test RIGHT JOIN with no-PK tables, aggregating with filtering condition
 query III
@@ -120,7 +120,7 @@ GROUP BY b.other
 ORDER BY b.other
 LIMIT 1
 ----
-0	10	22
+0	16	58
 
 # Cleanup
 statement ok

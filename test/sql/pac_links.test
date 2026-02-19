@@ -109,9 +109,9 @@ ALTER PU TABLE shipments ADD PAC_LINK (item_id) REFERENCES order_items(id);
 query II
 SELECT grp, COUNT(*) FROM orders GROUP BY grp ORDER BY grp;
 ----
-0	18
-1	16
-2	16
+0	10
+1	8
+2	12
 
 # ==============================================================================
 # Test 2: Aggregation on grandchild table (2-level PAC_LINK chain)
@@ -141,7 +141,7 @@ query IIIII
 SELECT grp, COUNT(*), SUM(amount), MIN(amount), MAX(amount)
 FROM orders GROUP BY grp ORDER BY grp LIMIT 1;
 ----
-0	18	216	0	24
+0	10	96	0	18
 
 # ==============================================================================
 # Test 5: Explicit joins through PAC_LINK chain
@@ -153,9 +153,9 @@ FROM orders o
 INNER JOIN order_items oi ON oi.order_id = o.id
 GROUP BY o.grp ORDER BY o.grp;
 ----
-0	1764
-1	1536
-2	1600
+0	884
+1	816
+2	1200
 
 # ==============================================================================
 # Test 6: Full chain join (users -> orders -> order_items -> shipments)
@@ -185,7 +185,7 @@ GROUP BY grp
 ORDER BY grp
 LIMIT 1;
 ----
-0	840
+0	480
 
 # ==============================================================================
 # Test 8: Complex - Multiple correlated subqueries with deep PAC_LINK chains
@@ -244,8 +244,8 @@ GROUP BY oi.grp
 ORDER BY oi.grp
 LIMIT 2;
 ----
-0	38	2040	201.05
-1	38	2140	208.95
+0	22	1160	114.74
+1	22	1260	122.63
 
 # ==============================================================================
 # Test 11: Chain Break - Query middle table with aggregates from both ends
@@ -262,9 +262,9 @@ WHERE o.user_id IN (SELECT id FROM users WHERE id > 1)
 GROUP BY o.grp
 ORDER BY o.grp;
 ----
-0	10	80
-1	10	80
-2	10	80
+0	6	48
+1	6	48
+2	8	64
 
 # ==============================================================================
 # Test 12: Multiple Privacy Units - Users table as PU, protected column access
@@ -278,9 +278,9 @@ WHERE u.id > 0
 GROUP BY o.grp
 ORDER BY o.grp;
 ----
-0	14
-1	14
-2	12
+0	6
+1	6
+2	8
 
 # ==============================================================================
 # Test 13: Complex nested aggregation - Aggregate of aggregate through PAC LINKs
@@ -328,8 +328,8 @@ GROUP BY s.grp
 ORDER BY s.grp
 LIMIT 2;
 ----
-0	0	190
-1	1	196
+0	0	195
+1	11	191
 
 # ==============================================================================
 # Test 15: Multiple aggregates with HAVING clause through PAC LINK chain
@@ -346,7 +346,7 @@ HAVING SUM(o.amount) > 1
 ORDER BY o.grp
 LIMIT 1;
 ----
-0	18	216
+0	10	96
 
 # ==============================================================================
 # Test 17: Stress test - Multiple levels with multiple aggregates and filters
@@ -369,7 +369,7 @@ HAVING SUM(oi.quantity) > 50
 ORDER BY oi.grp
 LIMIT 1;
 ----
-0	18	12
+0	12	12
 
 # ==============================================================================
 # Cleanup

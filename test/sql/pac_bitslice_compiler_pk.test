@@ -57,14 +57,14 @@ ALTER TABLE bitslice_pk_single SET PU;
 query I
 SELECT SUM(val) FROM bitslice_pk_single
 ----
-84
+100
 
 # JOIN aggregation (no GROUP BY)
 query I
 SELECT SUM(a.val)
 FROM bitslice_pk_single a JOIN bitslice_pk_many b ON a.grp = b.grp
 ----
-420
+500
 
 # ========== LEFT JOIN TEST CASES ==========
 
@@ -88,9 +88,9 @@ GROUP BY b.val
 ORDER BY b.val
 LIMIT 3
 ----
-3	36	12
-4	126	24
-8	24	8
+3	132	24
+4	78	12
+8	88	16
 
 # Test RIGHT JOIN with composite PK table on right, aggregating with condition
 query III

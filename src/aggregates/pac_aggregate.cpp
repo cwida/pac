@@ -464,14 +464,35 @@ static uint64_t hash32_32(uint64_t num) {
 	return 0xAAAAAAAAAAAAAAAAULL; // 1010...10 pattern: exactly 32 bits set
 }
 
-static void PacHashFunction(DataChunk &args, ExpressionState &, Vector &result) {
+static unique_ptr<FunctionData> PacHashBind(ClientContext &ctx, ScalarFunction &, vector<unique_ptr<Expression>> &) {
+	double mi = GetPacMiFromSetting(ctx);
+	bool hash_repair = true;
+	Value hr_val;
+	if (ctx.TryGetCurrentSetting("pac_hash_repair", hr_val) && !hr_val.IsNull()) {
+		hash_repair = hr_val.GetValue<bool>();
+	}
+	return make_uniq<PacBindData>(ctx, mi, 1.0, 1.0, hash_repair);
+}
+
+static void PacHashFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &input = args.data[0];
 	auto count = args.size();
-	UnaryExecutor::Execute<uint64_t, uint64_t>(input, result, count, [](uint64_t val) { return hash32_32(val); });
+	auto &function = state.expr.Cast<BoundFunctionExpression>();
+	uint64_t query_hash = 0;
+	bool hash_repair = true;
+	if (function.bind_info) {
+		auto &bind_data = function.bind_info->Cast<PacBindData>();
+		query_hash = bind_data.query_hash;
+		hash_repair = bind_data.hash_repair;
+	}
+	UnaryExecutor::Execute<uint64_t, uint64_t>(input, result, count, [query_hash, hash_repair](uint64_t val) {
+		uint64_t xored = val ^ query_hash;
+		return hash_repair ? hash32_32(xored) : xored;
+	});
 }
 
 void RegisterPacHashFunction(ExtensionLoader &loader) {
-	ScalarFunction pac_hash("pac_hash", {LogicalType::UBIGINT}, LogicalType::UBIGINT, PacHashFunction);
+	ScalarFunction pac_hash("pac_hash", {LogicalType::UBIGINT}, LogicalType::UBIGINT, PacHashFunction, PacHashBind);
 	loader.RegisterFunction(pac_hash);
 }
 

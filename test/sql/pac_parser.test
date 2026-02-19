@@ -720,7 +720,7 @@ PAC rewrite: protected column 'set_pu_test.id' can only be accessed inside aggre
 query I
 SELECT SUM(value) FROM set_pu_test;
 ----
-600
+400
 
 # Test 50: ALTER TABLE UNSET PU removes privacy unit status
 statement ok

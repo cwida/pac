@@ -35,19 +35,19 @@ ALTER TABLE t1 SET PU;
 query I
 SELECT SUM(b) FROM t1;
 ----
-200
+160
 
 # PAC-compatible query: COUNT
 query I
 SELECT COUNT(*) FROM t1;
 ----
-8
+6
 
 # PAC-compatible query: AVG
 query I
 SELECT AVG(b) FROM t1;
 ----
-50.0
+40.0
 
 # Not PAC-compatible: GROUP BY on PU column (even with aggregate, the GROUP BY itself is not allowed)
 statement error
@@ -148,7 +148,7 @@ PAC rewrite: columns from privacy unit tables can only be accessed inside aggreg
 query I
 SELECT SUM(b) FROM t1 WHERE a > 1;
 ----
-180
+140
 
 # Test with joins: PU column cannot be projected directly
 statement error
@@ -178,7 +178,7 @@ Query does not contain any allowed aggregation (sum, count, avg, min, max)!
 query I
 SELECT SUM(a * 2) FROM t1;
 ----
-36
+28
 
 # Test CASE expression: PU column in CASE outside aggregate not allowed
 statement error
@@ -190,7 +190,7 @@ Query does not contain any allowed aggregation (sum, count, avg, min, max)!
 query I
 SELECT SUM(CASE WHEN a > 1 THEN b ELSE 0 END) FROM t1;
 ----
-180
+140
 
 # TODO: Self-join tests below currently succeed but should be rejected once
 # stricter join checking between sensitive tables is implemented.
@@ -200,7 +200,7 @@ SELECT SUM(CASE WHEN a > 1 THEN b ELSE 0 END) FROM t1;
 query I
 SELECT SUM(t1a.b + t1b.b) FROM t1 t1a JOIN t1 t1b ON t1a.a = t1b.a;
 ----
-680
+600
 
 # Test self-join inside subquery: currently crashes due to categorical rewriter issue
 # TODO: Fix crash and either reject self-joins or handle them correctly
@@ -266,7 +266,7 @@ ALTER PU TABLE sales ADD PAC_LINK (customer_id) REFERENCES customers(id);
 query I
 SELECT SUM(amount) FROM sales;
 ----
-359.36
+199.68
 
 # Not PAC-compatible: protected column in GROUP BY
 statement error
@@ -284,7 +284,7 @@ PAC rewrite: protected column 'sales.amount' can only be accessed inside aggrega
 query II
 SELECT product_id, SUM(amount) FROM sales GROUP BY product_id ORDER BY product_id;
 ----
-100	249.60
+100	149.76
 101	60.00
 102	50.00
 
@@ -298,7 +298,7 @@ PAC rewrite: protected column 'sales.amount' can only be accessed inside aggrega
 query I
 SELECT SUM(quantity) FROM sales WHERE amount > 30;
 ----
-10
+6
 
 # Create another table for join tests
 statement ok
@@ -312,7 +312,7 @@ query II
 SELECT products.category, SUM(sales.amount) FROM sales JOIN products ON sales.product_id = products.product_id GROUP BY products.category ORDER BY products.category;
 ----
 Electronics	60.00
-Hardware	299.52
+Hardware	199.68
 
 # Not PAC-compatible: protected column in GROUP BY after join
 statement error
@@ -430,7 +430,7 @@ INSERT INTO pac_users VALUES (1, 'Alice', 50000), (2, 'Bob', 60000), (3, 'Carol'
 query I
 SELECT SUM(salary) FROM pac_users;
 ----
-359424
+259584
 
 # Projecting non-protected columns from a PAC table should error (it's a privacy unit)
 query I
@@ -514,7 +514,7 @@ PAC rewrite: protected column 'convertible_table.id' can only be accessed inside
 query I
 SELECT SUM(value) FROM convertible_table;
 ----
-1200
+1000
 
 # Test 4: Remove privacy unit status using ALTER TABLE UNSET PU
 statement ok
@@ -563,7 +563,7 @@ INSERT INTO drop_test_linked VALUES (1, 1, 10), (2, 2, 20);
 query I
 SELECT SUM(value) FROM drop_test_linked;
 ----
-60
+40
 
 # Drop the privacy unit table
 statement ok
@@ -657,7 +657,7 @@ INSERT INTO test_linked_protected VALUES (1, 1, 10, 100), (2, 2, 20, 200);
 query I
 SELECT SUM(public_val) FROM test_linked_protected;
 ----
-60
+40
 
 # But protected columns cannot be projected
 statement error

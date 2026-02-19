@@ -272,13 +272,13 @@ DROP TABLE test_grouped_nulls
 
 # Ungrouped: all rows hash to the same privacy unit → should trigger diversity error
 statement error
-SELECT pac_sum(hash(5)::UBIGINT, 1.0) FROM range(200) t(i)
+SELECT pac_sum(hash(5)::UBIGINT, 1.0) FROM range(1000) t(i)
 ----
 detected absence of sample diversity
 
 # Grouped: each group has rows from the same privacy unit → should trigger diversity error
 statement error
-SELECT key, pac_sum(hash(5)::UBIGINT, 1.0) FROM (SELECT i % 3 AS key FROM range(600) t(i)) sub GROUP BY key
+SELECT key, pac_sum(hash(5)::UBIGINT, 1.0) FROM (SELECT i % 3 AS key FROM range(3000) t(i)) sub GROUP BY key
 ----
 detected absence of sample diversity
 

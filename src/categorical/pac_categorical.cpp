@@ -141,19 +141,11 @@ static inline bool FilterFromMask(uint64_t mask, double mi, double correction, s
 // PAC_SELECT: Convert list<bool> to UBIGINT mask, ANDed with hash subsampling
 // ============================================================================
 // pac_select(UBIGINT hash, list<bool>) -> UBIGINT
-// Converts a list of booleans to a bitmask and combines it with the privacy-unit
-// hash for query_hash-compatible output: ((hash ^ qh) & bool_mask) ^ qh.
-// When the downstream aggregate XORs with query_hash, the result is
-// (hash ^ qh) & bool_mask — counter j is active only when both the hash
-// subsampling includes the row AND the boolean filter passes for subsample j.
+// Converts a list of booleans to a bitmask and ANDs it with the privacy-unit hash.
+// Counter j is active only when both the hash subsampling includes the row AND the
+// boolean filter passes for subsample j. The query_hash XOR is handled by pac_hash().
 static void PacSelectFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	idx_t count = args.size();
-
-	uint64_t qh = 0;
-	auto &function = state.expr.Cast<BoundFunctionExpression>();
-	if (function.bind_info) {
-		qh = function.bind_info->Cast<PacCategoricalBindData>().query_hash;
-	}
 
 	UnifiedVectorFormat hash_data;
 	args.data[0].ToUnifiedFormat(count, hash_data);
@@ -185,7 +177,7 @@ static void PacSelectFunction(DataChunk &args, ExpressionState &state, Vector &r
 
 		uint64_t hash = hashes[h_idx];
 		uint64_t bool_mask = (entry.length == 0) ? 0 : BoolListToMask(list_data, child_data, child_values, list_idx);
-		result_data[i] = ((hash ^ qh) & bool_mask) ^ qh;
+		result_data[i] = hash & bool_mask;
 	}
 }
 
@@ -213,9 +205,8 @@ static PacFilterParams GetPacFilterParams(ExpressionState &state) {
 
 // pac_filter(UBIGINT hash) -> BOOLEAN
 // Returns true if the bit at the counter position selected by query_hash is set.
-// The input hash is expected to come from pac_select/pac_select_<cmp> (already XOR'd
-// with query_hash), so we undo the XOR to recover the original mask, then check
-// bit (query_hash % 64).
+// The input hash already has query_hash XOR'd in by pac_hash(), so the bit positions
+// are query-specific. We check bit (query_hash % 64).
 static void PacFilterFromHashFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	idx_t count = args.size();
 
@@ -238,7 +229,7 @@ static void PacFilterFromHashFunction(DataChunk &args, ExpressionState &state, V
 		if (!hash_data.validity.RowIsValid(idx)) {
 			result_validity.SetInvalid(i);
 		} else {
-			result_data[i] = ((hashes[idx] ^ qh) >> bit_pos) & 1ULL;
+			result_data[i] = (hashes[idx] >> bit_pos) & 1ULL;
 		}
 	}
 }
@@ -407,12 +398,6 @@ template <PacFilterCmpOp CMP>
 static void PacSelectCmpFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	idx_t count = args.size();
 
-	uint64_t qh = 0;
-	auto &function = state.expr.Cast<BoundFunctionExpression>();
-	if (function.bind_info) {
-		qh = function.bind_info->Cast<PacCategoricalBindData>().query_hash;
-	}
-
 	// arg0: UBIGINT hash, arg1: PAC_FLOAT scalar value, arg2: LIST<PAC_FLOAT> counters
 	UnifiedVectorFormat hash_data, val_data;
 	args.data[0].ToUnifiedFormat(count, hash_data);
@@ -456,7 +441,7 @@ static void PacSelectCmpFunction(DataChunk &args, ExpressionState &state, Vector
 			}
 		}
 
-		result_data[i] = ((hashes[h_idx] ^ qh) & mask) ^ qh;
+		result_data[i] = hashes[h_idx] & mask;
 	}
 }
 

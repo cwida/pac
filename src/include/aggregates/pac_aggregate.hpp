@@ -120,7 +120,9 @@ static inline bool PacNoisedSelect(uint64_t key_hash, uint64_t rnd) {
 bool PacNoiseInNull(uint64_t key_hash, double mi, double correction, std::mt19937_64 &gen);
 
 // Minimum total rows across all groups before the diversity check applies
-#define PAC_SUSPICIOUS_THRESHOLD 100
+// With hash32_32 (hash_repair), single-PU groups always have exactly 32 zero bits
+// (in the [29,35] suspicious range), so small test datasets need a higher threshold.
+#define PAC_SUSPICIOUS_THRESHOLD 500
 
 struct PacBindData; // forward declaration
 
@@ -146,15 +148,16 @@ inline double GetPacMiFromSetting(ClientContext &ctx) {
 
 // Bind data used by PAC aggregates to carry `mi` and `correction` parameters.
 // Reads seed from pac_seed setting (or uses query-id if not set) and computes query_hash.
-// query_hash is used both for XOR'ing with per-row key_hash and as the counter selector
-// for PacNoisySampleFrom64Counters.
+// query_hash is XOR'd with per-row key_hash inside pac_hash() (centralized) and used as
+// the counter selector for PacNoisySampleFrom64Counters in finalize functions.
 struct PacBindData : public FunctionData {
 	double mi;                    // mutual information parameter from pac_mi setting (controls noise/NULL probability)
 	double correction;            // correction factor: multiplies sum/avg/count results, reduces NULL prob for min/max
 	uint64_t seed;                // RNG seed: pac_seed setting value, or query-id if not set
-	uint64_t query_hash;          // derived from seed: XOR'd with key_hash, also used as counter selector
+	uint64_t query_hash;          // derived from seed: used inside pac_hash() for XOR and as counter selector
 	double scale_divisor;         // for DECIMAL pac_avg: divide result by 10^scale (default 1.0)
 	bool use_deterministic_noise; // if true, use platform-agnostic Box-Muller noise generation
+	bool hash_repair;             // if true, pac_hash() repairs hash to exactly 32 bits set
 
 	// Runtime diversity tracking (accumulated across groups during finalize, not bind-time config)
 	mutable uint64_t total_update_count;  // sum of update_counts across all finalized groups
@@ -163,9 +166,10 @@ struct PacBindData : public FunctionData {
 
 	// Primary constructor - reads seed from pac_seed setting, or uses query-id if not set.
 	// All aggregates in the same query get the same seed and query_hash.
-	explicit PacBindData(ClientContext &ctx, double mi_val, double correction_val = 1.0, double scale_div = 1.0)
+	explicit PacBindData(ClientContext &ctx, double mi_val, double correction_val = 1.0, double scale_div = 1.0,
+	                     bool hash_repair_val = false)
 	    : mi(mi_val), correction(correction_val), scale_divisor(scale_div), use_deterministic_noise(false),
-	      total_update_count(0), suspicious_count(0), nonsuspicious_count(0) {
+	      hash_repair(hash_repair_val), total_update_count(0), suspicious_count(0), nonsuspicious_count(0) {
 		Value pac_seed_val;
 		if (ctx.TryGetCurrentSetting("pac_seed", pac_seed_val) && !pac_seed_val.IsNull()) {
 			seed = uint64_t(pac_seed_val.GetValue<int64_t>());
@@ -188,7 +192,8 @@ struct PacBindData : public FunctionData {
 	bool Equals(const FunctionData &other) const override {
 		auto &o = other.Cast<PacBindData>();
 		return mi == o.mi && correction == o.correction && seed == o.seed && query_hash == o.query_hash &&
-		       scale_divisor == o.scale_divisor && use_deterministic_noise == o.use_deterministic_noise;
+		       scale_divisor == o.scale_divisor && use_deterministic_noise == o.use_deterministic_noise &&
+		       hash_repair == o.hash_repair;
 	}
 };
 

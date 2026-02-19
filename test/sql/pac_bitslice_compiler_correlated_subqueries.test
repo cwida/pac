@@ -131,8 +131,8 @@ GROUP BY
 ORDER BY
     o_orderpriority;
 ----
-1-URGENT	4
-2-HIGH	4
+1-URGENT	2
+2-HIGH	2
 3-MEDIUM	2
 
 # Test Top-K pushdown with correlated EXISTS subquery (Q4 + LIMIT)
@@ -162,8 +162,8 @@ ORDER BY
     o_orderpriority
 LIMIT 2;
 ----
-1-URGENT	4
-2-HIGH	4
+1-URGENT	2
+2-HIGH	2
 
 # Test TPC-H Q17-style correlated subquery with aggregates in both outer and inner queries
 # This tests the case where lineitem (FK-linked table) appears in both outer aggregate and inner aggregate
@@ -265,7 +265,7 @@ WHERE
     )
     AND l_discount > 0.04;
 ----
-2499.52
+2099.52
 
 # Test correlated subquery where outer and inner both need separate joins to PU
 # This is a CORRELATED subquery (references outer table via l_partkey), unlike the IN clause which is uncorrelated

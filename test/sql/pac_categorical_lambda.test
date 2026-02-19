@@ -184,6 +184,7 @@ WHERE
 ORDER BY p.product_id;
 ----
 1	Widget A
+2	Widget B
 
 # ============================================================================
 # Test 3: Arithmetic on scalar side

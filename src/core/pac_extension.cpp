@@ -209,9 +209,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// Add option to enable top-k pushdown: when true, top-k is applied on true aggregates before noising
 	db.config.AddExtensionOption("pac_pushdown_topk", "apply top-k before noise instead of after", LogicalType::BOOLEAN,
 	                             Value::BOOLEAN(true));
-	// Add option to wrap hash expressions in pac_hash() to guarantee exactly 32 bits set
-	db.config.AddExtensionOption("pac_hash", "wrap hash computations in pac_hash() for exactly 32 bits set",
-	                             LogicalType::BOOLEAN, Value::BOOLEAN(false));
+	// Add option to control whether pac_hash() repairs hashes to exactly 32 bits set
+	db.config.AddExtensionOption("pac_hash_repair", "pac_hash() repairs hash to exactly 32 bits set",
+	                             LogicalType::BOOLEAN, Value::BOOLEAN(true));
 
 	// Register pac_aggregate function(s)
 	RegisterPacAggregateFunctions(loader);

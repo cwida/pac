@@ -195,12 +195,8 @@ ColumnBinding InsertHashProjectionAboveGet(OptimizerExtensionInput &input, uniqu
 		hash_expr = BuildXorHashFromPKs(input, get, key_columns);
 	}
 
-	// 1b. Optionally wrap in pac_hash() to guarantee exactly 32 bits set
-	Value pac_hash_val;
-	if (input.context.TryGetCurrentSetting("pac_hash", pac_hash_val) && !pac_hash_val.IsNull() &&
-	    pac_hash_val.GetValue<bool>()) {
-		hash_expr = input.optimizer.BindScalarFunction("pac_hash", std::move(hash_expr));
-	}
+	// 1b. Wrap in pac_hash() to XOR with query_hash and optionally repair to 32 bits set
+	hash_expr = input.optimizer.BindScalarFunction("pac_hash", std::move(hash_expr));
 
 	// 2. Find the unique_ptr slot holding this get in the plan tree
 	vector<unique_ptr<LogicalOperator> *> get_nodes;
@@ -271,8 +267,9 @@ ColumnBinding GetOrInsertHashProjection(OptimizerExtensionInput &input, unique_p
 // Returns the ColumnBinding for the new hash column, or INVALID if key columns not found.
 // Find the unique_ptr slot holding a CTE_REF with the given table_index in the plan tree.
 static unique_ptr<LogicalOperator> *FindCTERefSlot(unique_ptr<LogicalOperator> &root, idx_t table_index) {
-	if (!root)
+	if (!root) {
 		return nullptr;
+	}
 	if (root->type == LogicalOperatorType::LOGICAL_CTE_REF) {
 		auto &ref = root->Cast<LogicalCTERef>();
 		if (ref.table_index == table_index) {
@@ -281,8 +278,9 @@ static unique_ptr<LogicalOperator> *FindCTERefSlot(unique_ptr<LogicalOperator> &
 	}
 	for (auto &child : root->children) {
 		auto *result = FindCTERefSlot(child, table_index);
-		if (result)
+		if (result) {
 			return result;
+		}
 	}
 	return nullptr;
 }
@@ -317,12 +315,8 @@ ColumnBinding InsertHashProjectionAboveCTERef(OptimizerExtensionInput &input, un
 	// 2. Build hash expression: hash(c1) XOR hash(c2) XOR ...
 	auto hash_expr = BuildXorHash(input, std::move(key_col_exprs));
 
-	// Optionally wrap in pac_hash() to guarantee exactly 32 bits set
-	Value pac_hash_val;
-	if (input.context.TryGetCurrentSetting("pac_hash", pac_hash_val) && !pac_hash_val.IsNull() &&
-	    pac_hash_val.GetValue<bool>()) {
-		hash_expr = input.optimizer.BindScalarFunction("pac_hash", std::move(hash_expr));
-	}
+	// Wrap in pac_hash() to XOR with query_hash and optionally repair to 32 bits set
+	hash_expr = input.optimizer.BindScalarFunction("pac_hash", std::move(hash_expr));
 
 	// 3. Find the unique_ptr slot holding this CTE_SCAN in the plan tree
 	auto *cte_slot_ptr = FindCTERefSlot(plan, cte_ref.table_index);

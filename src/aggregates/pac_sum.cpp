@@ -227,7 +227,7 @@ inline void PacSumUpdateOne(PacSumIntStateWrapper<SIGNED> &agg, uint64_t key_has
 
 // PacSumUpdate - unified for both int and double states
 template <class State, bool SIGNED, class VALUE_TYPE, class INPUT_TYPE>
-static void PacSumUpdate(Vector inputs[], State &state, idx_t count, ArenaAllocator &allocator, uint64_t query_hash) {
+static void PacSumUpdate(Vector inputs[], State &state, idx_t count, ArenaAllocator &allocator) {
 	UnifiedVectorFormat hash_data, value_data;
 	inputs[0].ToUnifiedFormat(count, hash_data);
 	inputs[1].ToUnifiedFormat(count, value_data);
@@ -238,8 +238,7 @@ static void PacSumUpdate(Vector inputs[], State &state, idx_t count, ArenaAlloca
 		for (idx_t i = 0; i < count; i++) {
 			auto h_idx = hash_data.sel->get_index(i);
 			auto v_idx = value_data.sel->get_index(i);
-			PacSumUpdateOne<SIGNED>(state, hashes[h_idx] ^ query_hash, ConvertValue<VALUE_TYPE>::convert(values[v_idx]),
-			                        allocator);
+			PacSumUpdateOne<SIGNED>(state, hashes[h_idx], ConvertValue<VALUE_TYPE>::convert(values[v_idx]), allocator);
 		}
 	} else {
 		for (idx_t i = 0; i < count; i++) {
@@ -248,15 +247,13 @@ static void PacSumUpdate(Vector inputs[], State &state, idx_t count, ArenaAlloca
 			if (!hash_data.validity.RowIsValid(h_idx) || !value_data.validity.RowIsValid(v_idx)) {
 				continue;
 			}
-			PacSumUpdateOne<SIGNED>(state, hashes[h_idx] ^ query_hash, ConvertValue<VALUE_TYPE>::convert(values[v_idx]),
-			                        allocator);
+			PacSumUpdateOne<SIGNED>(state, hashes[h_idx], ConvertValue<VALUE_TYPE>::convert(values[v_idx]), allocator);
 		}
 	}
 }
 
 template <class State, bool SIGNED, class VALUE_TYPE, class INPUT_TYPE>
-static void PacSumScatterUpdate(Vector inputs[], Vector &states, idx_t count, ArenaAllocator &allocator,
-                                uint64_t query_hash) {
+static void PacSumScatterUpdate(Vector inputs[], Vector &states, idx_t count, ArenaAllocator &allocator) {
 	UnifiedVectorFormat hash_data, value_data, sdata;
 	inputs[0].ToUnifiedFormat(count, hash_data);
 	inputs[1].ToUnifiedFormat(count, value_data);
@@ -273,8 +270,7 @@ static void PacSumScatterUpdate(Vector inputs[], Vector &states, idx_t count, Ar
 		if (!hash_data.validity.RowIsValid(h_idx) || !value_data.validity.RowIsValid(v_idx)) {
 			continue; // ignore NULLs
 		}
-		PacSumUpdateOne<SIGNED>(*state, hashes[h_idx] ^ query_hash, ConvertValue<VALUE_TYPE>::convert(values[v_idx]),
-		                        allocator);
+		PacSumUpdateOne<SIGNED>(*state, hashes[h_idx], ConvertValue<VALUE_TYPE>::convert(values[v_idx]), allocator);
 	}
 }
 
@@ -488,15 +484,13 @@ void PacSumFinalize(Vector &states, AggregateInputData &input, Vector &result, i
 	void PacSumUpdate##NAME(Vector inputs[], AggregateInputData &aggr_input_data, idx_t, data_ptr_t state_p,           \
 	                        idx_t count) {                                                                             \
 		auto &state = *reinterpret_cast<ScatterIntState<SIGNED> *>(state_p);                                           \
-		PacSumUpdate<ScatterIntState<SIGNED>, SIGNED, VALUE_T, INPUT_T>(                                               \
-		    inputs, state, count, aggr_input_data.allocator,                                                           \
-		    aggr_input_data.bind_data->Cast<PacBindData>().query_hash);                                                \
+		PacSumUpdate<ScatterIntState<SIGNED>, SIGNED, VALUE_T, INPUT_T>(inputs, state, count,                          \
+		                                                                aggr_input_data.allocator);                    \
 	}                                                                                                                  \
 	void PacSumScatterUpdate##NAME(Vector inputs[], AggregateInputData &aggr_input_data, idx_t, Vector &states,        \
 	                               idx_t count) {                                                                      \
-		PacSumScatterUpdate<ScatterIntState<SIGNED>, SIGNED, VALUE_T, INPUT_T>(                                        \
-		    inputs, states, count, aggr_input_data.allocator,                                                          \
-		    aggr_input_data.bind_data->Cast<PacBindData>().query_hash);                                                \
+		PacSumScatterUpdate<ScatterIntState<SIGNED>, SIGNED, VALUE_T, INPUT_T>(inputs, states, count,                  \
+		                                                                       aggr_input_data.allocator);             \
 	}
 PAC_INT_TYPES_SIGNED
 PAC_INT_TYPES_UNSIGNED
@@ -506,44 +500,36 @@ PAC_INT_TYPES_UNSIGNED
 void PacSumUpdateHugeIntDouble(Vector inputs[], AggregateInputData &aggr_input_data, idx_t, data_ptr_t state_p,
                                idx_t count) {
 	auto &state = *reinterpret_cast<ScatterDoubleState *>(state_p);
-	PacSumUpdate<ScatterDoubleState, true, double, hugeint_t>(
-	    inputs, state, count, aggr_input_data.allocator, aggr_input_data.bind_data->Cast<PacBindData>().query_hash);
+	PacSumUpdate<ScatterDoubleState, true, double, hugeint_t>(inputs, state, count, aggr_input_data.allocator);
 }
 void PacSumUpdateUHugeInt(Vector inputs[], AggregateInputData &aggr_input_data, idx_t, data_ptr_t state_p,
                           idx_t count) {
 	auto &state = *reinterpret_cast<ScatterDoubleState *>(state_p);
-	PacSumUpdate<ScatterDoubleState, true, double, uhugeint_t>(
-	    inputs, state, count, aggr_input_data.allocator, aggr_input_data.bind_data->Cast<PacBindData>().query_hash);
+	PacSumUpdate<ScatterDoubleState, true, double, uhugeint_t>(inputs, state, count, aggr_input_data.allocator);
 }
 void PacSumUpdateFloat(Vector inputs[], AggregateInputData &aggr_input_data, idx_t, data_ptr_t state_p, idx_t count) {
 	auto &state = *reinterpret_cast<ScatterDoubleState *>(state_p);
-	PacSumUpdate<ScatterDoubleState, true, double, float>(inputs, state, count, aggr_input_data.allocator,
-	                                                      aggr_input_data.bind_data->Cast<PacBindData>().query_hash);
+	PacSumUpdate<ScatterDoubleState, true, double, float>(inputs, state, count, aggr_input_data.allocator);
 }
 void PacSumUpdateDouble(Vector inputs[], AggregateInputData &aggr_input_data, idx_t, data_ptr_t state_p, idx_t count) {
 	auto &state = *reinterpret_cast<ScatterDoubleState *>(state_p);
-	PacSumUpdate<ScatterDoubleState, true, double, double>(inputs, state, count, aggr_input_data.allocator,
-	                                                       aggr_input_data.bind_data->Cast<PacBindData>().query_hash);
+	PacSumUpdate<ScatterDoubleState, true, double, double>(inputs, state, count, aggr_input_data.allocator);
 }
 void PacSumScatterUpdateHugeIntDouble(Vector inputs[], AggregateInputData &aggr_input_data, idx_t, Vector &states,
                                       idx_t count) {
-	PacSumScatterUpdate<ScatterDoubleState, true, double, hugeint_t>(
-	    inputs, states, count, aggr_input_data.allocator, aggr_input_data.bind_data->Cast<PacBindData>().query_hash);
+	PacSumScatterUpdate<ScatterDoubleState, true, double, hugeint_t>(inputs, states, count, aggr_input_data.allocator);
 }
 void PacSumScatterUpdateUHugeInt(Vector inputs[], AggregateInputData &aggr_input_data, idx_t, Vector &states,
                                  idx_t count) {
-	PacSumScatterUpdate<ScatterDoubleState, true, double, uhugeint_t>(
-	    inputs, states, count, aggr_input_data.allocator, aggr_input_data.bind_data->Cast<PacBindData>().query_hash);
+	PacSumScatterUpdate<ScatterDoubleState, true, double, uhugeint_t>(inputs, states, count, aggr_input_data.allocator);
 }
 void PacSumScatterUpdateFloat(Vector inputs[], AggregateInputData &aggr_input_data, idx_t, Vector &states,
                               idx_t count) {
-	PacSumScatterUpdate<ScatterDoubleState, true, double, float>(
-	    inputs, states, count, aggr_input_data.allocator, aggr_input_data.bind_data->Cast<PacBindData>().query_hash);
+	PacSumScatterUpdate<ScatterDoubleState, true, double, float>(inputs, states, count, aggr_input_data.allocator);
 }
 void PacSumScatterUpdateDouble(Vector inputs[], AggregateInputData &aggr_input_data, idx_t, Vector &states,
                                idx_t count) {
-	PacSumScatterUpdate<ScatterDoubleState, true, double, double>(
-	    inputs, states, count, aggr_input_data.allocator, aggr_input_data.bind_data->Cast<PacBindData>().query_hash);
+	PacSumScatterUpdate<ScatterDoubleState, true, double, double>(inputs, states, count, aggr_input_data.allocator);
 }
 
 // instantiate Combine methods
