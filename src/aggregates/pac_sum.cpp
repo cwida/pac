@@ -447,6 +447,17 @@ void PacSumFinalize(Vector &states, AggregateInputData &input, Vector &result, i
 		// - pac_sum: doubles the sum to compensate for ~50% of values contributing to each counter
 		// - pac_avg: compensates for dividing by total_count instead of per-counter count
 		result_val *= PAC_FLOAT(2.0);
+		// DEBUG: detect Windows-specific wrong result (11075.5840)
+		if (static_cast<double>(result_val) > 11075.0 && static_cast<double>(result_val) < 11076.0) {
+			fprintf(stderr, "DEBUG pac_sum finalize: result_val=%.4f mi=%.4f correction=%.4f query_hash=0x%016llx\n",
+			        (double)result_val, mi, correction, (unsigned long long)query_hash);
+			fprintf(stderr, "  key_hash=0x%016llx update_count=%llu\n",
+			        (unsigned long long)key_hash, (unsigned long long)update_count);
+			fprintf(stderr, "  is_null=0x%016llx (=~key_hash)\n", (unsigned long long)~key_hash);
+			fprintf(stderr, "  buf[0..63]:");
+			for (int dbg = 0; dbg < 64; dbg++) fprintf(stderr, " %.4f", (double)buf[dbg]);
+			fprintf(stderr, "\n");
+		}
 		data[offset + i] = FromDouble<ACC_TYPE>(result_val);
 	}
 }
