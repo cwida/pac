@@ -499,6 +499,16 @@ void ModifyAggregatesWithPacFunctions(OptimizerExtensionInput &input, LogicalAgg
 	}
 #endif
 
+	// Pre-check: verify ALL aggregate expressions are supported BEFORE modifying any.
+	// This prevents partial plan modification if an unsupported aggregate (e.g., string_agg) is found mid-loop.
+	for (idx_t i = 0; i < agg->expressions.size(); i++) {
+		if (agg->expressions[i]->GetExpressionClass() != ExpressionClass::BOUND_AGGREGATE) {
+			throw NotImplementedException("Not found expected aggregate expression in PAC compiler");
+		}
+		auto &check_aggr = agg->expressions[i]->Cast<BoundAggregateExpression>();
+		GetPacAggregateFunctionName(check_aggr.function.name); // throws if unsupported
+	}
+
 	// Process each aggregate expression
 	for (idx_t i = 0; i < agg->expressions.size(); i++) {
 		if (agg->expressions[i]->GetExpressionClass() != ExpressionClass::BOUND_AGGREGATE) {

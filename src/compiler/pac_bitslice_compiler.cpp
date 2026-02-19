@@ -1702,13 +1702,16 @@ struct CTEHashMatch {
 // Two paths are tried for each CTE_SCAN:
 //   1. CTE directly contains the PU table → hash PU PK columns
 //   2. CTE contains an FK-linked table → hash the FK columns that lead to the PU
+// CTE_SCAN nodes inside DELIM_JOIN subtrees are skipped because inserting a hash
+// projection there corrupts the DELIM_JOIN/DELIM_GET statistics pairing.
 static CTEHashMatch FindCTEHashSource(LogicalOperator *op, const string &pu_table_name, const vector<string> &pu_pks,
-                                      const CTETableMap &cte_map, const PACCompatibilityResult &check) {
+                                      const CTETableMap &cte_map, const PACCompatibilityResult &check,
+                                      bool inside_delim_join = false) {
 	if (!op) {
 		return CTEHashMatch();
 	}
 
-	if (op->type == LogicalOperatorType::LOGICAL_CTE_REF) {
+	if (!inside_delim_join && op->type == LogicalOperatorType::LOGICAL_CTE_REF) {
 		auto &ref = op->Cast<LogicalCTERef>();
 		auto cte_it = cte_map.find(ref.cte_index);
 		if (cte_it != cte_map.end()) {
@@ -1747,7 +1750,8 @@ static CTEHashMatch FindCTEHashSource(LogicalOperator *op, const string &pu_tabl
 	}
 
 	for (auto &child : op->children) {
-		auto match = FindCTEHashSource(child.get(), pu_table_name, pu_pks, cte_map, check);
+		bool child_in_delim = inside_delim_join || (op->type == LogicalOperatorType::LOGICAL_DELIM_JOIN);
+		auto match = FindCTEHashSource(child.get(), pu_table_name, pu_pks, cte_map, check, child_in_delim);
 		if (match) {
 			return match;
 		}
@@ -2039,6 +2043,20 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 
 				auto propagated = PropagateSingleBinding(*plan, hash_binding.table_index, hash_binding,
 				                                         LogicalType::UBIGINT, target_agg);
+
+				// If propagation failed (e.g., blocked by DELIM_JOIN), try AddBindingToDelimJoin
+				if (propagated.table_index == DConstants::INVALID_INDEX) {
+#if PAC_DEBUG
+					PAC_DEBUG_PRINT("ModifyPlanWithPU: CTE hash propagation failed for " + pu_table_name +
+					                ", trying DELIM_JOIN fallback");
+#endif
+					auto delim_result = AddBindingToDelimJoin(plan, hash_binding.table_index, hash_binding,
+					                                          LogicalType::UBIGINT, target_agg);
+					if (delim_result.IsValid()) {
+						propagated = delim_result.binding;
+					}
+				}
+
 				if (propagated.table_index == DConstants::INVALID_INDEX) {
 #if PAC_DEBUG
 					PAC_DEBUG_PRINT("ModifyPlanWithPU: CTE hash propagation failed for " + pu_table_name);

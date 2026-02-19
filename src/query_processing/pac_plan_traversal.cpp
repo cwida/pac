@@ -772,12 +772,14 @@ vector<LogicalAggregate *> FilterTargetAggregatesWithPUKeyCheck(const vector<Log
 	vector<LogicalAggregate *> target_aggregates;
 
 	// First, identify which aggregates have inner aggregates that group by PU key
-	// For these, we want to skip the inner aggregate and include the outer aggregate
+	// For these, we want to skip the inner aggregate and include the outer aggregate.
+	// Also detect CTE boundary patterns: when an outer aggregate reads target tables
+	// only through CTE_SCAN, the CTE definition's aggregate handles PAC transformation.
 	std::unordered_set<LogicalAggregate *> skip_aggregates;
 	std::unordered_set<LogicalAggregate *> include_outer_aggregates;
 
 	for (auto *agg : all_aggregates) {
-		// Check if this aggregate has a child aggregate (nested aggregate)
+		// Check if this aggregate has a child aggregate (nested aggregate — direct subtree)
 		for (auto &child : agg->children) {
 			LogicalAggregate *inner_agg = nullptr;
 
@@ -807,6 +809,48 @@ vector<LogicalAggregate *> FilterTargetAggregatesWithPUKeyCheck(const vector<Log
 					// Skip the inner aggregate, include the outer aggregate instead
 					skip_aggregates.insert(inner_agg);
 					include_outer_aggregates.insert(agg);
+				}
+			}
+		}
+
+		// CTE boundary pattern: check if this aggregate reaches target tables only
+		// through CTE_SCAN (not direct scans). If so, find the CTE definition's aggregate
+		// and decide which one to noise based on Q13 pattern logic.
+		if (!cte_map.empty()) {
+			bool has_direct_target = false;
+			for (auto &table_name : target_table_names) {
+				if (HasTableInSubtree(agg, table_name)) {
+					has_direct_target = true;
+					break;
+				}
+			}
+			if (!has_direct_target) {
+				// This aggregate only reaches target tables via CTE_SCAN.
+				// Find the CTE definition's aggregate (the one with direct access).
+				for (auto *other_agg : all_aggregates) {
+					if (other_agg == agg) {
+						continue;
+					}
+					bool other_has_direct = false;
+					for (auto &table_name : target_table_names) {
+						if (HasTableInSubtree(other_agg, table_name)) {
+							other_has_direct = true;
+							break;
+						}
+					}
+					if (other_has_direct) {
+						if (AggregateGroupsByPUKey(other_agg, check, privacy_units)) {
+							// CTE definition groups by PU key → can't noise it.
+							// Include outer aggregate instead (Q13 across CTE boundary).
+							skip_aggregates.insert(other_agg);
+							include_outer_aggregates.insert(agg);
+						} else {
+							// CTE definition doesn't group by PU key → noise it.
+							// Skip this outer aggregate (it re-aggregates noised output).
+							skip_aggregates.insert(agg);
+						}
+						break;
+					}
 				}
 			}
 		}

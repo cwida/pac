@@ -1298,7 +1298,8 @@ static void RewriteBottomUp(unique_ptr<LogicalOperator> &op_ptr, OptimizerExtens
                             unique_ptr<LogicalOperator> &plan,
                             const unordered_map<LogicalOperator *, unordered_set<idx_t>> &pattern_lookup,
                             vector<CategoricalPatternInfo> &patterns,
-                            unordered_map<uint64_t, unique_ptr<Expression>> &saved_filter_pattern_exprs) {
+                            unordered_map<uint64_t, unique_ptr<Expression>> &saved_filter_pattern_exprs,
+                            bool inside_cte_definition = false) {
 	auto *op = op_ptr.get();
 	// Strip scalar wrappers (Projection→first()→Projection) over PAC aggregates before recursing.
 	// This removes the first() aggregate that can't handle LIST<DOUBLE>, and lets the inner
@@ -1310,11 +1311,16 @@ static void RewriteBottomUp(unique_ptr<LogicalOperator> &op_ptr, OptimizerExtens
 			op = op_ptr.get();
 		}
 	}
-	for (auto &child : op->children) { // Recurse into children first (bottom-up)
-		RewriteBottomUp(child, input, plan, pattern_lookup, patterns, saved_filter_pattern_exprs);
+	for (idx_t ci = 0; ci < op->children.size(); ci++) { // Recurse into children first (bottom-up)
+		// Child 0 of MATERIALIZED_CTE is the CTE definition — its output types must remain
+		// stable (numeric, not LIST) because CTE_SCAN consumers may re-aggregate the results.
+		bool child_in_cte =
+		    inside_cte_definition || (op->type == LogicalOperatorType::LOGICAL_MATERIALIZED_CTE && ci == 0);
+		RewriteBottomUp(op->children[ci], input, plan, pattern_lookup, patterns, saved_filter_pattern_exprs,
+		                child_in_cte);
 	}
 	LogicalOperator *plan_root = plan.get();
-	if (op->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+	if (op->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY && !inside_cte_definition) {
 		// === AGGREGATE: convert PAC aggregates to _counters, then check aggregates-over-counters ===
 		auto &agg = op->Cast<LogicalAggregate>();
 

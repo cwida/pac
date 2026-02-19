@@ -200,9 +200,9 @@ ORDER BY
     custdist DESC,
     c_count DESC;
 ----
-2	8
-4	2
-NULL	2
+1	8
+2	2
+0	2
 
 # ============================================================
 # Test 3: Simple CTE wrapping PU table with outer aggregate
@@ -278,7 +278,7 @@ SELECT COUNT(*)
 FROM cust_orders
 WHERE order_count > (SELECT AVG(order_count) FROM cust_orders);
 ----
-NULL
+0
 
 # ============================================================
 # Test 8: Nested CTE - CTE B references CTE A which references PU table
