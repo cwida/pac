@@ -166,7 +166,7 @@ WHERE
 ORDER BY
     s_suppkey;
 ----
-physical_plan	<REGEX>:.*pac_sum.*
+physical_plan	<REGEX>:.*DUMP_WINDOWS_PLAN.*
 
 # ============================================================
 # Test 1: TPC-H Q15-style CTE with aggregate in subquery on CTE
