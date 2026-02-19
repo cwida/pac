@@ -287,8 +287,9 @@ void BuildCTETableMap(LogicalOperator *op, CTETableMap &cte_map) {
 // Merge tables from referenced CTEs into a target CTE's table set.
 // Walks a subtree looking for CTE_REF nodes and merges their resolved tables.
 static void MergeCTERefsIntoSet(LogicalOperator *op, idx_t target_cte_idx, CTETableMap &cte_map) {
-	if (!op)
+	if (!op) {
 		return;
+	}
 	if (op->type == LogicalOperatorType::LOGICAL_CTE_REF) {
 		auto &ref = op->Cast<LogicalCTERef>();
 		auto it = cte_map.find(ref.cte_index);
@@ -304,8 +305,9 @@ static void MergeCTERefsIntoSet(LogicalOperator *op, idx_t target_cte_idx, CTETa
 // Resolve transitive CTE references. Must be called after BuildCTETableMap.
 // For each MATERIALIZED_CTE, merges tables from any CTE_REF nodes in its definition.
 static void ResolveCTERefsInDefinitions(LogicalOperator *op, CTETableMap &cte_map) {
-	if (!op)
+	if (!op) {
 		return;
+	}
 	if (op->type == LogicalOperatorType::LOGICAL_MATERIALIZED_CTE) {
 		auto &cte = op->Cast<LogicalMaterializedCTE>();
 		if (!cte.children.empty()) {

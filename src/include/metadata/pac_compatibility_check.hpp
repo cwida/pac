@@ -39,7 +39,7 @@ struct PACCompatibilityResult {
 };
 
 // Check whether a logical plan is PAC-compatible according to the project's rules.
-// The caller should pass in the list of configured PAC table names (read once).
+// Privacy unit tables are discovered from PAC metadata (is_privacy_unit = true).
 // Returns a PACCompatibilityResult with fk_paths empty when no PAC rewrite is needed.
 // If `replan_in_progress` is true the function will return an empty result immediately to avoid recursion.
 PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, ClientContext &context,

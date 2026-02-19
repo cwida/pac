@@ -271,8 +271,9 @@ ColumnBinding GetOrInsertHashProjection(OptimizerExtensionInput &input, unique_p
 // Returns the ColumnBinding for the new hash column, or INVALID if key columns not found.
 // Find the unique_ptr slot holding a CTE_REF with the given table_index in the plan tree.
 static unique_ptr<LogicalOperator> *FindCTERefSlot(unique_ptr<LogicalOperator> &root, idx_t table_index) {
-	if (!root)
+	if (!root) {
 		return nullptr;
+	}
 	if (root->type == LogicalOperatorType::LOGICAL_CTE_REF) {
 		auto &ref = root->Cast<LogicalCTERef>();
 		if (ref.table_index == table_index) {
@@ -281,8 +282,9 @@ static unique_ptr<LogicalOperator> *FindCTERefSlot(unique_ptr<LogicalOperator> &
 	}
 	for (auto &child : root->children) {
 		auto *result = FindCTERefSlot(child, table_index);
-		if (result)
+		if (result) {
 			return result;
+		}
 	}
 	return nullptr;
 }

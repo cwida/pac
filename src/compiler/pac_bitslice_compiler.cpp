@@ -1678,8 +1678,9 @@ static bool CTERefExposesColumns(const LogicalCTERef &ref, const vector<string> 
 				break;
 			}
 		}
-		if (!found)
+		if (!found) {
 			return false;
+		}
 	}
 	return true;
 }
@@ -1703,8 +1704,9 @@ struct CTEHashMatch {
 //   2. CTE contains an FK-linked table → hash the FK columns that lead to the PU
 static CTEHashMatch FindCTEHashSource(LogicalOperator *op, const string &pu_table_name, const vector<string> &pu_pks,
                                       const CTETableMap &cte_map, const PACCompatibilityResult &check) {
-	if (!op)
+	if (!op) {
 		return CTEHashMatch();
+	}
 
 	if (op->type == LogicalOperatorType::LOGICAL_CTE_REF) {
 		auto &ref = op->Cast<LogicalCTERef>();
@@ -1721,14 +1723,17 @@ static CTEHashMatch FindCTEHashSource(LogicalOperator *op, const string &pu_tabl
 			for (auto &fk_kv : check.fk_paths) {
 				auto &fk_table = fk_kv.first;
 				auto &fk_path = fk_kv.second;
-				if (fk_path.empty() || fk_path.back() != pu_table_name)
+				if (fk_path.empty() || fk_path.back() != pu_table_name) {
 					continue;
-				if (cte_tables.count(fk_table) == 0)
+				}
+				if (cte_tables.count(fk_table) == 0) {
 					continue;
+				}
 
 				auto fk_meta_it = check.table_metadata.find(fk_table);
-				if (fk_meta_it == check.table_metadata.end())
+				if (fk_meta_it == check.table_metadata.end()) {
 					continue;
+				}
 
 				// Find FK columns referencing the next table in the path toward the PU
 				string next_table = fk_path.size() > 1 ? fk_path[1] : pu_table_name;
@@ -1743,8 +1748,9 @@ static CTEHashMatch FindCTEHashSource(LogicalOperator *op, const string &pu_tabl
 
 	for (auto &child : op->children) {
 		auto match = FindCTEHashSource(child.get(), pu_table_name, pu_pks, cte_map, check);
-		if (match)
+		if (match) {
 			return match;
+		}
 	}
 	return CTEHashMatch();
 }
@@ -2132,8 +2138,9 @@ void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExten
 					}
 				}
 			}
-			if (pu_via_cte)
+			if (pu_via_cte) {
 				break;
+			}
 		}
 		pu_present_in_tree = pu_via_cte;
 	}
