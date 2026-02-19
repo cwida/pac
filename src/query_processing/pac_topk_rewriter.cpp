@@ -311,7 +311,17 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 	// and after recursion; if they differ, we remap this node's expressions
 	// to reference the new bindings. This propagates up naturally: each
 	// parent sees its child's updated GetColumnBindings() result.
+	//
+	// IMPORTANT: For materialized CTEs, skip the CTE definition child (children[0]).
+	// TopK rewrites aggregate types (e.g., pac_sum → pac_sum_counters), which changes
+	// the CTE's output type. Any CTE_SCAN referencing this CTE would then receive
+	// FLOAT[] instead of the expected scalar type, causing execution crashes.
+	// Only recurse into the consumer child (children[1]).
+	bool is_cte = plan->type == LogicalOperatorType::LOGICAL_MATERIALIZED_CTE;
 	for (idx_t ci = 0; ci < plan->children.size(); ci++) {
+		if (is_cte && ci == 0) {
+			continue; // skip CTE definition
+		}
 		auto &child = plan->children[ci];
 		auto old_bindings = child->GetColumnBindings();
 		PACTopKOptimizeFunction(input, child);

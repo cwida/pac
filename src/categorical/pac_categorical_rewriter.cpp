@@ -10,6 +10,7 @@
 #include "pac_debug.hpp"
 #include "utils/pac_helpers.hpp"
 #include "duckdb/optimizer/column_binding_replacer.hpp"
+#include "duckdb/planner/expression/bound_conjunction_expression.hpp"
 
 namespace duckdb {
 
@@ -617,7 +618,7 @@ static unique_ptr<Expression> CloneForLambdaBody(Expression *expr,
 			result = BoundCastExpression::AddDefaultCastToType(std::move(result), PacFloatLogicalType());
 		}
 		return result;
-	} else if (expr->GetExpressionClass() == ExpressionClass::BOUND_OPERATOR) { // AND, OR, NOT, arithmetic, COALESCE..
+	} else if (expr->GetExpressionClass() == ExpressionClass::BOUND_OPERATOR) { // NOT, arithmetic, COALESCE, IS NULL..
 		auto &op = expr->Cast<BoundOperatorExpression>();
 		vector<unique_ptr<Expression>> new_children;
 		for (auto &child : op.children) {
@@ -625,6 +626,14 @@ static unique_ptr<Expression> CloneForLambdaBody(Expression *expr,
 			    CloneForLambdaBody(child.get(), pac_binding_map, captures, capture_map, plan_root, struct_type));
 		}
 		return BuildClonedOperatorExpression(expr, std::move(new_children));
+	} else if (expr->GetExpressionClass() == ExpressionClass::BOUND_CONJUNCTION) { // AND, OR
+		auto &conj = expr->Cast<BoundConjunctionExpression>();
+		auto result = make_uniq<BoundConjunctionExpression>(expr->type);
+		for (auto &child : conj.children) {
+			result->children.push_back(
+			    CloneForLambdaBody(child.get(), pac_binding_map, captures, capture_map, plan_root, struct_type));
+		}
+		return result;
 	} else if (expr->type == ExpressionType::CASE_EXPR) {
 		auto &case_expr = expr->Cast<BoundCaseExpression>();
 		if (IsScalarSubqueryWrapper(case_expr)) {
