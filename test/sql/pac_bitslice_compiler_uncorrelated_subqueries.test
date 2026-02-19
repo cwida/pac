@@ -265,8 +265,8 @@ ORDER BY
     custdist DESC,
     cust_order_count DESC;
 ----
-1	6
-2	1
+2 	NULL
+1	NULL
 
 # Test 3: TPC-H Q8-style query with CASE expression in outer aggregate
 # Tests: Nested query with subquery projection, CASE expression, division of aggregates

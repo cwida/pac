@@ -745,6 +745,11 @@ bool AggregateGroupsByPUKey(LogicalAggregate *agg, const PACCompatibilityResult 
 		auto col_info = GetColumnInfoFromBinding(agg, binding);
 		auto &table_name = col_info.first;
 		auto &col_name = col_info.second;
+#if PAC_DEBUG
+		PAC_DEBUG_PRINT("AggregateGroupsByPUKey: binding [" + std::to_string(binding.table_index) + "." +
+		                std::to_string(binding.column_index) + "] -> table='" + table_name + "' col='" + col_name +
+		                "'");
+#endif
 		if (table_name.empty() || col_name.empty()) {
 			continue;
 		}
@@ -753,6 +758,17 @@ bool AggregateGroupsByPUKey(LogicalAggregate *agg, const PACCompatibilityResult 
 		string col_lower = StringUtil::Lower(col_name);
 
 		auto it = check.protected_columns.find(table_lower);
+#if PAC_DEBUG
+		if (it != check.protected_columns.end()) {
+			string cols_str;
+			for (auto &c : it->second) {
+				cols_str += c + ", ";
+			}
+			PAC_DEBUG_PRINT("AggregateGroupsByPUKey: protected_columns['" + table_lower + "'] = {" + cols_str + "}");
+		} else {
+			PAC_DEBUG_PRINT("AggregateGroupsByPUKey: no protected_columns entry for '" + table_lower + "'");
+		}
+#endif
 		if (it != check.protected_columns.end() && it->second.count(col_lower) > 0) {
 			return true;
 		}

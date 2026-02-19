@@ -310,7 +310,6 @@ ORDER BY
 # (Replaced customer-based query which violated PAC rules - can't access privacy unit directly)
 # NOTE: Result is 2 with PAC's counter-based aggregation due to boundary effects
 # ============================================================================
-
 query I
 SELECT count(*) FROM (
     SELECT

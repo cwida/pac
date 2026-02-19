@@ -389,6 +389,85 @@ SELECT COUNT(*) FROM cust_nation;
 ----
 logical_opt	<REGEX>:.*pac_count.*
 
+# ============================================================
+# Q13 pattern and protected column tests
+# ============================================================
+
+# Test 14: Q13 pattern as subquery — inner SUM, outer COUNT
+# Inner SUM groups by c_custkey (PU PK = protected) → stays plain sum.
+# Outer COUNT should be transformed to pac_count via Q13 pattern.
+# Seeing pac_count (not pac_sum) confirms the OUTER aggregate was PAC'd.
+query II
+EXPLAIN SELECT COUNT(*) FROM (
+    SELECT c_custkey, SUM(l_extendedprice) AS total
+    FROM customer
+    JOIN orders ON c_custkey = o_custkey
+    JOIN lineitem ON o_orderkey = l_orderkey
+    GROUP BY c_custkey
+) subq
+WHERE total > 1000;
+----
+logical_opt	<REGEX>:.*pac_count.*
+
+# Test 15: Q13 with referenced PK as link key — inner COUNT, outer SUM
+# Inner COUNT groups by o_orderkey. Since lineitem(l_orderkey) REFERENCES
+# orders(o_orderkey), the protected_columns fix makes o_orderkey protected.
+# AggregateGroupsByPUKey detects this, Q13 fires → outer SUM becomes pac_sum.
+# Seeing pac_sum (not pac_count) confirms the OUTER aggregate was PAC'd.
+query II
+EXPLAIN SELECT SUM(item_count) FROM (
+    SELECT o_orderkey, COUNT(*) AS item_count
+    FROM orders JOIN lineitem ON o_orderkey = l_orderkey
+    GROUP BY o_orderkey
+);
+----
+logical_opt	<REGEX>:.*pac_sum.*
+
+# Test 16: Correlated + non-correlated nested subquery (categorical-style)
+# Q13 must NOT misfire on aggregates inside correlated or non-correlated
+# subquery branches (DELIM_JOIN / CROSS_PRODUCT boundaries).
+# The inner sum GROUP BY l_suppkey does NOT group by a protected column,
+# so AggregateGroupsByPUKey returns false and Q13 is skipped.
+# This must not crash (was previously INTERNAL Error: DOUBLE != FLOAT[]).
+query II
+EXPLAIN SELECT count(*) FROM (
+    SELECT
+        s_suppkey
+    FROM
+        supplier
+    WHERE
+        (
+            SELECT sum(l_extendedprice)
+            FROM lineitem
+            JOIN orders ON l_orderkey = o_orderkey
+            WHERE l_suppkey = s_suppkey
+        ) <= (
+            SELECT avg(total) FROM (
+                SELECT sum(l_extendedprice) as total
+                FROM lineitem
+                JOIN orders ON l_orderkey = o_orderkey
+                GROUP BY l_suppkey
+            )
+        )
+);
+----
+logical_opt	<REGEX>:.*pac_sum.*
+
+# Test 17: Non-protected GROUP BY — inner SUM, outer COUNT
+# Inner SUM groups by l_suppkey (FK to supplier, does NOT reach PU).
+# l_suppkey is NOT in protected_columns → AggregateGroupsByPUKey = false → Q13 skipped.
+# Inner SUM gets pac_sum via normal path. Outer COUNT stays plain.
+# Seeing pac_sum (not pac_count) confirms Q13 did NOT misfire on outer COUNT.
+query II
+EXPLAIN SELECT COUNT(*) AS cnt FROM (
+    SELECT l_suppkey, SUM(l_extendedprice) AS total_price
+    FROM lineitem JOIN orders ON l_orderkey = o_orderkey
+    GROUP BY l_suppkey
+) subq
+WHERE total_price > 1000;
+----
+logical_opt	<REGEX>:.*pac_sum.*
+
 statement ok
 SET explain_output='physical_only';
 

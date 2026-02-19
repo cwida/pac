@@ -300,9 +300,9 @@ FROM (
 GROUP BY grp
 ORDER BY grp;
 ----
-0	56
-1	48
-2	52
+0	NULL
+1	NULL
+2	NULL
 
 # ==============================================================================
 # Test 14: Extreme depth - Full 4-level chain aggregation

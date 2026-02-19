@@ -487,6 +487,60 @@ vector<std::pair<string, vector<string>>> FindForeignKeys(ClientContext &context
 	return result;
 }
 
+// Find the referenced (PK) columns on the parent table for a specific FK relationship.
+// Looks up the FK constraint on `table_name` that references `ref_table` and returns
+// the pk_columns from that constraint.
+vector<string> FindReferencedPKColumns(ClientContext &context, const string &table_name, const string &ref_table) {
+	Catalog &catalog = Catalog::GetCatalog(context, DatabaseManager::GetDefaultDatabase(context));
+	string ref_lower = StringUtil::Lower(ref_table);
+
+	auto process_entry = [&](CatalogEntry *entry_ptr) -> vector<string> {
+		if (!entry_ptr) {
+			return {};
+		}
+		auto &table_entry = entry_ptr->Cast<TableCatalogEntry>();
+		for (auto &constraint : table_entry.GetConstraints()) {
+			if (!constraint || constraint->type != ConstraintType::FOREIGN_KEY) {
+				continue;
+			}
+			auto &fk = constraint->Cast<ForeignKeyConstraint>();
+			if (!fk.info.IsAppendConstraint()) {
+				continue;
+			}
+			if (StringUtil::Lower(fk.info.table) == ref_lower) {
+				return fk.pk_columns;
+			}
+		}
+		return {};
+	};
+
+	// Try schema-qualified lookup first
+	auto dot_pos = table_name.find('.');
+	if (dot_pos != string::npos) {
+		string schema = table_name.substr(0, dot_pos);
+		string tbl = table_name.substr(dot_pos + 1);
+		auto entry = catalog.GetEntry(context, CatalogType::TABLE_ENTRY, schema, tbl, OnEntryNotFound::RETURN_NULL);
+		auto result = process_entry(entry.get());
+		if (!result.empty()) {
+			return result;
+		}
+	}
+
+	// Walk search path
+	CatalogSearchPath path(context);
+	for (auto &entry_path : path.Get()) {
+		string unqualified = (dot_pos != string::npos) ? table_name.substr(dot_pos + 1) : table_name;
+		auto entry = catalog.GetEntry(context, CatalogType::TABLE_ENTRY, entry_path.schema, unqualified,
+		                              OnEntryNotFound::RETURN_NULL);
+		auto result = process_entry(entry.get());
+		if (!result.empty()) {
+			return result;
+		}
+	}
+
+	return {};
+}
+
 // Find foreign-key path(s) from any of `table_names` to any of `privacy_units`.
 // This function resolves table names using the client's catalog search path, then performs a
 // BFS over outgoing FK edges (A -> referenced_table) to find the shortest path from each start

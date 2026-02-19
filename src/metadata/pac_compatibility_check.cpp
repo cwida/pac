@@ -978,6 +978,35 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 				for (auto &fk_col : fk_pair.second) {
 					result.protected_columns[table_lower].insert(StringUtil::Lower(fk_col));
 				}
+#if PAC_DEBUG
+				PAC_DEBUG_PRINT("Source2: table=" + table_name + " FK to " + ref_table +
+				                " reaches PU. Protected FK cols on " + table_lower);
+#endif
+				// Also protect the referenced (PK) columns on the parent table.
+				// E.g., lineitem(l_orderkey) REFERENCES orders(o_orderkey):
+				// l_orderkey is protected above; o_orderkey must also be protected
+				// because it's a key along the PAC link chain.
+				// Try real FK constraints first, then PAC_LINK metadata.
+				auto ref_pk_cols = FindReferencedPKColumns(context, table_name, ref_table);
+				if (ref_pk_cols.empty()) {
+					// Fall back to PAC_LINK metadata
+					auto *table_pac_meta = metadata_mgr.GetTableMetadata(table_name);
+					if (table_pac_meta) {
+						for (auto &link : table_pac_meta->links) {
+							if (StringUtil::Lower(link.referenced_table) == ref_lower) {
+								for (auto &ref_col : link.referenced_columns) {
+									ref_pk_cols.push_back(ref_col);
+								}
+							}
+						}
+					}
+				}
+				for (auto &pk_col : ref_pk_cols) {
+					result.protected_columns[ref_lower].insert(StringUtil::Lower(pk_col));
+#if PAC_DEBUG
+					PAC_DEBUG_PRINT("Source2: also protecting referenced col " + ref_lower + "." + pk_col);
+#endif
+				}
 			}
 		}
 	}

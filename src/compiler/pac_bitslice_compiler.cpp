@@ -999,7 +999,7 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 	    FilterTargetAggregatesWithPUKeyCheck(all_aggregates, fk_linked_tables_vec, check, privacy_units, cte_map);
 
 	if (target_aggregates.empty()) {
-		throw InternalException("PAC Compiler: no aggregate nodes with FK-linked tables found in plan");
+		throw InvalidInputException("PAC Compiler: no aggregate nodes with FK-linked tables found in plan");
 	}
 
 #if PAC_DEBUG
@@ -1012,6 +1012,151 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 	// to handle correlated subqueries correctly
 	std::unordered_map<idx_t, ColumnBinding> hash_cache;
 	for (auto *target_agg : target_aggregates) {
+		// === Q13 PATTERN: outer aggregate over inner aggregate that groups by link key ===
+		// When the FK table (e.g., orders) is NOT directly reachable from the target aggregate
+		// (it's behind an inner aggregate), we need to:
+		// 1. Insert hash projection in the inner aggregate's subtree
+		// 2. Propagate the hash through the inner aggregate's GROUP BY
+		// 3. Then propagate from inner aggregate's output to the outer aggregate
+		if (!fk_table_with_pu_reference.empty()) {
+			// Check if the FK table is reachable but NOT directly (i.e., behind an inner aggregate)
+			bool has_fk_table_in_subtree = HasTableInSubtree(target_agg, fk_table_with_pu_reference);
+			bool fk_table_directly_reachable = false;
+			if (has_fk_table_in_subtree) {
+				auto *fk_get = FindTableScanInSubtree(target_agg, fk_table_with_pu_reference);
+				if (fk_get) {
+					fk_table_directly_reachable = IsDirectlyReachable(target_agg, fk_get->table_index);
+				}
+			}
+
+			if (has_fk_table_in_subtree && !fk_table_directly_reachable) {
+				// FK table is behind an inner aggregate — Q13 pattern
+				// Find the inner aggregate
+				LogicalAggregate *inner_agg = nullptr;
+				vector<LogicalOperator *> path_to_inner;
+
+				std::function<LogicalAggregate *(LogicalOperator *, vector<LogicalOperator *> &)> find_inner_agg =
+				    [&](LogicalOperator *op, vector<LogicalOperator *> &path) -> LogicalAggregate * {
+					if (!op) {
+						return nullptr;
+					}
+					if (op->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+						return &op->Cast<LogicalAggregate>();
+					}
+					// Don't traverse into DELIM_JOIN/DEPENDENT_JOIN (correlated subquery boundaries)
+					if (op->type == LogicalOperatorType::LOGICAL_DELIM_JOIN ||
+					    op->type == LogicalOperatorType::LOGICAL_DEPENDENT_JOIN) {
+						return nullptr;
+					}
+					path.push_back(op);
+					for (auto &c : op->children) {
+						if (auto *found = find_inner_agg(c.get(), path)) {
+							return found;
+						}
+					}
+					path.pop_back();
+					return nullptr;
+				};
+
+				for (auto &child : target_agg->children) {
+					path_to_inner.clear();
+					inner_agg = find_inner_agg(child.get(), path_to_inner);
+					if (inner_agg) {
+						break;
+					}
+				}
+
+				if (inner_agg && AggregateGroupsByPUKey(inner_agg, check, privacy_units)) {
+					// Inner aggregate groups by a protected column (link key) — confirmed Q13 pattern
+					auto *fk_get = FindTableScanInSubtree(inner_agg, fk_table_with_pu_reference);
+					if (fk_get) {
+						// Get FK columns that reference the PU
+						vector<string> fk_cols;
+						auto it = check.table_metadata.find(fk_table_with_pu_reference);
+						if (it != check.table_metadata.end()) {
+							for (auto &fk : it->second.fks) {
+								for (auto &pu : privacy_units) {
+									if (fk.first == pu) {
+										fk_cols = fk.second;
+										break;
+									}
+								}
+								if (!fk_cols.empty()) {
+									break;
+								}
+							}
+						}
+
+						if (!fk_cols.empty()) {
+							// Step 1: Insert hash projection above the FK table scan
+							auto hash_binding =
+							    GetOrInsertHashProjection(input, plan, *fk_get, fk_cols, false, hash_cache);
+
+							// Step 2: Propagate hash to the inner aggregate
+							auto propagated_to_inner = PropagateSingleBinding(
+							    *plan, hash_binding.table_index, hash_binding, LogicalType::UBIGINT, inner_agg);
+
+							if (propagated_to_inner.table_index != DConstants::INVALID_INDEX) {
+								// Step 3: Add hash as a GROUP BY column in the inner aggregate
+								// This is safe because the hash is functionally determined by o.id
+								// (which is already in the GROUP BY)
+								auto hash_group_col =
+								    make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT, propagated_to_inner);
+								inner_agg->groups.push_back(std::move(hash_group_col));
+								inner_agg->ResolveOperatorTypes();
+
+								// Step 4: Get hash binding from inner aggregate's output
+								// Group columns are output first, so the new group is at the end
+								ColumnBinding inner_hash_binding(inner_agg->group_index, inner_agg->groups.size() - 1);
+
+								// Step 5: Propagate from inner aggregate output to outer aggregate
+								// Trace through projections between inner and outer
+								ColumnBinding current_binding = inner_hash_binding;
+								for (auto it2 = path_to_inner.rbegin(); it2 != path_to_inner.rend(); ++it2) {
+									LogicalOperator *op = *it2;
+									if (op->type == LogicalOperatorType::LOGICAL_PROJECTION) {
+										auto &proj = op->Cast<LogicalProjection>();
+										bool found = false;
+										for (idx_t expr_idx = 0; expr_idx < proj.expressions.size(); expr_idx++) {
+											auto &expr = proj.expressions[expr_idx];
+											if (expr->type == ExpressionType::BOUND_COLUMN_REF) {
+												auto &proj_col_ref = expr->Cast<BoundColumnRefExpression>();
+												if (proj_col_ref.binding == current_binding) {
+													current_binding = ColumnBinding(proj.table_index, expr_idx);
+													found = true;
+													break;
+												}
+											}
+										}
+										if (!found) {
+											// Hash column not yet projected — add it to the projection
+											auto new_col_ref = make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT,
+											                                                       current_binding);
+											proj.expressions.push_back(std::move(new_col_ref));
+											current_binding =
+											    ColumnBinding(proj.table_index, proj.expressions.size() - 1);
+										}
+									}
+									// For FILTER and other pass-through operators, bindings pass through unchanged
+								}
+
+								// Step 6: Transform outer aggregate with PAC functions
+								unique_ptr<Expression> hash_ref =
+								    make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT, current_binding);
+								ModifyAggregatesWithPacFunctions(input, target_agg, hash_ref);
+
+#if PAC_DEBUG
+								PAC_DEBUG_PRINT("ModifyPlanWithoutPU: Q13 pattern handled — hash propagated "
+								                "through inner aggregate to outer aggregate");
+#endif
+								continue; // Move to next target aggregate
+							}
+						}
+					}
+				}
+			}
+		}
+
 		// Find which connecting table (lineitem) this aggregate has in its DIRECT path
 		// (not in a nested subquery), and use the corresponding FK table (orders)
 		idx_t orders_table_idx = DConstants::INVALID_INDEX;

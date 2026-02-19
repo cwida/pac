@@ -42,6 +42,11 @@ vector<string> FindPrimaryKey(ClientContext &context, const string &table_name);
 // Returns a vector of pairs: (referenced_table_name, list_of_fk_column_names) for each FK constraint.
 vector<std::pair<string, vector<string>>> FindForeignKeys(ClientContext &context, const string &table_name);
 
+// Find the referenced (PK) columns on the parent table for a specific FK relationship.
+// E.g., for lineitem(l_orderkey) REFERENCES orders(o_orderkey), calling
+// FindReferencedPKColumns(ctx, "lineitem", "orders") returns {"o_orderkey"}.
+vector<string> FindReferencedPKColumns(ClientContext &context, const string &table_name, const string &ref_table);
+
 // Find foreign-key path(s) from any of `table_names` to any of `privacy_units`.
 // Returns a map: start_table (as provided) -> path (vector of qualified table names from start to privacy unit,
 // inclusive). If no path exists for a start table, it will not appear in the returned map.
