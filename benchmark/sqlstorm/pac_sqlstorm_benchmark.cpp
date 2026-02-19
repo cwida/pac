@@ -1,7 +1,7 @@
 //
-// SQLStorm TPC-H benchmark runner for DuckDB (no Docker, no OLAPBench).
-// Generates TPC-H SF1 data using DuckDB's built-in generator, then runs
-// all SQLStorm v1.0 TPC-H queries and reports success/failure/timeout stats.
+// SQLStorm TPC-H benchmark runner for DuckDB.
+// Two-pass design: runs all SQLStorm queries first without PAC (baseline),
+// then loads the PAC schema and runs them again. Reports statistics for both.
 //
 
 #include "pac_sqlstorm_benchmark.hpp"
@@ -98,7 +98,6 @@ static string QueryName(const string &path) {
 }
 
 static string FindSchemaFile(const string &filename) {
-	// Try common relative locations
 	vector<string> candidates = {
 		filename,
 		"./" + filename,
@@ -145,7 +144,6 @@ static string FindSchemaFile(const string &filename) {
 
 // Try to find the SQLStorm queries directory
 static string FindQueriesDir() {
-	// Common relative paths from where the binary might be run
 	vector<string> candidates = {
 		"SQLStorm/v1.0/tpch/queries",
 	    "benchmark/sqlstorm/SQLStorm/v1.0/tpch/queries",
@@ -186,11 +184,396 @@ static string FindQueriesDir() {
 
 struct BenchmarkQueryResult {
 	string name;
-	string state;   // "success", "error", "timeout"
+	string state;   // "success", "error", "timeout", "crash"
 	double time_ms;
 	int64_t rows;
 	string error;
+	bool pac_applied; // true if EXPLAIN output contains pac_ functions
 };
+
+struct PassStats {
+	int success = 0;
+	int failed = 0;
+	int timed_out = 0;
+	int crashed = 0;
+	int pac_applied = 0;
+	double total_success_time = 0;
+};
+
+// Load the PAC TPC-H schema by executing each statement individually
+static void LoadPACSchema(Connection &con) {
+	string schema_file = FindSchemaFile("pac_tpch_schema.sql");
+	if (schema_file.empty()) {
+		throw std::runtime_error("Cannot find pac_tpch_schema.sql");
+	}
+
+	Log("Loading PAC schema from: " + schema_file);
+	string schema_sql = ReadFileToString(schema_file);
+	if (schema_sql.empty()) {
+		throw std::runtime_error("PAC schema file is empty: " + schema_file);
+	}
+
+	// Execute statement-by-statement (PAC parser needs individual ALTER statements)
+	std::istringstream sql_stream(schema_sql);
+	string line;
+	string current_statement;
+
+	while (std::getline(sql_stream, line)) {
+		string trimmed = line;
+		size_t start = trimmed.find_first_not_of(" \t\r\n");
+		if (start == string::npos) continue;
+		trimmed = trimmed.substr(start);
+		if (trimmed.empty() || trimmed.substr(0, 2) == "--") continue;
+
+		current_statement += line + " ";
+
+		if (trimmed.find(';') != string::npos) {
+			auto result = con.Query(current_statement);
+			if (result->HasError()) {
+				throw std::runtime_error("PAC schema error: " + result->GetError() +
+				                         "\nStatement: " + current_statement);
+			}
+			current_statement.clear();
+		}
+	}
+
+	if (!current_statement.empty()) {
+		string trimmed = current_statement;
+		size_t start = trimmed.find_first_not_of(" \t\r\n");
+		if (start != string::npos) {
+			auto result = con.Query(current_statement);
+			if (result->HasError()) {
+				throw std::runtime_error("PAC schema error: " + result->GetError());
+			}
+		}
+	}
+
+	Log("PAC schema loaded successfully");
+}
+
+// Run a single query with timeout, returning the result
+static BenchmarkQueryResult RunQuery(Connection &con, const string &name, const string &sql, double timeout_s) {
+	BenchmarkQueryResult qr;
+	qr.name = name;
+	qr.rows = 0;
+	qr.pac_applied = false;
+
+	try {
+		unique_ptr<MaterializedQueryResult> result;
+		std::atomic<bool> query_done {false};
+		std::exception_ptr query_exception;
+
+		auto start = std::chrono::steady_clock::now();
+		std::thread query_thread([&]() {
+			try {
+				result = con.Query(sql);
+			} catch (...) {
+				query_exception = std::current_exception();
+			}
+			query_done.store(true, std::memory_order_release);
+		});
+
+		auto deadline = start + std::chrono::duration<double>(timeout_s);
+		while (!query_done.load(std::memory_order_acquire)) {
+			if (std::chrono::steady_clock::now() >= deadline) {
+				con.Interrupt();
+				break;
+			}
+			std::this_thread::sleep_for(std::chrono::milliseconds(10));
+		}
+		query_thread.join();
+		auto end = std::chrono::steady_clock::now();
+		qr.time_ms = std::chrono::duration<double, std::milli>(end - start).count();
+
+		if (query_exception) {
+			std::rethrow_exception(query_exception);
+		}
+
+		if (result && result->HasError()) {
+			qr.error = result->GetError();
+			// Strip stack traces for cleaner grouping
+			auto stack_pos = qr.error.find("\n\nStack Trace");
+			if (stack_pos != string::npos) {
+				qr.error = qr.error.substr(0, stack_pos);
+			}
+			if (qr.error.size() > 200) {
+				qr.error = qr.error.substr(0, 200);
+			}
+			if (qr.error.find("FATAL") != string::npos ||
+			    qr.error.find("database has been invalidated") != string::npos) {
+				qr.state = "crash";
+			} else if (qr.error.find("INTERRUPT") != string::npos ||
+			           qr.error.find("Interrupted") != string::npos) {
+				qr.state = "timeout";
+			} else {
+				qr.state = "error";
+			}
+		} else if (qr.time_ms > timeout_s * 1000) {
+			qr.state = "timeout";
+		} else {
+			qr.state = "success";
+			if (result) {
+				int64_t row_count = 0;
+				while (auto chunk = result->Fetch()) {
+					row_count += chunk->size();
+				}
+				qr.rows = row_count;
+			}
+		}
+	} catch (std::exception &e) {
+		string err = e.what();
+		auto stack_pos = err.find("\n\nStack Trace");
+		if (stack_pos != string::npos) {
+			err = err.substr(0, stack_pos);
+		}
+		if (err.size() > 200) {
+			err = err.substr(0, 200);
+		}
+		qr.error = err;
+		// Classify the exception the same way as result errors:
+		// only FATAL / database invalidation are true crashes
+		if (err.find("FATAL") != string::npos ||
+		    err.find("database has been invalidated") != string::npos) {
+			qr.state = "crash";
+		} else if (err.find("INTERRUPT") != string::npos ||
+		           err.find("Interrupted") != string::npos) {
+			qr.state = "timeout";
+		} else {
+			qr.state = "error";
+		}
+	} catch (...) {
+		qr.state = "crash";
+		qr.time_ms = 0;
+		qr.error = "unexpected crash (non-std::exception)";
+	}
+
+	return qr;
+}
+
+// Run all queries in a single pass, reconnecting on crashes
+static vector<BenchmarkQueryResult> RunPass(const string &label, vector<string> &query_files,
+                                            unique_ptr<DuckDB> &db, unique_ptr<Connection> &con,
+                                            const string &db_path, double timeout_s,
+                                            PassStats &stats, bool check_pac = false) {
+	int total = static_cast<int>(query_files.size());
+	int log_interval = std::max(1, total / 20);
+	vector<BenchmarkQueryResult> results;
+
+	auto reconnect = [&]() {
+		con.reset();
+		db.reset();
+		db = make_uniq<DuckDB>(db_path.c_str());
+		con = make_uniq<Connection>(*db);
+		con->Query("INSTALL icu; LOAD icu;");
+		con->Query("INSTALL tpch; LOAD tpch;");
+		auto r = con->Query("LOAD pac");
+		if (r->HasError()) {
+			throw std::runtime_error("Failed to load PAC extension: " + r->GetError());
+		}
+	};
+
+	Log("=== " + label + " pass: running " + std::to_string(total) + " queries ===");
+
+	for (int i = 0; i < total; ++i) {
+		auto &qf = query_files[i];
+		string name = QueryName(qf);
+		string sql = ReadFileToString(qf);
+		if (sql.empty()) {
+			results.push_back({name, "error", 0, 0, "empty query file"});
+			stats.failed++;
+			continue;
+		}
+
+		auto qr = RunQuery(*con, name, sql, timeout_s);
+
+		if (qr.state == "success") {
+			stats.success++;
+			stats.total_success_time += qr.time_ms;
+			// Check if PAC was actually applied via EXPLAIN
+			if (check_pac) {
+				try {
+					auto explain_result = con->Query("EXPLAIN " + sql);
+					if (explain_result && !explain_result->HasError()) {
+						for (idx_t row = 0; row < explain_result->RowCount(); row++) {
+							string plan_text = explain_result->GetValue(1, row).ToString();
+							if (plan_text.find("pac_") != string::npos) {
+								qr.pac_applied = true;
+								stats.pac_applied++;
+								break;
+							}
+						}
+					}
+				} catch (...) {
+					// EXPLAIN failed — skip silently
+				}
+			}
+		} else if (qr.state == "timeout") {
+			stats.timed_out++;
+		} else if (qr.state == "crash") {
+			stats.crashed++;
+			Log("Database crash on query " + name + ": " + qr.error);
+		Log("  reconnecting...");
+			reconnect();
+		} else {
+			stats.failed++;
+		}
+
+		results.push_back(qr);
+
+		if ((i + 1) % log_interval == 0 || i + 1 == total) {
+			string progress = "[" + label + "] [" + std::to_string(i + 1) + "/" + std::to_string(total) +
+			    "] success=" + std::to_string(stats.success) +
+			    " failed=" + std::to_string(stats.failed) +
+			    " crash=" + std::to_string(stats.crashed) +
+			    " timeout=" + std::to_string(stats.timed_out);
+			if (check_pac) {
+				progress += " pac=" + std::to_string(stats.pac_applied);
+			}
+			Log(progress);
+		}
+	}
+
+	return results;
+}
+
+static void PrintPassStats(const string &label, const PassStats &stats, int total) {
+	Log("--- " + label + " ---");
+	Log("  Total:   " + std::to_string(total));
+	Log("  Success: " + std::to_string(stats.success) + " (" + FormatNumber(100.0 * stats.success / total) + "%)");
+	Log("  Failed:  " + std::to_string(stats.failed) + " (" + FormatNumber(100.0 * stats.failed / total) + "%)");
+	Log("  Crash:   " + std::to_string(stats.crashed) + " (" + FormatNumber(100.0 * stats.crashed / total) + "%)");
+	Log("  Timeout: " + std::to_string(stats.timed_out) + " (" + FormatNumber(100.0 * stats.timed_out / total) + "%)");
+	if (stats.pac_applied > 0) {
+		int not_applied = stats.success - stats.pac_applied;
+		Log("  PAC applied:     " + std::to_string(stats.pac_applied) +
+		    " (" + FormatNumber(100.0 * stats.pac_applied / total) + "% of total, " +
+		    FormatNumber(100.0 * stats.pac_applied / std::max(1, stats.success)) + "% of successful)");
+		Log("  PAC not applied: " + std::to_string(not_applied) +
+		    " (" + FormatNumber(100.0 * not_applied / total) + "% of total, " +
+		    FormatNumber(100.0 * not_applied / std::max(1, stats.success)) + "% of successful)");
+	}
+	if (stats.success > 0) {
+		Log("  Total time (successful): " + FormatNumber(stats.total_success_time) + " ms");
+		Log("  Avg time per successful query: " + FormatNumber(stats.total_success_time / stats.success) + " ms");
+	}
+}
+
+static string FormatQueryList(const vector<string> &names, size_t max_show = 10) {
+	string out;
+	for (size_t i = 0; i < names.size(); ++i) {
+		if (i > 0) out += ", ";
+		if (i >= max_show) {
+			out += "... +" + std::to_string(names.size() - i) + " more";
+			break;
+		}
+		out += names[i];
+	}
+	return out;
+}
+
+static void PrintErrorBreakdown(const string &label, const vector<BenchmarkQueryResult> &results, int total) {
+	int total_errors = 0;
+	std::map<string, int> error_counts;
+	std::map<string, vector<string>> error_queries;
+	for (auto &r : results) {
+		if (r.state == "error" || r.state == "crash") {
+			error_counts[r.error]++;
+			error_queries[r.error].push_back(r.name);
+			total_errors++;
+		}
+	}
+	if (error_counts.empty()) return;
+
+	vector<std::pair<string, int>> sorted_errors(error_counts.begin(), error_counts.end());
+	std::sort(sorted_errors.begin(), sorted_errors.end(),
+	          [](const std::pair<string, int> &a, const std::pair<string, int> &b) {
+		          return a.second > b.second;
+	          });
+
+	Log("=== " + label + " Error Breakdown (" + std::to_string(total_errors) + " total) ===");
+	for (auto &e : sorted_errors) {
+		string pct = FormatNumber(100.0 * e.second / total);
+		string msg = e.first;
+		if (msg.size() > 70) {
+			msg = msg.substr(0, 70) + "...";
+		}
+		Log("  " + std::to_string(e.second) + "x (" + pct + "%) " + msg);
+	}
+
+	// Collect INTERNAL errors grouped by message, with query names
+	std::map<string, vector<string>> internal_groups;
+	for (auto &e : sorted_errors) {
+		if (e.first.find("INTERNAL") != string::npos) {
+			internal_groups[e.first] = error_queries[e.first];
+		}
+	}
+	if (!internal_groups.empty()) {
+		Log("=== " + label + " Internal Errors (queries) ===");
+		for (auto &g : internal_groups) {
+			string msg = g.first;
+			if (msg.size() > 100) {
+				msg = msg.substr(0, 100) + "...";
+			}
+			Log("  " + msg);
+			Log("    queries: " + FormatQueryList(g.second));
+		}
+	}
+
+	// Timeout and crash details
+	vector<string> timeout_queries, crash_queries;
+	for (auto &r : results) {
+		if (r.state == "timeout") timeout_queries.push_back(r.name);
+		else if (r.state == "crash") crash_queries.push_back(r.name);
+	}
+	if (!timeout_queries.empty()) {
+		Log("=== " + label + " Timeouts (" + std::to_string(timeout_queries.size()) + ") ===");
+		Log("  queries: " + FormatQueryList(timeout_queries, 20));
+	}
+	if (!crash_queries.empty()) {
+		Log("=== " + label + " Crashes (" + std::to_string(crash_queries.size()) + ") ===");
+		Log("  queries: " + FormatQueryList(crash_queries, 20));
+	}
+}
+
+static void WriteCSV(const string &csv_path, const vector<BenchmarkQueryResult> &baseline_results,
+                     const vector<BenchmarkQueryResult> &pac_results) {
+	std::ofstream csv(csv_path, std::ofstream::out | std::ofstream::trunc);
+	if (!csv.is_open()) {
+		Log("ERROR: Failed to open output CSV: " + csv_path);
+		return;
+	}
+	csv << "query,baseline_state,baseline_time_ms,baseline_rows,pac_state,pac_time_ms,pac_rows,pac_applied,pac_error\n";
+
+	// Build a map from query name to pac result for easy lookup
+	std::map<string, const BenchmarkQueryResult *> pac_map;
+	for (auto &r : pac_results) {
+		pac_map[r.name] = &r;
+	}
+
+	for (auto &b : baseline_results) {
+		csv << b.name << "," << b.state << "," << FormatNumber(b.time_ms) << "," << b.rows;
+
+		auto it = pac_map.find(b.name);
+		if (it != pac_map.end()) {
+			auto &p = *it->second;
+			csv << "," << p.state << "," << FormatNumber(p.time_ms) << "," << p.rows
+			    << "," << (p.pac_applied ? "yes" : "no");
+			// Write error message (quote it for CSV safety)
+			csv << ",\"";
+			for (char c : p.error) {
+				if (c == '"') csv << "\"\"";
+				else if (c == '\n' || c == '\r') csv << ' ';
+				else csv << c;
+			}
+			csv << "\"";
+		} else {
+			csv << ",,,,,";
+		}
+		csv << "\n";
+	}
+	csv.close();
+	Log("Results written to: " + csv_path);
+}
 
 int RunSQLStormBenchmark(const string &queries_dir, const string &out_csv, double timeout_s) {
 	try {
@@ -211,20 +594,14 @@ int RunSQLStormBenchmark(const string &queries_dir, const string &out_csv, doubl
 			return 1;
 		}
 
-		Log("SQLStorm TPC-H SF1 benchmark (baseline, no PAC)");
+		Log("SQLStorm TPC-H benchmark (two-pass: baseline + PAC)");
 		Log("Queries directory: " + qdir);
 		Log("Found " + std::to_string(query_files.size()) + " queries");
 		Log("Timeout: " + FormatNumber(timeout_s) + "s");
 
-		// Open file-backed DuckDB database (reuse if it already exists)
-		string db_actual = "tpch_sqlstorm.db";
-		bool db_exists = FileExists(db_actual);
-
-		if (db_exists) {
-			Log("Connecting to existing DuckDB database: " + db_actual + " (skipping data generation).");
-		} else {
-			Log("Will create/populate DuckDB database: " + db_actual);
-		}
+		// Open file-backed DuckDB database
+		string db_path = "tpch_sqlstorm.db";
+		bool db_exists = FileExists(db_path);
 
 		unique_ptr<DuckDB> db;
 		unique_ptr<Connection> con;
@@ -232,11 +609,10 @@ int RunSQLStormBenchmark(const string &queries_dir, const string &out_csv, doubl
 		auto reconnect = [&]() {
 			con.reset();
 			db.reset();
-			db = make_uniq<DuckDB>(db_actual.c_str());
+			db = make_uniq<DuckDB>(db_path.c_str());
 			con = make_uniq<Connection>(*db);
 			con->Query("INSTALL icu; LOAD icu;");
 			con->Query("INSTALL tpch; LOAD tpch;");
-			// Load PAC extension
 			auto r = con->Query("LOAD pac");
 			if (r->HasError()) {
 				throw std::runtime_error("Failed to load PAC extension: " + r->GetError());
@@ -245,8 +621,9 @@ int RunSQLStormBenchmark(const string &queries_dir, const string &out_csv, doubl
 
 		reconnect();
 
+		// Generate TPC-H data if database doesn't exist yet
 		if (!db_exists) {
-			Log("Generating TPC-H SF1 data...");
+			Log("Generating TPC-H SF0.00001 data...");
 			auto t0 = std::chrono::steady_clock::now();
 			auto r_dbgen = con->Query("CALL dbgen(sf=0.00001);");
 			auto t1 = std::chrono::steady_clock::now();
@@ -254,219 +631,56 @@ int RunSQLStormBenchmark(const string &queries_dir, const string &out_csv, doubl
 			if (r_dbgen && r_dbgen->HasError()) {
 				Log("CALL dbgen error: " + r_dbgen->GetError());
 			}
-			Log("TPC-H SF0.00001 generated in " + FormatNumber(gen_ms) + " ms");
-
-			// Execute PAC schema (same file used by TPC-H benchmark)
-			Log("Executing PAC TPC-H schema...");
-			string schema_file = FindSchemaFile("pac_tpch_schema.sql");
-			if (schema_file.empty()) {
-				Log("WARNING: Cannot find pac_tpch_schema.sql, skipping schema execution");
-			} else {
-				string schema_sql = ReadFileToString(schema_file);
-				if (!schema_sql.empty()) {
-					auto r_schema = con->Query(schema_sql);
-					if (r_schema && r_schema->HasError()) {
-						Log("Schema execution error: " + r_schema->GetError());
-					} else {
-						Log("PAC TPC-H schema applied successfully from: " + schema_file);
-					}
-				}
-			}
+			Log("TPC-H data generated in " + FormatNumber(gen_ms) + " ms");
 		} else {
-			Log("Skipping CALL dbgen since database file already exists: " + db_actual);
+			Log("Using existing database: " + db_path);
 		}
 
-		// Run all queries
-		vector<BenchmarkQueryResult> results;
-		int success = 0, failed = 0, timed_out = 0, crashed = 0;
-		double total_success_time = 0;
+		// ===== PASS 1: Baseline (no PAC) =====
+		// Clear any existing PAC metadata so queries run without PAC transforms
+		con->Query("PRAGMA clear_pac_metadata;");
+		Log("Cleared PAC metadata for baseline pass");
+
+		PassStats baseline_stats;
+		auto baseline_results = RunPass("Baseline", query_files, db, con, db_path, timeout_s, baseline_stats);
+
+		// ===== Load PAC schema =====
+		LoadPACSchema(*con);
+
+		// ===== PASS 2: PAC =====
+		PassStats pac_stats;
+		auto pac_results = RunPass("PAC", query_files, db, con, db_path, timeout_s, pac_stats, true);
+
+		// ===== Print statistics =====
 		int total = static_cast<int>(query_files.size());
-		int log_interval = std::max(1, total / 20); // log ~20 times
+		Log("========================================");
+		Log("=== RESULTS ===");
+		Log("========================================");
+		PrintPassStats("Baseline (no PAC)", baseline_stats, total);
+		PrintPassStats("PAC", pac_stats, total);
 
-		for (int i = 0; i < total; ++i) {
-			auto &qf = query_files[i];
-			string name = QueryName(qf);
-			string sql = ReadFileToString(qf);
-			if (sql.empty()) {
-				results.push_back({name, "error", 0, 0, "empty query file"});
-				failed++;
-				continue;
-			}
-
-			BenchmarkQueryResult qr;
-			qr.name = name;
-			qr.rows = 0;
-
-			try {
-				// Run query in a separate thread so we can enforce the timeout
-				// by calling con->Interrupt() from the main thread.
-				unique_ptr<MaterializedQueryResult> result;
-				std::atomic<bool> query_done {false};
-				std::exception_ptr query_exception;
-
-				auto start = std::chrono::steady_clock::now();
-				std::thread query_thread([&]() {
-					try {
-						result = con->Query(sql);
-					} catch (...) {
-						query_exception = std::current_exception();
-					}
-					query_done.store(true, std::memory_order_release);
-				});
-
-				// Poll until query finishes or timeout expires
-				auto deadline = start + std::chrono::duration<double>(timeout_s);
-				while (!query_done.load(std::memory_order_acquire)) {
-					if (std::chrono::steady_clock::now() >= deadline) {
-						con->Interrupt();
-						break;
-					}
-					std::this_thread::sleep_for(std::chrono::milliseconds(10));
-				}
-				query_thread.join();
-				auto end = std::chrono::steady_clock::now();
-				qr.time_ms = std::chrono::duration<double, std::milli>(end - start).count();
-
-				// Re-throw any exception from the query thread
-				if (query_exception) {
-					std::rethrow_exception(query_exception);
-				}
-
-				if (result && result->HasError()) {
-					qr.state = "error";
-					qr.error = result->GetError();
-					// Truncate long error messages
-					if (qr.error.size() > 200) {
-						qr.error = qr.error.substr(0, 200);
-					}
-					// Detect fatal errors that invalidate the database
-					if (qr.error.find("FATAL") != string::npos ||
-					    qr.error.find("database has been invalidated") != string::npos) {
-						qr.state = "crash";
-						crashed++;
-						Log("Database invalidated by query " + name + " (" + qf + "), reconnecting...");
-						reconnect();
-					} else if (qr.error.find("INTERRUPT") != string::npos ||
-					           qr.error.find("Interrupted") != string::npos) {
-						qr.state = "timeout";
-						timed_out++;
-					} else {
-						failed++;
-					}
-				} else if (qr.time_ms > timeout_s * 1000) {
-					qr.state = "timeout";
-					timed_out++;
-				} else {
-					qr.state = "success";
-					if (result) {
-						// Count rows by fetching
-						int64_t row_count = 0;
-						while (auto chunk = result->Fetch()) {
-							row_count += chunk->size();
-						}
-						qr.rows = row_count;
-					}
-					success++;
-					total_success_time += qr.time_ms;
-				}
-			} catch (std::exception &e) {
-				qr.state = "crash";
-				qr.time_ms = 0;
-				string err = e.what();
-				if (err.size() > 200) {
-					err = err.substr(0, 200);
-				}
-				qr.error = err;
-				crashed++;
-				Log("Exception on query " + name + " (" + qf + "): " + err + ", reconnecting...");
-				reconnect();
-			} catch (...) {
-				qr.state = "crash";
-				qr.time_ms = 0;
-				qr.error = "unexpected crash (non-std::exception)";
-				crashed++;
-				Log("Unknown crash on query " + name + " (" + qf + "), reconnecting...");
-				reconnect();
-			}
-
-			results.push_back(qr);
-
-			if ((i + 1) % log_interval == 0 || i + 1 == total) {
-				Log("[" + std::to_string(i + 1) + "/" + std::to_string(total) +
-				    "] success=" + std::to_string(success) +
-				    " failed=" + std::to_string(failed) +
-				    " crash=" + std::to_string(crashed) +
-				    " timeout=" + std::to_string(timed_out));
-			}
+		// Comparison: queries that changed state between passes
+		int baseline_only_success = 0, pac_only_success = 0, both_success = 0;
+		for (size_t i = 0; i < baseline_results.size() && i < pac_results.size(); ++i) {
+			bool b_ok = baseline_results[i].state == "success";
+			bool p_ok = pac_results[i].state == "success";
+			if (b_ok && p_ok) both_success++;
+			else if (b_ok && !p_ok) baseline_only_success++;
+			else if (!b_ok && p_ok) pac_only_success++;
 		}
+		Log("--- Comparison ---");
+		Log("  Both succeeded: " + std::to_string(both_success));
+		Log("  Baseline only:  " + std::to_string(baseline_only_success));
+		Log("  PAC only:       " + std::to_string(pac_only_success));
 
-		// Write CSV
+		PrintErrorBreakdown("Baseline", baseline_results, total);
+		PrintErrorBreakdown("PAC", pac_results, total);
+
+		// Write CSV with both passes
 		string csv_path = out_csv.empty() ? "benchmark/sqlstorm/sqlstorm_results.csv" : out_csv;
-		std::ofstream csv(csv_path, std::ofstream::out | std::ofstream::trunc);
-		if (!csv.is_open()) {
-			Log("ERROR: Failed to open output CSV: " + csv_path);
-			return 1;
-		}
-		csv << "query,state,time_ms,rows,error\n";
-		for (auto &r : results) {
-			// Escape quotes in error messages
-			string escaped_error = r.error;
-			size_t pos = 0;
-			while ((pos = escaped_error.find('"', pos)) != string::npos) {
-				escaped_error.replace(pos, 1, "\"\"");
-				pos += 2;
-			}
-			csv << r.name << "," << r.state << "," << FormatNumber(r.time_ms) << ","
-			    << r.rows << ",\"" << escaped_error << "\"\n";
-		}
-		csv.close();
+		WriteCSV(csv_path, baseline_results, pac_results);
 
-		// Summary
-		Log("=== Results ===");
-		Log("Results written to: " + csv_path);
-		Log("Total:   " + std::to_string(total));
-		Log("Success: " + std::to_string(success) + " (" + FormatNumber(100.0 * success / total) + "%)");
-		Log("Failed:  " + std::to_string(failed) + " (" + FormatNumber(100.0 * failed / total) + "%)");
-		Log("Crash:   " + std::to_string(crashed) + " (" + FormatNumber(100.0 * crashed / total) + "%)");
-		Log("Timeout: " + std::to_string(timed_out) + " (" + FormatNumber(100.0 * timed_out / total) + "%)");
-		if (success > 0) {
-			Log("Total time (successful): " + FormatNumber(total_success_time) + " ms");
-			Log("Avg time per successful query: " + FormatNumber(total_success_time / success) + " ms");
-		}
-
-		// Error breakdown by message
-		if (failed + crashed > 0) {
-			std::map<string, int> error_counts;
-			for (auto &r : results) {
-				if (r.state == "error" || r.state == "crash") {
-					error_counts[r.error]++;
-				}
-			}
-			// Sort by count descending
-			vector<std::pair<string, int>> sorted_errors(error_counts.begin(), error_counts.end());
-			std::sort(sorted_errors.begin(), sorted_errors.end(),
-			          [](const std::pair<string, int> &a, const std::pair<string, int> &b) {
-				          return a.second > b.second;
-			          });
-
-			Log("=== Error Breakdown ===");
-			for (size_t ei = 0; ei < sorted_errors.size(); ++ei) {
-				Log("  " + std::to_string(sorted_errors[ei].second) + "x " + sorted_errors[ei].first);
-			}
-
-			// Print queries with INTERNAL errors
-			bool has_internal = false;
-			for (size_t ri = 0; ri < results.size(); ++ri) {
-				if (results[ri].error.find("INTERNAL") != string::npos) {
-					if (!has_internal) {
-						Log("=== Internal Errors (queries) ===");
-						has_internal = true;
-					}
-					Log("  query " + results[ri].name + ": " + results[ri].error);
-				}
-			}
-		}
-
+		// NOTE: PAC metadata is intentionally NOT cleared at the end
 		return 0;
 
 	} catch (std::exception &ex) {

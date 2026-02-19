@@ -11,11 +11,11 @@
 
 namespace duckdb {
 
-// Run the SQLStorm TPC-H SF1 benchmark (baseline, no PAC).
-// This benchmark:
-// 1. Creates an in-memory DuckDB with TPC-H SF1 data
-// 2. Runs all SQLStorm v1.0 TPC-H queries
-// 3. Reports success/failure/timeout statistics
+// Run the SQLStorm TPC-H benchmark with two passes:
+// 1. Clear PAC metadata, run all queries (baseline, no PAC)
+// 2. Load PAC schema, run all queries again (with PAC)
+// 3. Print statistics for both modes
+// PAC metadata is NOT cleared at the end.
 //
 // Parameters:
 // - queries_dir: directory containing SQLStorm .sql query files
