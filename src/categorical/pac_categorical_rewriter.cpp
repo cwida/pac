@@ -1364,7 +1364,8 @@ static void RewriteBottomUp(unique_ptr<LogicalOperator> &op_ptr, OptimizerExtens
 		// Check for standard aggregates over counters (e.g., sum(LIST<DOUBLE>) → pac_sum_list)
 		// Children already converted (bottom-up), so their types are LIST<DOUBLE>
 		ReplaceAggregatesOverCounters(op, input.context, plan_root);
-	} else if (op->type == LogicalOperatorType::LOGICAL_PROJECTION && !inside_cte_definition) { // === PROJECTION: rewrite PAC expressions ===
+	} else if (op->type == LogicalOperatorType::LOGICAL_PROJECTION &&
+	           !inside_cte_definition) { // === PROJECTION: rewrite PAC expressions ===
 		auto &proj = op->Cast<LogicalProjection>();
 		bool is_filter_pattern = IsProjectionReferencedByFilterPattern(proj, patterns, plan_root);
 		// A projection is terminal if it's the top-level output projection:
@@ -1385,7 +1386,8 @@ static void RewriteBottomUp(unique_ptr<LogicalOperator> &op_ptr, OptimizerExtens
 			RewriteProjectionExpression(input, proj, i, plan_root, is_filter_pattern, is_terminal,
 			                            saved_filter_pattern_exprs);
 		}
-	} else if (op->type == LogicalOperatorType::LOGICAL_FILTER && !inside_cte_definition) { // === FILTER: rewrite expressions with pac_filter ===
+	} else if (op->type == LogicalOperatorType::LOGICAL_FILTER &&
+	           !inside_cte_definition) { // === FILTER: rewrite expressions with pac_filter ===
 		// Inline saved projection arithmetic expressions into filter expressions.
 		// This fuses the projection's list_transform into the filter's lambda for a single pass.
 		if (!saved_filter_pattern_exprs.empty()) {
@@ -1467,7 +1469,8 @@ static void RewriteBottomUp(unique_ptr<LogicalOperator> &op_ptr, OptimizerExtens
 			}
 		}
 	} else if ((op->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN ||
-	            op->type == LogicalOperatorType::LOGICAL_DELIM_JOIN) && !inside_cte_definition) { // === JOIN: rewrite comparison conditions ===
+	            op->type == LogicalOperatorType::LOGICAL_DELIM_JOIN) &&
+	           !inside_cte_definition) { // === JOIN: rewrite comparison conditions ===
 		// Inline saved projection arithmetic into join conditions
 		if (!saved_filter_pattern_exprs.empty()) {
 			auto &join = op->Cast<LogicalComparisonJoin>();

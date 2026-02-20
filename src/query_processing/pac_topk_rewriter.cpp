@@ -630,6 +630,59 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 		}
 
 		// ------------------------------------------------------------------
+		// Step A3b: Wrap LIST-typed column refs inside compound expressions
+		// with pac_noised(). After _counters conversion, PAC aggregate
+		// columns are LIST<FLOAT>. Simple column refs are handled later by
+		// NoisedProj, but compound expressions (e.g. CONCAT using aggregate
+		// results) need scalar values at evaluation time.
+		// ------------------------------------------------------------------
+#if PAC_DEBUG
+		PAC_DEBUG_PRINT("PACTopKRule: Step A3b - Wrapping LIST refs in compound expressions");
+#endif
+		for (auto *proj : ctx.intermediate_projections) {
+			for (idx_t i = 0; i < proj->expressions.size(); i++) {
+				auto &expr = proj->expressions[i];
+#if PAC_DEBUG
+				PAC_DEBUG_PRINT("PACTopKRule:   A3b proj expr[" + std::to_string(i) +
+				                "] type=" + std::to_string((int)expr->type) +
+				                " return_type=" + expr->return_type.ToString() + " expr=" + expr->ToString());
+#endif
+				if (expr->type == ExpressionType::BOUND_COLUMN_REF) {
+					continue;
+				}
+				std::function<void(unique_ptr<Expression> &)> WrapListRefs = [&](unique_ptr<Expression> &e) {
+					if (e->type == ExpressionType::BOUND_COLUMN_REF && e->return_type.id() == LogicalTypeId::LIST) {
+#if PAC_DEBUG
+						PAC_DEBUG_PRINT("PACTopKRule:     A3b WRAPPING LIST colref: " + e->ToString());
+#endif
+						e = input.optimizer.BindScalarFunction("pac_noised", std::move(e));
+						return;
+					}
+					// If this is a CAST whose child is a LIST colref, replace the
+					// entire CAST so the bound cast function matches the new source
+					// type (FLOAT from pac_noised instead of original INT64/DECIMAL).
+					if (e->GetExpressionClass() == ExpressionClass::BOUND_CAST) {
+						auto &cast_expr = e->Cast<BoundCastExpression>();
+						if (cast_expr.child->type == ExpressionType::BOUND_COLUMN_REF &&
+						    cast_expr.child->return_type.id() == LogicalTypeId::LIST) {
+							auto target_type = cast_expr.return_type;
+#if PAC_DEBUG
+							PAC_DEBUG_PRINT("PACTopKRule:     A3b REPLACING CAST(LIST->" + target_type.ToString() +
+							                ") with CAST(pac_noised()->" + target_type.ToString() + ")");
+#endif
+							auto noised = input.optimizer.BindScalarFunction("pac_noised", std::move(cast_expr.child));
+							e = BoundCastExpression::AddCastToType(input.context, std::move(noised), target_type);
+							return;
+						}
+					}
+					ExpressionIterator::EnumerateChildren(*e, WrapListRefs);
+				};
+				WrapListRefs(expr);
+			}
+			proj->ResolveOperatorTypes();
+		}
+
+		// ------------------------------------------------------------------
 		// Step A4: Rewrite TopN ORDER BY — only PAC aggregate references
 		// are rewritten to point to the pac_mean passthrough column in the
 		// outermost projection. Non-PAC refs (e.g. o_orderpriority through
