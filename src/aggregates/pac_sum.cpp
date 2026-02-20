@@ -405,6 +405,7 @@ void PacSumFinalize(Vector &states, AggregateInputData &input, Vector &result, i
 	uint64_t query_hash = input.bind_data ? input.bind_data->Cast<PacBindData>().query_hash : 0;
 	// scale_divisor is used by pac_avg on DECIMAL to convert internal integer representation back to decimal
 	double scale_divisor = input.bind_data ? input.bind_data->Cast<PacBindData>().scale_divisor : 1.0;
+	auto pstate = input.bind_data ? input.bind_data->Cast<PacBindData>().pstate : nullptr;
 
 	for (idx_t i = 0; i < count; i++) {
 #ifndef PAC_NOBUFFERING
@@ -442,7 +443,8 @@ void PacSumFinalize(Vector &states, AggregateInputData &input, Vector &result, i
 		}
 		CheckPacSampleDiversity(key_hash, buf, update_count, DIVIDE_BY_COUNT ? "pac_avg" : "pac_sum",
 		                        input.bind_data->Cast<PacBindData>());
-		PAC_FLOAT result_val = PacNoisySampleFrom64Counters(buf, mi, correction, gen, true, ~key_hash, query_hash);
+		PAC_FLOAT result_val =
+		    PacNoisySampleFrom64Counters(buf, mi, correction, gen, true, ~key_hash, query_hash, pstate);
 		// Both pac_sum and pac_avg need 2x compensation:
 		// - pac_sum: doubles the sum to compensate for ~50% of values contributing to each counter
 		// - pac_avg: compensates for dividing by total_count instead of per-counter count

@@ -135,10 +135,12 @@ void PacCountFinalize(Vector &states, AggregateInputData &input, Vector &result,
 	auto aggs = FlatVector::GetData<ScatterState *>(states);
 	auto data = FlatVector::GetData<int64_t>(result);
 	auto &result_mask = FlatVector::Validity(result);
-	std::mt19937_64 gen(input.bind_data->Cast<PacBindData>().seed);
-	double mi = input.bind_data->Cast<PacBindData>().mi;
-	double correction = input.bind_data->Cast<PacBindData>().correction;
-	uint64_t query_hash = input.bind_data->Cast<PacBindData>().query_hash;
+	auto &bind = input.bind_data->Cast<PacBindData>();
+	std::mt19937_64 gen(bind.seed);
+	double mi = bind.mi;
+	double correction = bind.correction;
+	uint64_t query_hash = bind.query_hash;
+	auto pstate = bind.pstate;
 	PAC_FLOAT buf[64];
 	for (idx_t i = 0; i < count; i++) {
 #if !defined(PAC_NOBUFFERING) && !defined(PAC_NOCASCADING)
@@ -161,7 +163,7 @@ void PacCountFinalize(Vector &states, AggregateInputData &input, Vector &result,
 		                        input.bind_data->Cast<PacBindData>());
 		// Multiply by 2 to compensate for 50% sampling, then apply correction
 		data[offset + i] = static_cast<int64_t>(
-		    PacNoisySampleFrom64Counters(buf, mi, correction, gen, true, ~key_hash, query_hash) * 2.0);
+		    PacNoisySampleFrom64Counters(buf, mi, correction, gen, true, ~key_hash, query_hash, pstate) * 2.0);
 	}
 }
 

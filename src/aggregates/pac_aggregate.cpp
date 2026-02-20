@@ -20,6 +20,34 @@
 
 namespace duckdb {
 
+// ============================================================================
+// Global PacPState map for cross-aggregate p-tracking within a query
+// ============================================================================
+static std::mutex g_pstate_map_mutex;
+static std::unordered_map<uint64_t, std::weak_ptr<PacPState>> g_pstate_map;
+
+std::shared_ptr<PacPState> GetOrCreatePState(uint64_t query_hash) {
+	std::lock_guard<std::mutex> lock(g_pstate_map_mutex);
+	auto it = g_pstate_map.find(query_hash);
+	if (it != g_pstate_map.end()) {
+		auto sp = it->second.lock();
+		if (sp) {
+			return sp;
+		}
+	}
+	auto sp = std::make_shared<PacPState>();
+	g_pstate_map[query_hash] = sp;
+	// Lazily clean up expired entries (cheap: just scan for expired weak_ptrs)
+	for (auto iter = g_pstate_map.begin(); iter != g_pstate_map.end();) {
+		if (iter->second.expired()) {
+			iter = g_pstate_map.erase(iter);
+		} else {
+			++iter;
+		}
+	}
+	return sp;
+}
+
 // Helper function to generate a random seed - implementation
 uint64_t PacGenerateRandomSeed() {
 	return std::random_device {}();
@@ -139,17 +167,23 @@ bool PacNoiseInNull(uint64_t key_hash, double mi, double correction, std::mt1993
 // is_null: bitmask where bit i=1 means counter i should be excluded (compacted out)
 // mi: mutual information parameter for noise calculation
 // correction: factor to multiply values by after compacting but before noising
+// pstate: optional p-tracking state for persistent secret composition (Bayesian posterior over worlds)
 // Returns: correction*yJ + noise where yJ is a randomly selected counter
 PAC_FLOAT PacNoisySampleFrom64Counters(const PAC_FLOAT counters[64], double mi, double correction, std::mt19937_64 &gen,
-                                       bool use_deterministic_noise, uint64_t is_null, uint64_t counter_selector) {
+                                       bool use_deterministic_noise, uint64_t is_null, uint64_t counter_selector,
+                                       std::shared_ptr<PacPState> pstate) {
 	D_ASSERT(~is_null != 0); // at least one bit must be valid
 
 	// Compact the counters array, removing entries where is_null bit is set
+	// Also track mapping from compacted index back to original world index (needed for p-tracking)
 	vector<PAC_FLOAT> vals;
+	vector<int> world_map; // world_map[k] = original bit position for compacted index k
 	vals.reserve(64);
+	world_map.reserve(64);
 	for (int i = 0; i < 64; i++) {
 		if (!((is_null >> i) & 1)) {
 			vals.push_back(counters[i]);
+			world_map.push_back(i);
 		}
 	}
 
@@ -164,13 +198,97 @@ PAC_FLOAT PacNoisySampleFrom64Counters(const PAC_FLOAT counters[64], double mi, 
 	}
 	int N = static_cast<int>(vals.size());
 
-	// Compute delta using the shared exported helper (uses mi for noise variance)
-	double delta = ComputeDeltaFromValues(vals, mi);
-
 	// Pick counter index J in [0, N-1] deterministically from counter_selector.
 	// This ensures all aggregates within the same query pick the same counter (after compacting).
 	int J = static_cast<int>(counter_selector % static_cast<uint64_t>(N));
 	PAC_FLOAT yJ = vals[J];
+
+	// ---- P-tracking path: use p-weighted variance and Bayesian update ----
+	// Corresponds to collaborator's get_noise_var(p, vals, b) and update_p(p, vals, noisy_result, noise_var)
+	if (pstate) {
+		std::lock_guard<std::mutex> lock(pstate->mtx);
+
+		// Extract and renormalize p for the non-null worlds in this group
+		double p_local[64]; // compacted p values (only N entries used)
+		double p_sum = 0.0;
+		for (int k = 0; k < N; k++) {
+			p_local[k] = pstate->p[world_map[k]];
+			p_sum += p_local[k];
+		}
+		if (p_sum <= 0.0) {
+			// All worlds have zero probability — shouldn't happen, fall through to uniform
+			goto uniform_path;
+		}
+		for (int k = 0; k < N; k++) {
+			p_local[k] /= p_sum; // renormalize to sum to 1 over non-null worlds
+		}
+
+		{
+			// get_noise_var(p, vals, b): p-weighted mean and variance
+			double w_mean = 0.0;
+			for (int k = 0; k < N; k++) {
+				w_mean += static_cast<double>(vals[k]) * p_local[k];
+			}
+			double w_var = 0.0;
+			for (int k = 0; k < N; k++) {
+				double d = static_cast<double>(vals[k]) - w_mean;
+				w_var += d * d * p_local[k];
+			}
+			double noise_var = w_var / (2.0 * mi);
+
+			if (noise_var <= 0.0 || !std::isfinite(noise_var)) {
+				return yJ; // no variance — no noise needed
+			}
+
+			// Sample noise
+			double noise;
+			if (use_deterministic_noise) {
+				double u1 = DeterministicUniformUnit(gen);
+				double u2 = DeterministicUniformUnit(gen);
+				if (u1 <= 0.0) {
+					u1 = std::numeric_limits<double>::min();
+				}
+				double r = std::sqrt(-2.0 * std::log(u1));
+				double theta = 2.0 * M_PI * u2;
+				double z0 = r * std::cos(theta);
+				noise = z0 * std::sqrt(noise_var);
+			} else {
+				std::normal_distribution<double> normal_dist(0.0, std::sqrt(noise_var));
+				noise = normal_dist(gen);
+			}
+			double noisy_result = static_cast<double>(yJ) + noise;
+
+			// update_p(p, vals, noisy_result, noise_var): Bayesian posterior update
+			// log_p[k] = log(p[k]) + log_likelihood[k], then log-sum-exp normalize
+			double log_p[64];
+			double max_log = -std::numeric_limits<double>::infinity();
+			for (int k = 0; k < N; k++) {
+				double diff = static_cast<double>(vals[k]) - noisy_result;
+				log_p[k] = std::log(p_local[k] + 1e-300) + (-0.5 * diff * diff / noise_var);
+				if (log_p[k] > max_log) {
+					max_log = log_p[k];
+				}
+			}
+			// Log-sum-exp normalization
+			double sum_exp = 0.0;
+			for (int k = 0; k < N; k++) {
+				sum_exp += std::exp(log_p[k] - max_log);
+			}
+			double log_sum = max_log + std::log(sum_exp);
+			// Write updated p back to pstate, scaled by p_sum to preserve probability mass
+			// of null worlds (their p values don't change from this cell's observation)
+			for (int k = 0; k < N; k++) {
+				pstate->p[world_map[k]] = std::exp(log_p[k] - log_sum) * p_sum;
+			}
+
+			return static_cast<PAC_FLOAT>(noisy_result);
+		}
+	}
+
+uniform_path:
+	// ---- Original uniform path (no p-tracking) ----
+	// Compute delta using the shared exported helper (uses mi for noise variance)
+	double delta = ComputeDeltaFromValues(vals, mi);
 
 	if (delta <= 0.0 || !std::isfinite(delta)) {
 		// If there's no variance, return the selected counter value without noise.
@@ -270,11 +388,14 @@ static void PacAggregateScalar(DataChunk &args, ExpressionState &state, Vector &
 	auto &local = ExecuteFunctionState::GetFunctionState(state)->Cast<PacAggregateLocalState>();
 	auto &gen = local.gen;
 
-	// Get query_hash from bind data for deterministic counter selection
+	// Get query_hash and pstate from bind data for deterministic counter selection and p-tracking
 	uint64_t query_hash = 0;
+	std::shared_ptr<PacPState> pstate;
 	auto &bound_expr = state.expr.Cast<BoundFunctionExpression>();
 	if (bound_expr.bind_info) {
-		query_hash = bound_expr.bind_info->Cast<PacBindData>().query_hash;
+		auto &bd = bound_expr.bind_info->Cast<PacBindData>();
+		query_hash = bd.query_hash;
+		pstate = bd.pstate;
 	}
 
 	// --- extract lists ---
@@ -356,9 +477,64 @@ static void PacAggregateScalar(DataChunk &args, ExpressionState &state, Vector &
 			continue;
 		}
 
+		idx_t N = values.size();
 		// 1. pick J deterministically from query_hash (same within a query)
-		idx_t J = static_cast<idx_t>(query_hash % static_cast<uint64_t>(values.size()));
+		idx_t J = static_cast<idx_t>(query_hash % static_cast<uint64_t>(N));
 		PAC_FLOAT yJ = values[J];
+
+		// P-tracking path for pac_aggregate scalar (only when list fits in 64 worlds)
+		if (pstate && N <= 64) {
+			std::lock_guard<std::mutex> lock(pstate->mtx);
+			// For pac_aggregate, values are already in compacted form (list input, no is_null mask).
+			// Use indices 0..N-1 directly as world indices for p-tracking.
+			double p_local[64];
+			double p_sum = 0.0;
+			for (idx_t k = 0; k < N; k++) {
+				p_local[k] = pstate->p[k];
+				p_sum += p_local[k];
+			}
+			if (p_sum > 0.0) {
+				for (idx_t k = 0; k < N; k++) {
+					p_local[k] /= p_sum;
+				}
+				double w_mean = 0.0;
+				for (idx_t k = 0; k < N; k++) {
+					w_mean += static_cast<double>(values[k]) * p_local[k];
+				}
+				double w_var = 0.0;
+				for (idx_t k = 0; k < N; k++) {
+					double d = static_cast<double>(values[k]) - w_mean;
+					w_var += d * d * p_local[k];
+				}
+				double noise_var = w_var / (2.0 * mi);
+				if (noise_var > 0.0 && std::isfinite(noise_var)) {
+					double noise = DeterministicNormalSample(gen, local.has_spare, local.spare, 0.0,
+					                                        std::sqrt(noise_var));
+					double noisy_result = static_cast<double>(yJ) + noise;
+					// Bayesian update
+					double log_p[64];
+					double max_log = -std::numeric_limits<double>::infinity();
+					for (idx_t k = 0; k < N; k++) {
+						double diff = static_cast<double>(values[k]) - noisy_result;
+						log_p[k] = std::log(p_local[k] + 1e-300) + (-0.5 * diff * diff / noise_var);
+						if (log_p[k] > max_log) {
+							max_log = log_p[k];
+						}
+					}
+					double sum_exp = 0.0;
+					for (idx_t k = 0; k < N; k++) {
+						sum_exp += std::exp(log_p[k] - max_log);
+					}
+					double log_sum = max_log + std::log(sum_exp);
+					for (idx_t k = 0; k < N; k++) {
+						pstate->p[k] = std::exp(log_p[k] - log_sum) * p_sum;
+					}
+					res[row] = noisy_result;
+					continue;
+				}
+			}
+			// Fall through to uniform path if p_sum == 0 or no variance
+		}
 
 		// 2. empirical (second-moment) variance over the full list
 		double delta = ComputeDeltaFromValues(values, mi);
