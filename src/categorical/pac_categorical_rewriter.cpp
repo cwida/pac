@@ -1308,7 +1308,7 @@ static void RewriteBottomUp(unique_ptr<LogicalOperator> &op_ptr, OptimizerExtens
                             const unordered_map<LogicalOperator *, unordered_set<idx_t>> &pattern_lookup,
                             vector<CategoricalPatternInfo> &patterns,
                             unordered_map<uint64_t, unique_ptr<Expression>> &saved_filter_pattern_exprs,
-                            bool inside_cte_definition = false) {
+                            unordered_set<uint64_t> &replaced_mark_bindings, bool inside_cte_definition = false) {
 	auto *op = op_ptr.get();
 	// Strip scalar wrappers (Projection→first()→Projection) over PAC aggregates before recursing.
 	// This removes the first() aggregate that can't handle LIST<DOUBLE>, and lets the inner
@@ -1326,7 +1326,28 @@ static void RewriteBottomUp(unique_ptr<LogicalOperator> &op_ptr, OptimizerExtens
 		bool child_in_cte =
 		    inside_cte_definition || (op->type == LogicalOperatorType::LOGICAL_MATERIALIZED_CTE && ci == 0);
 		RewriteBottomUp(op->children[ci], input, plan, pattern_lookup, patterns, saved_filter_pattern_exprs,
-		                child_in_cte);
+		                replaced_mark_bindings, child_in_cte);
+	}
+	// After processing children, check if this FILTER references a mark column
+	// from a MARK_JOIN that was replaced by CROSS_PRODUCT + FILTER(pac_filter_eq).
+	// The pac_filter_eq below already handles the filtering, so this FILTER is
+	// now redundant with a dangling mark column reference. Remove it.
+	if (op->type == LogicalOperatorType::LOGICAL_FILTER && !replaced_mark_bindings.empty()) {
+		auto &filter = op->Cast<LogicalFilter>();
+		bool has_dangling_mark = false;
+		for (auto &fexpr : filter.expressions) {
+			if (fexpr->type == ExpressionType::BOUND_COLUMN_REF) {
+				auto &ref = fexpr->Cast<BoundColumnRefExpression>();
+				if (replaced_mark_bindings.count(HashBinding(ref.binding))) {
+					has_dangling_mark = true;
+					break;
+				}
+			}
+		}
+		if (has_dangling_mark && !filter.children.empty()) {
+			op_ptr = std::move(filter.children[0]);
+			return;
+		}
 	}
 	LogicalOperator *plan_root = plan.get();
 	if (op->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY && !inside_cte_definition) {
@@ -1551,6 +1572,11 @@ static void RewriteBottomUp(unique_ptr<LogicalOperator> &op_ptr, OptimizerExtens
 						p.parent_op = nullptr;
 					}
 				}
+				// Record the mark column binding so the parent FILTER
+				// (which references it) can be cleaned up.
+				if (join.join_type == JoinType::MARK) {
+					replaced_mark_bindings.insert(HashBinding(ColumnBinding(join.mark_index, 0)));
+				}
 				op_ptr = std::move(filter_op);
 				break;
 			}
@@ -1578,7 +1604,8 @@ void RewriteCategoricalQuery(OptimizerExtensionInput &input, unique_ptr<LogicalO
 	// - Filters: build list_transform + pac_filter
 	// - Joins: rewrite conditions (two-list → CROSS_PRODUCT+FILTER, single-list → double-lambda)
 	unordered_map<uint64_t, unique_ptr<Expression>> saved_filter_pattern_exprs;
-	RewriteBottomUp(plan, input, plan, pattern_lookup, patterns, saved_filter_pattern_exprs);
+	unordered_set<uint64_t> replaced_mark_bindings;
+	RewriteBottomUp(plan, input, plan, pattern_lookup, patterns, saved_filter_pattern_exprs, replaced_mark_bindings);
 	plan->ResolveOperatorTypes();
 }
 
