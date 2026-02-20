@@ -1170,8 +1170,10 @@ static void RewriteProjectionExpression(OptimizerExtensionInput &input, LogicalP
 		}
 		return;
 	}
-	if (!IsNumericalType(expr->return_type)) {
+	if (!IsNumericalType(expr->return_type) && !is_filter_pattern) {
 		return; // we currently only support numeric PAC computations (noising..)
+		        // but filter patterns need counter pass-through regardless of type
+		        // (e.g., EXISTS decorrelation produces BOOLEAN comparison on aggregate)
 	}
 	// Filter pattern simple cast (single aggregate): replace with direct counters ref
 	if (is_filter_pattern && pac_bindings.size() == 1) {
