@@ -148,9 +148,7 @@ PAC_FLOAT PacNoisySampleFrom64Counters(const PAC_FLOAT counters[64], double mi, 
 	vector<PAC_FLOAT> vals;
 	vals.reserve(64);
 	for (int i = 0; i < 64; i++) {
-		if (!((is_null >> i) & 1)) {
-			vals.push_back(counters[i]);
-		}
+		vals.push_back(((is_null >> i) & 1) ? 0 : counters[i]);
 	}
 
 	// Apply correction factor to all values (after compacting NULLs, before noising)

@@ -197,8 +197,8 @@ ORDER BY
     c_count DESC;
 ----
 1	8
-2	2
-0	2
+2	0
+0	0
 
 # ============================================================
 # Test 3: Simple CTE wrapping PU table with outer aggregate

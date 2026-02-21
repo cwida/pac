@@ -117,7 +117,7 @@ query II
 SELECT t2.y, SUM(t1.b) FROM t1 INNER JOIN t2 ON t1.a = t2.x GROUP BY t2.y ORDER BY t2.y;
 ----
 100	20
-200	40
+200	0
 
 # Not PAC-compatible: projecting join key in LEFT JOIN (still exposes PU value)
 statement error
@@ -285,7 +285,7 @@ query II
 SELECT product_id, SUM(amount) FROM sales GROUP BY product_id ORDER BY product_id;
 ----
 100	149.76
-101	60.00
+101	0.00
 102	50.00
 
 # Not PAC-compatible: protected column projected directly (even with other aggregates)
@@ -311,7 +311,7 @@ INSERT INTO products VALUES (100, 'Widget', 'Hardware'), (101, 'Gadget', 'Electr
 query II
 SELECT products.category, SUM(sales.amount) FROM sales JOIN products ON sales.product_id = products.product_id GROUP BY products.category ORDER BY products.category;
 ----
-Electronics	60.00
+Electronics	0.00
 Hardware	199.68
 
 # Not PAC-compatible: protected column in GROUP BY after join

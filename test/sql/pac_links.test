@@ -202,8 +202,8 @@ HAVING SUM(o.amount) > 5
 ORDER BY o.grp, o.id
 LIMIT 2;
 ----
-0	6	124
-0	12	148
+0	6	0
+0	24	0
 
 # ==============================================================================
 # Test 9: Extreme - Aggregation on deepest table in chain (shipments)
@@ -262,9 +262,9 @@ WHERE o.user_id IN (SELECT id FROM users WHERE id > 1)
 GROUP BY o.grp
 ORDER BY o.grp;
 ----
-0	6	48
-1	6	48
-2	8	64
+0	6	32
+1	6	16
+2	8	48
 
 # ==============================================================================
 # Test 12: Multiple Privacy Units - Users table as PU, protected column access

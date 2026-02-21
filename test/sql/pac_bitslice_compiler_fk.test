@@ -142,7 +142,7 @@ ORDER BY d1.id
 LIMIT 3
 ----
 0	0.00
-1	2.00
+1	0.00
 2	4.00
 
 # Test with multiple aggregates on joined tables (SUM and MAX) - project non-join key

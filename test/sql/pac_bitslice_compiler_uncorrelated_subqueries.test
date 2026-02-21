@@ -179,8 +179,8 @@ ORDER BY
     cust_nation,
     l_year;
 ----
-FRANCE	GERMANY	1996	5387.0592
-GERMANY	FRANCE	1995	7182.7456
+FRANCE	GERMANY	1996	0.0000
+GERMANY	FRANCE	1995	0.0000
 
 # Test 2: TPC-H Q13-style query
 # Tests: Subquery with LEFT JOIN, COUNT with optional match, GROUP BY on outer query, nested aggregates
@@ -208,8 +208,8 @@ ORDER BY
     c_count DESC;
 ----
 1	4
-2	2
-0	2
+2	0
+0	0
 
 # Test 2b: Q13-style query with inner aggregate grouping by NON-PK column
 # Tests: When inner aggregate groups by a regular column (not PU key), the INNER aggregate should be PAC-transformed
@@ -265,7 +265,7 @@ ORDER BY
     custdist DESC,
     cust_order_count DESC;
 ----
-2 	NULL
+2	NULL
 1	NULL
 
 # Test 3: TPC-H Q8-style query with CASE expression in outer aggregate
@@ -476,8 +476,8 @@ ORDER BY
     c_count DESC;
 ----
 1	4
-2	2
-0	2
+2	0
+0	0
 
 statement ok
 DROP TABLE orders_nopk;
