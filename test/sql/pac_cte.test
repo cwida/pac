@@ -292,6 +292,36 @@ SELECT COUNT(*) FROM cust_nation;
 ----
 8
 
+# ============================================================
+# Test 9: CTE with IN subquery containing PAC aggregate (MARK_JOIN)
+# Tests: CTE computes per-supplier revenue, main query uses IN
+# subquery on CTE with a filter on the PAC aggregate. The IN
+# creates a MARK_JOIN that the categorical rewriter must replace
+# with CROSS_PRODUCT + pac_filter, removing the dangling mark ref.
+# ============================================================
+query II
+WITH supplier_totals AS (
+    SELECT
+        l_suppkey,
+        SUM(l_extendedprice * (1 - l_discount)) AS total_revenue
+    FROM lineitem
+    JOIN orders ON l_orderkey = o_orderkey
+    GROUP BY l_suppkey
+)
+SELECT
+    s_suppkey,
+    s_name
+FROM supplier
+WHERE s_suppkey IN (
+    SELECT l_suppkey
+    FROM supplier_totals
+    WHERE total_revenue > 5000
+)
+ORDER BY s_suppkey;
+----
+2	Supplier#002
+3	Supplier#003
+
 # Cleanup
 statement ok
 DROP TABLE lineitem;
