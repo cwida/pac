@@ -468,6 +468,53 @@ WHERE total_price > 1000;
 ----
 logical_opt	<REGEX>:.*pac_sum.*
 
+# Test 18: CTE with pac_sum + outer pac_count (no _counters inside CTE)
+# CTE aggregate (SUM grouped by c_nationkey) becomes pac_sum and stays scalar
+# inside the CTE definition. Outer inline subquery (COUNT grouped by l_suppkey)
+# becomes pac_count. Both should appear in the plan.
+query II
+EXPLAIN WITH NationSpend AS (
+    SELECT
+        c_nationkey,
+        SUM(l_extendedprice * (1 - l_discount)) AS total_spend
+    FROM customer
+    JOIN orders ON c_custkey = o_custkey
+    JOIN lineitem ON o_orderkey = l_orderkey
+    GROUP BY c_nationkey
+)
+SELECT
+    ns.c_nationkey,
+    ns.total_spend,
+    sq.item_count
+FROM NationSpend ns
+LEFT JOIN (
+    SELECT l_suppkey, COUNT(*) AS item_count
+    FROM lineitem
+    GROUP BY l_suppkey
+) sq ON ns.c_nationkey = sq.l_suppkey
+ORDER BY ns.c_nationkey;
+----
+logical_opt	<REGEX>:.*pac_count.*pac_sum.*
+
+# Test 19: IN subquery with PAC aggregate in HAVING clause
+# The IN (SELECT ... HAVING SUM(...)) pattern should still PAC-transform
+# the aggregate inside the subquery.
+query II
+EXPLAIN SELECT
+    s_suppkey,
+    s_name
+FROM supplier
+WHERE s_suppkey IN (
+    SELECT l_suppkey
+    FROM lineitem
+    JOIN orders ON l_orderkey = o_orderkey
+    GROUP BY l_suppkey
+    HAVING SUM(l_extendedprice * (1 - l_discount)) > 1000
+)
+ORDER BY s_suppkey;
+----
+logical_opt	<REGEX>:.*pac_sum.*
+
 statement ok
 SET explain_output='physical_only';
 

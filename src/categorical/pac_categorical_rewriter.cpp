@@ -10,6 +10,9 @@
 #include "pac_debug.hpp"
 #include "utils/pac_helpers.hpp"
 #include "duckdb/optimizer/column_binding_replacer.hpp"
+#include "duckdb/planner/expression/bound_conjunction_expression.hpp"
+#include "duckdb/planner/operator/logical_order.hpp"
+#include "duckdb/planner/operator/logical_top_n.hpp"
 
 namespace duckdb {
 
@@ -617,7 +620,7 @@ static unique_ptr<Expression> CloneForLambdaBody(Expression *expr,
 			result = BoundCastExpression::AddDefaultCastToType(std::move(result), PacFloatLogicalType());
 		}
 		return result;
-	} else if (expr->GetExpressionClass() == ExpressionClass::BOUND_OPERATOR) { // AND, OR, NOT, arithmetic, COALESCE..
+	} else if (expr->GetExpressionClass() == ExpressionClass::BOUND_OPERATOR) { // NOT, arithmetic, COALESCE, IS NULL..
 		auto &op = expr->Cast<BoundOperatorExpression>();
 		vector<unique_ptr<Expression>> new_children;
 		for (auto &child : op.children) {
@@ -625,6 +628,14 @@ static unique_ptr<Expression> CloneForLambdaBody(Expression *expr,
 			    CloneForLambdaBody(child.get(), pac_binding_map, captures, capture_map, plan_root, struct_type));
 		}
 		return BuildClonedOperatorExpression(expr, std::move(new_children));
+	} else if (expr->GetExpressionClass() == ExpressionClass::BOUND_CONJUNCTION) { // AND, OR
+		auto &conj = expr->Cast<BoundConjunctionExpression>();
+		auto result = make_uniq<BoundConjunctionExpression>(expr->type);
+		for (auto &child : conj.children) {
+			result->children.push_back(
+			    CloneForLambdaBody(child.get(), pac_binding_map, captures, capture_map, plan_root, struct_type));
+		}
+		return result;
 	} else if (expr->type == ExpressionType::CASE_EXPR) {
 		auto &case_expr = expr->Cast<BoundCaseExpression>();
 		if (IsScalarSubqueryWrapper(case_expr)) {
@@ -1161,8 +1172,10 @@ static void RewriteProjectionExpression(OptimizerExtensionInput &input, LogicalP
 		}
 		return;
 	}
-	if (!IsNumericalType(expr->return_type)) {
+	if (!IsNumericalType(expr->return_type) && !is_filter_pattern) {
 		return; // we currently only support numeric PAC computations (noising..)
+		        // but filter patterns need counter pass-through regardless of type
+		        // (e.g., EXISTS decorrelation produces BOOLEAN comparison on aggregate)
 	}
 	// Filter pattern simple cast (single aggregate): replace with direct counters ref
 	if (is_filter_pattern && pac_bindings.size() == 1) {
@@ -1299,12 +1312,12 @@ static void RewriteBottomUp(unique_ptr<LogicalOperator> &op_ptr, OptimizerExtens
                             const unordered_map<LogicalOperator *, unordered_set<idx_t>> &pattern_lookup,
                             vector<CategoricalPatternInfo> &patterns,
                             unordered_map<uint64_t, unique_ptr<Expression>> &saved_filter_pattern_exprs,
-                            bool inside_cte_definition = false) {
+                            unordered_set<uint64_t> &replaced_mark_bindings, bool inside_cte_definition = false) {
 	auto *op = op_ptr.get();
 	// Strip scalar wrappers (Projection→first()→Projection) over PAC aggregates before recursing.
 	// This removes the first() aggregate that can't handle LIST<DOUBLE>, and lets the inner
 	// projection be processed naturally with the outer's table_index.
-	if (op->type == LogicalOperatorType::LOGICAL_PROJECTION) {
+	if (op->type == LogicalOperatorType::LOGICAL_PROJECTION && !inside_cte_definition) {
 		auto *unwrapped = RecognizeDuckDBScalarWrapper(op);
 		if (unwrapped && !FindPacAggregateInOperator(unwrapped).empty()) {
 			StripScalarWrapperInPlace(op_ptr, true);
@@ -1317,7 +1330,28 @@ static void RewriteBottomUp(unique_ptr<LogicalOperator> &op_ptr, OptimizerExtens
 		bool child_in_cte =
 		    inside_cte_definition || (op->type == LogicalOperatorType::LOGICAL_MATERIALIZED_CTE && ci == 0);
 		RewriteBottomUp(op->children[ci], input, plan, pattern_lookup, patterns, saved_filter_pattern_exprs,
-		                child_in_cte);
+		                replaced_mark_bindings, child_in_cte);
+	}
+	// After processing children, check if this FILTER references a mark column
+	// from a MARK_JOIN that was replaced by CROSS_PRODUCT + FILTER(pac_filter_eq).
+	// The pac_filter_eq below already handles the filtering, so this FILTER is
+	// now redundant with a dangling mark column reference. Remove it.
+	if (op->type == LogicalOperatorType::LOGICAL_FILTER && !replaced_mark_bindings.empty()) {
+		auto &filter = op->Cast<LogicalFilter>();
+		bool has_dangling_mark = false;
+		for (auto &fexpr : filter.expressions) {
+			if (fexpr->type == ExpressionType::BOUND_COLUMN_REF) {
+				auto &ref = fexpr->Cast<BoundColumnRefExpression>();
+				if (replaced_mark_bindings.count(HashBinding(ref.binding))) {
+					has_dangling_mark = true;
+					break;
+				}
+			}
+		}
+		if (has_dangling_mark && !filter.children.empty()) {
+			op_ptr = std::move(filter.children[0]);
+			return;
+		}
 	}
 	LogicalOperator *plan_root = plan.get();
 	if (op->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY && !inside_cte_definition) {
@@ -1355,7 +1389,8 @@ static void RewriteBottomUp(unique_ptr<LogicalOperator> &op_ptr, OptimizerExtens
 		// Check for standard aggregates over counters (e.g., sum(LIST<DOUBLE>) → pac_sum_list)
 		// Children already converted (bottom-up), so their types are LIST<DOUBLE>
 		ReplaceAggregatesOverCounters(op, input.context, plan_root);
-	} else if (op->type == LogicalOperatorType::LOGICAL_PROJECTION) { // === PROJECTION: rewrite PAC expressions ===
+	} else if (op->type == LogicalOperatorType::LOGICAL_PROJECTION &&
+	           !inside_cte_definition) { // === PROJECTION: rewrite PAC expressions ===
 		auto &proj = op->Cast<LogicalProjection>();
 		bool is_filter_pattern = IsProjectionReferencedByFilterPattern(proj, patterns, plan_root);
 		// A projection is terminal if it's the top-level output projection:
@@ -1376,7 +1411,8 @@ static void RewriteBottomUp(unique_ptr<LogicalOperator> &op_ptr, OptimizerExtens
 			RewriteProjectionExpression(input, proj, i, plan_root, is_filter_pattern, is_terminal,
 			                            saved_filter_pattern_exprs);
 		}
-	} else if (op->type == LogicalOperatorType::LOGICAL_FILTER) { // === FILTER: rewrite expressions with pac_filter ===
+	} else if (op->type == LogicalOperatorType::LOGICAL_FILTER &&
+	           !inside_cte_definition) { // === FILTER: rewrite expressions with pac_filter ===
 		// Inline saved projection arithmetic expressions into filter expressions.
 		// This fuses the projection's list_transform into the filter's lambda for a single pass.
 		if (!saved_filter_pattern_exprs.empty()) {
@@ -1457,8 +1493,46 @@ static void RewriteBottomUp(unique_ptr<LogicalOperator> &op_ptr, OptimizerExtens
 				WrapHavingPacRefsWithNoised(filter.expressions[fi], pac_bindings, input);
 			}
 		}
-	} else if (op->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN ||
-	           op->type == LogicalOperatorType::LOGICAL_DELIM_JOIN) { // === JOIN: rewrite comparison conditions ===
+	} else if ((op->type == LogicalOperatorType::LOGICAL_ORDER_BY ||
+	            op->type == LogicalOperatorType::LOGICAL_TOP_N) &&
+	           !inside_cte_definition) {
+		// === ORDER_BY / TOP_N: fix stale expression types after child projections were rewritten ===
+		// When PAC aggregates are converted to _counters, intermediate (non-terminal) projection
+		// column types change from e.g. DECIMAL(38,2) to LIST<FLOAT>. ORDER_BY expressions that
+		// reference these columns still have the old return_type. Fix them here.
+		if (!op->children.empty()) {
+			auto child_bindings = op->children[0]->GetColumnBindings();
+			auto &child_types = op->children[0]->types;
+			auto fix_expr_types = [&](unique_ptr<Expression> &e) {
+				std::function<void(unique_ptr<Expression> &)> Fix = [&](unique_ptr<Expression> &e2) {
+					if (e2->type == ExpressionType::BOUND_COLUMN_REF) {
+						auto &col_ref = e2->Cast<BoundColumnRefExpression>();
+						for (idx_t ci = 0; ci < child_bindings.size() && ci < child_types.size(); ci++) {
+							if (col_ref.binding == child_bindings[ci]) {
+								col_ref.return_type = child_types[ci];
+								break;
+							}
+						}
+					}
+					ExpressionIterator::EnumerateChildren(*e2, Fix);
+				};
+				Fix(e);
+			};
+			if (op->type == LogicalOperatorType::LOGICAL_ORDER_BY) {
+				auto &order = op->Cast<LogicalOrder>();
+				for (auto &o : order.orders) {
+					fix_expr_types(o.expression);
+				}
+			} else {
+				auto &topn = op->Cast<LogicalTopN>();
+				for (auto &o : topn.orders) {
+					fix_expr_types(o.expression);
+				}
+			}
+		}
+	} else if ((op->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN ||
+	            op->type == LogicalOperatorType::LOGICAL_DELIM_JOIN) &&
+	           !inside_cte_definition) { // === JOIN: rewrite comparison conditions ===
 		// Inline saved projection arithmetic into join conditions
 		if (!saved_filter_pattern_exprs.empty()) {
 			auto &join = op->Cast<LogicalComparisonJoin>();
@@ -1539,6 +1613,11 @@ static void RewriteBottomUp(unique_ptr<LogicalOperator> &op_ptr, OptimizerExtens
 						p.parent_op = nullptr;
 					}
 				}
+				// Record the mark column binding so the parent FILTER
+				// (which references it) can be cleaned up.
+				if (join.join_type == JoinType::MARK) {
+					replaced_mark_bindings.insert(HashBinding(ColumnBinding(join.mark_index, 0)));
+				}
 				op_ptr = std::move(filter_op);
 				break;
 			}
@@ -1566,7 +1645,8 @@ void RewriteCategoricalQuery(OptimizerExtensionInput &input, unique_ptr<LogicalO
 	// - Filters: build list_transform + pac_filter
 	// - Joins: rewrite conditions (two-list → CROSS_PRODUCT+FILTER, single-list → double-lambda)
 	unordered_map<uint64_t, unique_ptr<Expression>> saved_filter_pattern_exprs;
-	RewriteBottomUp(plan, input, plan, pattern_lookup, patterns, saved_filter_pattern_exprs);
+	unordered_set<uint64_t> replaced_mark_bindings;
+	RewriteBottomUp(plan, input, plan, pattern_lookup, patterns, saved_filter_pattern_exprs, replaced_mark_bindings);
 	plan->ResolveOperatorTypes();
 }
 

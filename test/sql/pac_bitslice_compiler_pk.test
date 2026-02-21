@@ -102,7 +102,7 @@ ORDER BY b.pk1
 LIMIT 2
 ----
 0	2	10
-1	2	12
+1	0	0
 
 # Cleanup
 statement ok

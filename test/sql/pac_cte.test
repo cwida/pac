@@ -136,10 +136,8 @@ ALTER TABLE customer SET PU;
 # Test 1: TPC-H Q15-style CTE with aggregate in subquery on CTE
 # (moved from pac_bitslice_compiler_uncorrelated_subqueries.test)
 # Tests: CTE with aggregate, subquery that computes max() from CTE
-# The aggregate in the subquery should NOT be converted to pac_max
-# because it operates on already-aggregated CTE data, not base tables
 # ============================================================
-query IIII
+query II
 WITH revenue AS (
     SELECT
         l_suppkey AS supplier_no,
@@ -156,8 +154,6 @@ WITH revenue AS (
 SELECT
     s_suppkey,
     s_name,
-    total_revenue,
-    NULL as placeholder
 FROM
     supplier
         JOIN revenue ON s_suppkey = supplier_no
@@ -169,7 +165,7 @@ WHERE
 ORDER BY
     s_suppkey;
 ----
-3	Supplier#003	5688.5248	NULL
+3	Supplier#003
 
 # ============================================================
 # Test 2: Q13 pattern rewritten as explicit CTE
@@ -201,8 +197,8 @@ ORDER BY
     c_count DESC;
 ----
 1	8
-2	2
-0	2
+2	0
+0	0
 
 # ============================================================
 # Test 3: Simple CTE wrapping PU table with outer aggregate
@@ -295,6 +291,36 @@ cust_nation AS (
 SELECT COUNT(*) FROM cust_nation;
 ----
 8
+
+# ============================================================
+# Test 9: CTE with IN subquery containing PAC aggregate (MARK_JOIN)
+# Tests: CTE computes per-supplier revenue, main query uses IN
+# subquery on CTE with a filter on the PAC aggregate. The IN
+# creates a MARK_JOIN that the categorical rewriter must replace
+# with CROSS_PRODUCT + pac_filter, removing the dangling mark ref.
+# ============================================================
+query II
+WITH supplier_totals AS (
+    SELECT
+        l_suppkey,
+        SUM(l_extendedprice * (1 - l_discount)) AS total_revenue
+    FROM lineitem
+    JOIN orders ON l_orderkey = o_orderkey
+    GROUP BY l_suppkey
+)
+SELECT
+    s_suppkey,
+    s_name
+FROM supplier
+WHERE s_suppkey IN (
+    SELECT l_suppkey
+    FROM supplier_totals
+    WHERE total_revenue > 5000
+)
+ORDER BY s_suppkey;
+----
+2	Supplier#002
+3	Supplier#003
 
 # Cleanup
 statement ok

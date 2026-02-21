@@ -1970,6 +1970,11 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 	// Cache for hash projections: get.table_index → hash column binding
 	std::unordered_map<idx_t, ColumnBinding> hash_cache;
 
+	// Cache for CTE hash projections: cte_ref.table_index → hash column binding
+	// Prevents inserting duplicate projections above the same CTE_SCAN when
+	// multiple aggregates try the CTE path for the same CTE_SCAN node.
+	std::unordered_map<idx_t, ColumnBinding> cte_hash_cache;
+
 	// For each target aggregate, build hash expressions and modify it
 	for (auto *target_agg : target_aggregates) {
 		// Build hash expressions for each privacy unit
@@ -2181,9 +2186,16 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 				                pu_table_name);
 #endif
 
-				auto hash_binding = InsertHashProjectionAboveCTERef(input, plan, *match.cte_ref, match.hash_columns);
-				if (hash_binding.table_index == DConstants::INVALID_INDEX) {
-					continue;
+				ColumnBinding hash_binding;
+				auto cte_cache_it = cte_hash_cache.find(match.cte_ref->table_index);
+				if (cte_cache_it != cte_hash_cache.end()) {
+					hash_binding = cte_cache_it->second;
+				} else {
+					hash_binding = InsertHashProjectionAboveCTERef(input, plan, *match.cte_ref, match.hash_columns);
+					if (hash_binding.table_index == DConstants::INVALID_INDEX) {
+						continue;
+					}
+					cte_hash_cache[match.cte_ref->table_index] = hash_binding;
 				}
 
 				auto propagated = PropagateSingleBinding(*plan, hash_binding.table_index, hash_binding,

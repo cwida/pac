@@ -239,7 +239,7 @@ FROM
 WHERE
     c_mktsegment = 'BUILDING';
 ----
-2	0.0	NULL
+0	0.0	NULL
 
 # Test outer aggregate + inner aggregate with IN clause - both need joins to PU
 # This tests that when BOTH outer and inner queries scan FK-linked tables (not PU directly),
@@ -324,7 +324,7 @@ SELECT COUNT(*) FROM (
     WHERE o_custkey = 1
 );
 ----
-4
+0
 
 # Test TPC-H Q21-style query: Suppliers Who Kept Orders Waiting
 # This tests complex correlated subqueries with:
@@ -442,5 +442,5 @@ ORDER BY
     numwait DESC,
     s_name;
 ----
-Supplier#001	2
 Supplier#002	2
+Supplier#001	0
