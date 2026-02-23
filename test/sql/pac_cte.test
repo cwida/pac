@@ -306,6 +306,20 @@ ORDER BY l_suppkey;
 3	8559.0016
 4	3997.6960
 
+
+# Debug test
+query I
+SELECT l_suppkey
+FROM (SELECT l_suppkey,
+              SUM(l_extendedprice * (1 - l_discount)) AS total_revenue
+          FROM lineitem
+          JOIN orders ON l_orderkey = o_orderkey
+          GROUP BY l_suppkey) supplier_totals
+WHERE total_revenue > 5000
+----
+2
+3
+
 # Debug test
 query I
 WITH supplier_totals AS (
