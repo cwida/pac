@@ -323,6 +323,19 @@ WHERE total_revenue > 5000
 2
 3
 
+# Debug test
+query I
+SELECT l_suppkey
+FROM (SELECT l_suppkey,
+              SUM(l_extendedprice * (1 - l_discount)) AS total_revenue
+          FROM lineitem
+          JOIN orders ON l_orderkey = o_orderkey
+          GROUP BY l_suppkey) supplier_totals
+WHERE total_revenue > 5000
+----
+2
+3
+
 # ============================================================
 # Test 9: CTE with IN subquery containing PAC aggregate (MARK_JOIN)
 # Tests: CTE computes per-supplier revenue, main query uses IN
