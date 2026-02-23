@@ -205,13 +205,13 @@ PAC_FLOAT PacNoisySampleFrom64Counters(const PAC_FLOAT counters[64], double mi, 
 		for (int k = 0; k < 64; k++) {
 			w_mean += static_cast<double>(vals[k]) * pstate->p[k];
 		}
-		
+
 		double w_var = 0.0;
 		for (int k = 0; k < 64; k++) {
 			double d = static_cast<double>(vals[k]) - w_mean;
 			w_var += d * d * pstate->p[k];
 		}
-		
+
 		double noise_var = w_var / (2.0 * mi);
 
 		if (noise_var <= 0.0 || !std::isfinite(noise_var)) {
@@ -253,7 +253,7 @@ PAC_FLOAT PacNoisySampleFrom64Counters(const PAC_FLOAT counters[64], double mi, 
 			sum_exp += std::exp(log_p[k] - max_log);
 		}
 		double log_sum = max_log + std::log(sum_exp);
-		
+
 		// Write updated p back to pstate
 		for (int k = 0; k < 64; k++) {
 			pstate->p[k] = std::exp(log_p[k] - log_sum);
@@ -479,8 +479,7 @@ static void PacAggregateScalar(DataChunk &args, ExpressionState &state, Vector &
 			}
 			double noise_var = w_var / (2.0 * mi);
 			if (noise_var > 0.0 && std::isfinite(noise_var)) {
-				double noise = DeterministicNormalSample(gen, local.has_spare, local.spare, 0.0,
-														std::sqrt(noise_var));
+				double noise = DeterministicNormalSample(gen, local.has_spare, local.spare, 0.0, std::sqrt(noise_var));
 				double noisy_result = static_cast<double>(yJ) + noise;
 				// Bayesian update
 				double log_p[64];

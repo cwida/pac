@@ -131,8 +131,7 @@ void RegisterPacHashFunction(ExtensionLoader &loader);
 // pstate: optional shared p-tracking state for persistent secret composition (may be nullptr)
 PAC_FLOAT PacNoisySampleFrom64Counters(const PAC_FLOAT counters[64], double mi, double correction, std::mt19937_64 &gen,
                                        bool use_deterministic_noise = true, uint64_t is_null = 0,
-                                       uint64_t counter_selector = 0,
-                                       std::shared_ptr<PacPState> pstate = nullptr);
+                                       uint64_t counter_selector = 0, std::shared_ptr<PacPState> pstate = nullptr);
 
 // PacNoisedSelect: returns true with probability proportional to popcount(key_hash)/64
 // Uses rnd&63 as threshold, returns true if bitcount > threshold

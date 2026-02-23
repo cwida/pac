@@ -410,10 +410,61 @@ static vector<BenchmarkQueryResult> RunPass(const string &label, vector<string> 
 		} else if (qr.state == "timeout") {
 			stats.timed_out++;
 		} else if (qr.state == "crash") {
-			stats.crashed++;
-			Log("Database crash on query " + name + ": " + qr.error);
-		Log("  reconnecting...");
-			reconnect();
+			// When the database was invalidated by a previous query, this query
+			// never actually ran.  Attribute the crash to the previous query,
+			// reconnect, and retry the current query on a fresh connection.
+			if (qr.error.find("database has been invalidated") != string::npos && !results.empty()) {
+				auto &prev = results.back();
+				Log("Database crash caused by query " + prev.name + " (detected on query " + name + ")");
+				if (prev.state != "crash") {
+					if (prev.state == "error") {
+						stats.failed--;
+					} else if (prev.state == "success") {
+						stats.success--;
+						stats.total_success_time -= prev.time_ms;
+					}
+					prev.state = "crash";
+					stats.crashed++;
+				}
+				Log("  reconnecting...");
+				reconnect();
+				// Retry this query on the fresh connection
+				qr = RunQuery(*con, name, sql, timeout_s);
+				// Classify the retried result normally
+				if (qr.state == "success") {
+					stats.success++;
+					stats.total_success_time += qr.time_ms;
+					if (check_pac) {
+						try {
+							auto explain_result = con->Query("EXPLAIN " + sql);
+							if (explain_result && !explain_result->HasError()) {
+								for (idx_t row = 0; row < explain_result->RowCount(); row++) {
+									string plan_text = explain_result->GetValue(1, row).ToString();
+									if (plan_text.find("pac_") != string::npos) {
+										qr.pac_applied = true;
+										stats.pac_applied++;
+										break;
+									}
+								}
+							}
+						} catch (...) {}
+					}
+				} else if (qr.state == "timeout") {
+					stats.timed_out++;
+				} else if (qr.state == "crash") {
+					stats.crashed++;
+					Log("Database crash on query " + name + ": " + qr.error);
+					Log("  reconnecting...");
+					reconnect();
+				} else {
+					stats.failed++;
+				}
+			} else {
+				stats.crashed++;
+				Log("Database crash on query " + name + ": " + qr.error);
+				Log("  reconnecting...");
+				reconnect();
+			}
 		} else {
 			stats.failed++;
 		}
@@ -469,6 +520,44 @@ static string FormatQueryList(const vector<string> &names, size_t max_show = 10)
 		out += names[i];
 	}
 	return out;
+}
+
+static void PrintUnsupportedAggregateBreakdown(const string &label, const vector<BenchmarkQueryResult> &results, int total) {
+	const string marker = "unsupported aggregate function ";
+	std::map<string, int> agg_counts;
+	int agg_total = 0;
+
+	for (auto &r : results) {
+		if (r.state != "error" && r.state != "crash") continue;
+		auto pos = r.error.find(marker);
+		if (pos == string::npos) continue;
+		string func_name = r.error.substr(pos + marker.size());
+		// Trim trailing whitespace / junk
+		while (!func_name.empty() && (func_name.back() == ' ' || func_name.back() == '\n' || func_name.back() == '\r')) {
+			func_name.pop_back();
+		}
+		if (!func_name.empty()) {
+			agg_counts[func_name]++;
+			agg_total++;
+		}
+	}
+
+	if (agg_counts.empty()) return;
+
+	vector<std::pair<string, int>> sorted(agg_counts.begin(), agg_counts.end());
+	std::sort(sorted.begin(), sorted.end(),
+	          [](const std::pair<string, int> &a, const std::pair<string, int> &b) {
+		          return a.second > b.second;
+	          });
+
+	Log("=== " + label + " Unsupported Aggregate Breakdown (" + std::to_string(agg_total) +
+	    " queries, " + FormatNumber(100.0 * agg_total / total) + "% of total) ===");
+	for (auto &e : sorted) {
+		string pct_total = FormatNumber(100.0 * e.second / total);
+		string pct_agg = FormatNumber(100.0 * e.second / agg_total);
+		Log("  " + e.first + ": " + std::to_string(e.second) +
+		    " (" + pct_agg + "% of unsupported aggs, " + pct_total + "% of total)");
+	}
 }
 
 static void PrintErrorBreakdown(const string &label, const vector<BenchmarkQueryResult> &results, int total) {
@@ -673,8 +762,48 @@ int RunSQLStormBenchmark(const string &queries_dir, const string &out_csv, doubl
 		Log("  Baseline only:  " + std::to_string(baseline_only_success));
 		Log("  PAC only:       " + std::to_string(pac_only_success));
 
+		// Timing comparison for queries that succeeded in both passes
+		if (both_success > 0) {
+			double sum_baseline = 0, sum_pac = 0;
+			double sum_pac_applied_baseline = 0, sum_pac_applied_pac = 0;
+			int pac_applied_both = 0;
+			for (size_t i = 0; i < baseline_results.size() && i < pac_results.size(); ++i) {
+				if (baseline_results[i].state == "success" && pac_results[i].state == "success") {
+					sum_baseline += baseline_results[i].time_ms;
+					sum_pac += pac_results[i].time_ms;
+					if (pac_results[i].pac_applied) {
+						sum_pac_applied_baseline += baseline_results[i].time_ms;
+						sum_pac_applied_pac += pac_results[i].time_ms;
+						pac_applied_both++;
+					}
+				}
+			}
+			Log("--- Timing (queries succeeding in both passes) ---");
+			Log("  Baseline total: " + FormatNumber(sum_baseline) + " ms");
+			Log("  PAC total:      " + FormatNumber(sum_pac) + " ms");
+			if (sum_baseline > 0) {
+				double overhead_pct = 100.0 * (sum_pac - sum_baseline) / sum_baseline;
+				if (overhead_pct >= 0) {
+					Log("  PAC is " + FormatNumber(overhead_pct) + "% slower than DuckDB");
+				} else {
+					Log("  PAC is " + FormatNumber(-overhead_pct) + "% faster than DuckDB");
+				}
+			}
+			if (pac_applied_both > 0 && sum_pac_applied_baseline > 0) {
+				double overhead_applied = 100.0 * (sum_pac_applied_pac - sum_pac_applied_baseline) / sum_pac_applied_baseline;
+				Log("  PAC-transformed queries only (" + std::to_string(pac_applied_both) + " queries):");
+				Log("    Baseline: " + FormatNumber(sum_pac_applied_baseline) + " ms, PAC: " + FormatNumber(sum_pac_applied_pac) + " ms");
+				if (overhead_applied >= 0) {
+					Log("    PAC is " + FormatNumber(overhead_applied) + "% slower than DuckDB");
+				} else {
+					Log("    PAC is " + FormatNumber(-overhead_applied) + "% faster than DuckDB");
+				}
+			}
+		}
+
 		PrintErrorBreakdown("Baseline", baseline_results, total);
 		PrintErrorBreakdown("PAC", pac_results, total);
+		PrintUnsupportedAggregateBreakdown("PAC", pac_results, total);
 
 		// Write CSV with both passes
 		string csv_path = out_csv.empty() ? "benchmark/sqlstorm/sqlstorm_results.csv" : out_csv;

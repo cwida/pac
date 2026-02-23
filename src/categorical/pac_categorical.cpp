@@ -42,7 +42,7 @@ struct PacCategoricalBindData : public FunctionData {
 	double mi;
 	double correction;
 	uint64_t seed;
-	uint64_t query_hash; // derived from seed: used as counter selector for NoisySample
+	uint64_t query_hash;               // derived from seed: used as counter selector for NoisySample
 	std::shared_ptr<PacPState> pstate; // p-tracking state shared across query (may be nullptr)
 
 	// Primary constructor - reads seed from pac_seed setting, or uses default 42 if not set.

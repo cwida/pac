@@ -1493,8 +1493,7 @@ static void RewriteBottomUp(unique_ptr<LogicalOperator> &op_ptr, OptimizerExtens
 				WrapHavingPacRefsWithNoised(filter.expressions[fi], pac_bindings, input);
 			}
 		}
-	} else if ((op->type == LogicalOperatorType::LOGICAL_ORDER_BY ||
-	            op->type == LogicalOperatorType::LOGICAL_TOP_N) &&
+	} else if ((op->type == LogicalOperatorType::LOGICAL_ORDER_BY || op->type == LogicalOperatorType::LOGICAL_TOP_N) &&
 	           !inside_cte_definition) {
 		// === ORDER_BY / TOP_N: fix stale expression types after child projections were rewritten ===
 		// When PAC aggregates are converted to _counters, intermediate (non-terminal) projection
