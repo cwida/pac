@@ -321,6 +321,25 @@ WHERE total_revenue > 5000
 3
 
 # Debug test
+query II
+WITH supplier_totals AS (
+    SELECT
+        l_suppkey,
+        SUM(l_extendedprice * (1 - l_discount)) AS total_revenue
+    FROM lineitem
+    JOIN orders ON l_orderkey = o_orderkey
+    GROUP BY l_suppkey
+)
+SELECT *
+FROM supplier_totals
+ORDER BY l_suppkey;
+----
+1	4993.8432
+2	7956.0704
+3	8559.0016
+4	3997.6960
+
+# Debug test
 query I
 WITH supplier_totals AS (
     SELECT
