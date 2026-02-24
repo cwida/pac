@@ -12,9 +12,18 @@ SCRIPT="benchmark/tpch/utility_tpch.sql"
 RUNS=100
 
 SETUP="INSTALL tpch; LOAD tpch;"
+ERRORS=0
+START=$(date +%s)
 
 for i in $(seq 1 $RUNS); do
-    printf "\rRun %d/%d" "$i" "$RUNS"
-    echo "$SETUP" | cat - "$SCRIPT" | "$DUCKDB" "$DB" > /dev/null
+    ELAPSED=$(( $(date +%s) - START ))
+    printf "\rRun %d/%d  [%dm%02ds elapsed, %d errors]" "$i" "$RUNS" $((ELAPSED/60)) $((ELAPSED%60)) "$ERRORS"
+    if ! echo "$SETUP" | cat - "$SCRIPT" | "$DUCKDB" "$DB" > /dev/null 2>&1; then
+        ERRORS=$((ERRORS + 1))
+        echo ""
+        echo "ERROR: Run $i failed"
+    fi
 done
-printf "\rDone: %d runs completed.\n" "$RUNS"
+
+ELAPSED=$(( $(date +%s) - START ))
+printf "\rDone: %d runs, %d errors, %dm%02ds total\n" "$RUNS" "$ERRORS" $((ELAPSED/60)) $((ELAPSED%60))
