@@ -991,6 +991,8 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 	std::unordered_set<string> fk_linked_tables(gets_present.begin(), gets_present.end());
 
 	vector<string> fk_linked_tables_vec(fk_linked_tables.begin(), fk_linked_tables.end());
+	// Sort for deterministic behavior across platforms (unordered_set iteration order is not guaranteed)
+	std::sort(fk_linked_tables_vec.begin(), fk_linked_tables_vec.end());
 
 	// Use the extended filter that handles the edge case where inner aggregate groups by PU key
 	// (e.g., GROUP BY c_custkey where customer is the PU). In this case, we noise the outer
@@ -1868,9 +1870,15 @@ static CTEHashMatch FindCTEHashSource(LogicalOperator *op, const string &pu_tabl
 			}
 
 			// Path 2: CTE contains FK-linked table → use FK columns
+			// Sort FK path keys for deterministic behavior across platforms
+			vector<string> sorted_fk_cte_keys;
 			for (auto &fk_kv : check.fk_paths) {
-				auto &fk_table = fk_kv.first;
-				auto &fk_path = fk_kv.second;
+				sorted_fk_cte_keys.push_back(fk_kv.first);
+			}
+			std::sort(sorted_fk_cte_keys.begin(), sorted_fk_cte_keys.end());
+
+			for (auto &fk_table : sorted_fk_cte_keys) {
+				auto &fk_path = check.fk_paths.at(fk_table);
 				if (fk_path.empty() || fk_path.back() != pu_table_name) {
 					continue;
 				}
@@ -1929,14 +1937,21 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 	}
 
 	// Add FK-linked tables from the compatibility check results
+	// Sort FK path keys for deterministic behavior across platforms
+	vector<string> sorted_fk_path_keys;
 	for (auto &kv : check.fk_paths) {
+		sorted_fk_path_keys.push_back(kv.first);
+	}
+	std::sort(sorted_fk_path_keys.begin(), sorted_fk_path_keys.end());
+
+	for (auto &fk_key : sorted_fk_path_keys) {
 		// Add the FK table itself (the source table with the foreign key)
-		if (relevant_tables_set.find(kv.first) == relevant_tables_set.end()) {
-			relevant_tables.push_back(kv.first);
-			relevant_tables_set.insert(kv.first);
+		if (relevant_tables_set.find(fk_key) == relevant_tables_set.end()) {
+			relevant_tables.push_back(fk_key);
+			relevant_tables_set.insert(fk_key);
 		}
 		// Add tables along the FK path
-		auto &path = kv.second;
+		auto &path = check.fk_paths.at(fk_key);
 		for (auto &table : path) {
 			if (relevant_tables_set.find(table) == relevant_tables_set.end()) {
 				relevant_tables.push_back(table);
@@ -2070,9 +2085,15 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 			} else {
 				// FK-linked table case: find FK columns that reference the PU
 				// Check which FK-linked tables are in this aggregate's subtree
+				// Sort FK path keys for deterministic behavior across platforms
+				vector<string> sorted_fk_keys;
 				for (auto &kv : check.fk_paths) {
-					auto &fk_table = kv.first;
-					auto &path = kv.second;
+					sorted_fk_keys.push_back(kv.first);
+				}
+				std::sort(sorted_fk_keys.begin(), sorted_fk_keys.end());
+
+				for (auto &fk_table : sorted_fk_keys) {
+					auto &path = check.fk_paths.at(fk_table);
 
 					// Skip if this FK path doesn't lead to the current PU
 					if (path.empty() || path.back() != pu_table_name) {
@@ -2346,6 +2367,8 @@ void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExten
 		// Deduplicate missing tables
 		std::unordered_set<string> missing_set(gets_missing.begin(), gets_missing.end());
 		vector<string> unique_gets_missing(missing_set.begin(), missing_set.end());
+		// Sort for deterministic behavior across platforms (unordered_set iteration order is not guaranteed)
+		std::sort(unique_gets_missing.begin(), unique_gets_missing.end());
 
 		ModifyPlanWithoutPU(check, input, plan, unique_gets_missing, gets_present, it->second, privacy_units, cte_map);
 	}
