@@ -4,7 +4,7 @@ The TPC-H benchmark compares PAC query performance against baseline DuckDB TPC-H
 
 ## Overview
 
-This benchmark runs TPC-H queries Q1-Q22 (excluding Q2, Q10, Q11, Q16, Q18) and measures:
+This benchmark runs TPC-H queries Q1-Q22 (excluding Q2, Q3, Q10, Q11, Q16, Q18) and measures:
 - **Baseline**: Standard DuckDB TPC-H query execution time
 - **PAC (bitslice)**: Optimized PAC queries using bitslice compilation
 - **PAC (naive)**: Naive PAC query variants (optional)
@@ -33,7 +33,7 @@ This creates a privacy unit chain: `lineitem → orders → customer`. PAC queri
 
 ## Manual PAC Queries
 
-The `benchmark/tpch_pac_queries/` directory contains **hand-written PAC query variants** for each TPC-H query. These serve as:
+The `benchmark/tpch/tpch_pac_queries/` directory contains **hand-written PAC query variants** for each TPC-H query. These serve as:
 
 1. **Ground truth** for compiler correctness testing
 2. **Performance baseline** for compiler optimization comparison
@@ -78,9 +78,9 @@ LIMIT 10;
 
 | Directory | Description |
 |-----------|-------------|
-| `tpch_pac_queries/` | Optimized bitslice PAC queries (production algorithm) |
-| `tpch_pac_naive_queries/` | Naive PAC implementation (simpler but slower) |
-| `tpch_pac_simple_hash_queries/` | Simple hash-based PAC (alternative algorithm) |
+| `benchmark/tpch/tpch_pac_queries/` | Optimized bitslice PAC queries (production algorithm) |
+| `benchmark/tpch/tpch_pac_naive_queries/` | Naive PAC implementation (simpler but slower) |
+| `benchmark/tpch/tpch_pac_simple_hash_queries/` | Simple hash-based PAC (alternative algorithm) |
 
 ## Building
 
@@ -95,36 +95,29 @@ cmake --build build/release --target pac_tpch_benchmark
 
 ```bash
 # Basic usage (SF=10 by default)
-./build/release/pac_tpch_benchmark
+./build/release/extension/pac/pac_tpch_benchmark
 
-# Specify scale factor
-./build/release/pac_tpch_benchmark --sf 1
-./build/release/pac_tpch_benchmark --sf 0.1
-./build/release/pac_tpch_benchmark --sf 10
+# SF10, 8 threads (default)
+./build/release/extension/pac/pac_tpch_benchmark 10
 
-# Specify database path
-./build/release/pac_tpch_benchmark --db tpch_sf10.db --sf 10
+# SF30, custom db, include naive + simple hash variants
+./build/release/extension/pac/pac_tpch_benchmark 30 tpch_sf30.db benchmark "" --run-naive --run-simple-hash
 
-# Include naive PAC variant
-./build/release/pac_tpch_benchmark --sf 1 --naive
-
-# Include simple hash variant
-./build/release/pac_tpch_benchmark --sf 1 --simple-hash
-
-# Custom output CSV
-./build/release/pac_tpch_benchmark --sf 1 --out results.csv
+# SF1, 4 threads
+./build/release/extension/pac/pac_tpch_benchmark 1 tpch_sf1.db benchmark "" --threads=4
 ```
 
 ## Command Line Options
 
-| Option | Description | Default |
-|--------|-------------|---------|
-| `--sf <factor>` | TPC-H scale factor (can be fractional) | `10.0` |
-| `--db <path>` | Database file path | `tpch_sf{SF}.db` |
-| `--queries <dir>` | Directory containing PAC query files | `benchmark` |
-| `--out <path>` | Output CSV file path | `benchmark/tpch_benchmark_results_sf{SF}.csv` |
-| `--naive` | Include naive PAC query variants | disabled |
-| `--simple-hash` | Include simple hash PAC query variants | disabled |
+| Argument | Description | Default |
+|----------|-------------|---------|
+| `sf` (positional 1) | TPC-H scale factor (int) | `10` |
+| `db_path` (positional 2) | DuckDB database file path | `tpch.db` |
+| `queries_dir` (positional 3) | Root directory containing PAC SQL variants | `benchmark` |
+| `out_csv` (positional 4) | Output CSV file path (auto-named if omitted) | auto |
+| `--run-naive` | Include naive PAC query variants | disabled |
+| `--run-simple-hash` | Include simple hash PAC query variants | disabled |
+| `--threads=N` | Number of DuckDB threads | `8` |
 
 ## Database Creation
 
@@ -141,18 +134,17 @@ If the database already exists, data generation is skipped.
 
 Results are written to a CSV file with columns:
 - `query`: Query number (1-22)
-- `mode`: `baseline`, `pac_bitslice`, `pac_naive`, or `pac_simple_hash`
-- `run`: Run number (1-3)
-- `time_ms`: Execution time in milliseconds
+- `mode`: `baseline`, `SIMD PAC`, `naive PAC`, or `simple hash PAC`
+- `median_ms`: Median execution time in milliseconds
 
 ### Plotting
 
 If R and the required packages are installed, the benchmark automatically generates a plot:
-- `benchmark/tpch_benchmark_plot_sf{SF}.png`
+- `benchmark/tpch/tpch_benchmark_plot_sf{SF}.png`
 
 To manually generate plots:
 ```bash
-Rscript --vanilla benchmark/plot_tpch_results.R benchmark/tpch_benchmark_results_sf10.csv benchmark/
+Rscript --vanilla benchmark/tpch/plot_tpch_results.R benchmark/tpch/tpch_benchmark_results_sf10.csv benchmark/tpch/
 ```
 
 ## Benchmark Methodology
@@ -160,6 +152,6 @@ Rscript --vanilla benchmark/plot_tpch_results.R benchmark/tpch_benchmark_results
 For each query:
 1. **Cold run**: Execute once (not timed) to load data into memory
 2. **Warm-up run**: Execute once (not timed) to warm caches
-3. **Timed runs**: Execute 3 times, recording each execution time
+3. **Timed runs**: Execute 5 times, taking the median execution time
 
 This is done for baseline and each enabled PAC variant.

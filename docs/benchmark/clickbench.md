@@ -39,14 +39,14 @@ cmake --build build/release --target pac_clickhouse_benchmark
 ## Running
 
 ```bash
-# Run with default settings (uses clickbench_micro.db)
-./build/release/benchmark/pac_clickhouse_benchmark
+# Full benchmark (downloads hits.parquet ~15GB on first run)
+./build/release/extension/pac/pac_clickhouse_benchmark
 
-# Run with custom database
-./build/release/benchmark/pac_clickhouse_benchmark --db path/to/clickbench.db
+# Quick micro benchmark (5M rows)
+./build/release/extension/pac/pac_clickhouse_benchmark --micro
 
-# Run with specific number of runs
-./build/release/benchmark/pac_clickhouse_benchmark --runs 5
+# Custom database and output
+./build/release/extension/pac/pac_clickhouse_benchmark --db clickbench.db --out results/clickbench.csv
 ```
 
 ## Query Coverage
@@ -90,14 +90,14 @@ Some queries may be rejected by PAC due to privacy constraints:
 
 ### CSV Output
 
-Results are saved to `clickbench_micro_results.csv`:
+Results are saved to `benchmark/clickbench_micro_results.csv` (or `benchmark/clickbench_results.csv` for full mode):
 
 ```csv
-query,mode,run,time_ms,success
-Q0,baseline,1,12.34,true
-Q0,PAC,1,18.56,true
-Q1,baseline,1,8.12,true
-Q1,PAC,1,0,false
+query,mode,run,time_ms,success,error
+1,baseline,1,12.34,true,""
+1,PAC,1,18.56,true,""
+2,baseline,1,8.12,true,""
+2,PAC,1,0,false,"privacy violation"
 ...
 ```
 
@@ -105,11 +105,11 @@ Q1,PAC,1,0,false
 
 ```bash
 # Generate plots from results
-cd benchmark
+cd benchmark/clickbench
 Rscript plot_clickbench_results.R
 
 # Or specify custom input/output
-Rscript plot_clickbench_results.R path/to/results.csv output_dir/
+Rscript benchmark/clickbench/plot_clickbench_results.R path/to/results.csv output_dir/
 ```
 
 This generates:
@@ -133,16 +133,15 @@ This measures the **percentage increase** in query execution time when using PAC
 ## Directory Structure
 
 ```
-benchmark/
+benchmark/clickbench/
 ├── clickbench_queries/
-│   ├── create.sql          # Table schema
-│   ├── load.sql            # Data loading script
-│   └── queries.sql         # 43 benchmark queries
-├── include/
-│   └── pac_clickhouse_benchmark.hpp
-├── pac_clickhouse_benchmark.cpp
-├── plot_clickbench_results.R
-└── clickbench_micro_results.csv
+│   ├── create.sql                  # Table schema
+│   ├── load.sql                    # Data loading script
+│   ├── queries.sql                 # 43 benchmark queries
+│   └── utility.sql                 # Utility script for DuckDB CLI
+├── pac_clickhouse_benchmark.cpp    # Benchmark runner
+├── pac_clickhouse_benchmark.hpp    # Benchmark header
+└── plot_clickbench_results.R       # R plotting script
 ```
 
 ## See Also

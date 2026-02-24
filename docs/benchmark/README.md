@@ -22,6 +22,7 @@ PAC benchmarks are compiled as **separate standalone executables** (not run thro
 | `pac_tpch_benchmark` | `pac_tpch_benchmark` | TPC-H benchmark comparing PAC vs baseline |
 | `pac_tpch_compiler_benchmark` | `pac_tpch_compiler_benchmark` | Compiler benchmark comparing auto-compiled vs manual PAC queries |
 | `pac_clickhouse_benchmark` | `pac_clickhouse_benchmark` | ClickBench benchmark for web analytics workloads |
+| `pac_sqlstorm_benchmark` | `pac_sqlstorm_benchmark` | SQLStorm benchmark (TPC-H + StackOverflow) |
 
 ### Reproducibility
 All the benchmarks have been executed on Ubuntu 24.04. Further, the latest version of `clang` should be compiled and installed, to then compile our extension with it.
@@ -60,21 +61,36 @@ For instructions on how to run the individual benchmarks, please refer to the re
 ### Folder Structure
 ```
 benchmark/
-├── include/                        # Benchmark headers
-│   ├── pac_tpch_benchmark.hpp
-│   └── pac_tpch_compiler_benchmark.hpp
-├── pac_microbench/                 # Microbenchmark suite
-├── pac_tpch_benchmark.cpp          # TPC-H benchmark runner
-├── pac_tpch_compiler_benchmark.cpp # Compiler benchmark runner
-│   ├── pac_clickhouse_benchmark.hpp
-├── plot_tpch_results.R             # R script for plotting results
-├── tpch_pac_queries/               # Hand-written optimized PAC queries
-├── clickbench_queries/             # ClickBench query suite
-└── tpch_pac_simple_hash_queries/   # Simple hash PAC query variants
-├── pac_clickhouse_benchmark.cpp    # ClickBench benchmark runner
+├── tpch/                              # TPC-H benchmark
+│   ├── pac_tpch_benchmark.cpp
+│   ├── pac_tpch_compiler_benchmark.cpp
+│   ├── tpch_pac_queries/              # Hand-written optimized PAC queries
+│   ├── tpch_pac_naive_queries/        # Naive PAC query variants
+│   ├── tpch_pac_simple_hash_queries/  # Simple hash PAC query variants
+│   ├── utility_tpch.sql               # Utility script for DuckDB CLI
+│   ├── run_utility_tpch_100.sql       # Runs utility 100 times
+│   └── plot_tpch_results.R            # R plotting script
+├── clickbench/                        # ClickBench benchmark
+│   ├── pac_clickhouse_benchmark.cpp
+│   ├── clickbench_queries/            # Query suite (create, load, queries, utility)
+│   └── plot_clickbench_results.R      # R plotting script
+├── sqlstorm/                          # SQLStorm benchmark
+│   ├── pac_sqlstorm_benchmark.cpp
+│   ├── pac_stackoverflow_schema.sql
+│   └── SQLStorm/                      # SQLStorm submodule
+└── pac_microbench/                    # Microbenchmark suite
+```
 
 ## Output
 
-├── plot_clickbench_results.R       # R script for ClickBench plots
-├── plot_tpch_results.R             # R script for TPC-H plots
+- CSV result files are written to the respective benchmark directories
 - PNG plots are generated automatically if R and required packages are installed
+
+## See Also
+
+- [TPC-H Benchmark](tpch.md)
+- [TPC-H Compiler Benchmark](tpch_compiler.md)
+- [ClickBench Benchmark](clickbench.md)
+- [SQLStorm Benchmark](sqlstorm.md)
+- [Utility Scripts](utility.md)
+- [Microbenchmarks](microbenchmarks.md)
