@@ -15,13 +15,17 @@ SETUP="INSTALL tpch; LOAD tpch;"
 ERRORS=0
 START=$(date +%s)
 
+trap 'echo ""; echo "Interrupted after $i/$RUNS runs ($ERRORS errors)"; exit 130' INT TERM
+
 for i in $(seq 1 $RUNS); do
     ELAPSED=$(( $(date +%s) - START ))
     printf "\rRun %d/%d  [%dm%02ds elapsed, %d errors]" "$i" "$RUNS" $((ELAPSED/60)) $((ELAPSED%60)) "$ERRORS"
-    if ! echo "$SETUP" | cat - "$SCRIPT" | "$DUCKDB" "$DB" > /dev/null 2>&1; then
+    OUTPUT=$(echo "$SETUP" | cat - "$SCRIPT" | "$DUCKDB" "$DB" 2>&1)
+    if [ $? -ne 0 ]; then
         ERRORS=$((ERRORS + 1))
         echo ""
-        echo "ERROR: Run $i failed"
+        echo "ERROR: Run $i failed:"
+        echo "$OUTPUT" | grep -i -E "error|exception|abort|fatal|catalog" | head -5
     fi
 done
 
