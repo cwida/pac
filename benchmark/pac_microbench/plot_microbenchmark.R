@@ -55,17 +55,17 @@ PLATFORM_ORDER <- c('graviton', 'macbook', 'granite-rapids', 'epyc')
 
 # Count variant names
 COUNT_VARIANT_NAMES <- c(
-  'standard' = 'DuckDB Count',
+  'standard' = 'DuckDB',
   'default' = 'Buffering+Cascading',
   'nobuffering' = 'Cascading',
   'nocascading' = 'Naive/SIMD-Unfriendly'
 )
 
-COUNT_VARIANT_ORDER <- c('DuckDB Count', 'Buffering+Cascading',
+COUNT_VARIANT_ORDER <- c('DuckDB', 'Buffering+Cascading',
                          'Cascading', 'Naive/SIMD-Unfriendly')
 
 COUNT_VARIANT_COLORS <- c(
-  'DuckDB Count' = '#95a5a6',
+  'DuckDB' = '#95a5a6',
   'Buffering+Cascading' = '#00e600',
   'Cascading' = '#33bbff',
   'Naive/SIMD-Unfriendly' = '#ff5c33'
@@ -73,34 +73,34 @@ COUNT_VARIANT_COLORS <- c(
 
 # Sum variant names
 SUM_VARIANT_NAMES <- c(
-  'standard' = 'DuckDB Sum',
-  'default' = 'Approximate+Buffering',
-  'nobuffering' = 'Approximate',
-  'exactsum' = 'Exact',
+  'standard' = 'DuckDB',
+  'default' = 'Approx.+Buffering',
+  'nobuffering' = 'Approx.',
+  'exactsum' = 'Exact+Cascading',
   'nocascading' = 'Naive/SIMD-Unfriendly'
 )
 
-SUM_VARIANT_ORDER <- c('DuckDB Sum', 'Approximate+Buffering',
-                       'Approximate', 'Exact',
+SUM_VARIANT_ORDER <- c('DuckDB', 'Approx.+Buffering',
+                       'Approx.', 'Exact+Cascading',
                        'Naive/SIMD-Unfriendly')
 
 SUM_VARIANT_COLORS <- c(
-  'DuckDB Sum' = '#95a5a6',
-  'Approximate+Buffering' = '#00e600',
-  'Approximate' = '#ff9933',
-  'Exact' = '#b366ff',
+  'DuckDB' = '#95a5a6',
+  'Approx.+Buffering' = '#00e600',
+  'Approx.' = '#ff9933',
+  'Exact+Cascading' = '#b366ff',
   'Naive/SIMD-Unfriendly' = '#ff5c33'
 )
 
 # MinMax variant names
 MINMAX_VARIANT_NAMES <- c(
-  'standard' = 'DuckDB Max',
+  'standard' = 'DuckDB',
   'default' = 'Buffering+Pruning',
   'nobuffering' = 'Pruning',
   'noboundopt' = 'Naive/SIMD-Unfriendly'
 )
 
-MINMAX_VARIANT_ORDER <- c('DuckDB Max', 'Buffering+Pruning',
+MINMAX_VARIANT_ORDER <- c('DuckDB', 'Buffering+Pruning',
                           'Pruning', 'Naive/SIMD-Unfriendly')
 
 
@@ -119,14 +119,12 @@ AGG_ORDER <- c('pac_max', 'pac_count', 'pac_sum')
 VARIANT_PATTERNS <- c(
   'Buffering+Cascading' = 'stripe',
   'Cascading' = 'crosshatch',
-  'Approximate+Buffering' = 'stripe',
-  'Approximate' = 'stripe',
-  'Exact' = 'stripe',
+  'Approx.+Buffering' = 'stripe',
+  'Approx.' = 'stripe',
+  'Exact+Cascading' = 'stripe',
   'Buffering+Pruning' = 'stripe',
   'Pruning' = 'crosshatch',
-  'DuckDB Count' = 'none',
-  'DuckDB Sum' = 'none',
-  'DuckDB Max' = 'none',
+  'DuckDB' = 'none',
   'Naive/SIMD-Unfriendly' = 'circle'
 )
 
@@ -134,16 +132,14 @@ VARIANT_PATTERNS <- c(
 # This can be used when you need a single color scale across all variant types
 VARIANT_COLORS <- c(
   # DuckDB baselines (gray)
-  'DuckDB Count' = '#95a5a6',
-  'DuckDB Sum' = '#95a5a6',
-  'DuckDB Max' = '#95a5a6',
+  'DuckDB' = '#95a5a6',
   # Best optimizations with buffering (green)
   'Buffering+Cascading' = '#00e600',
-  'Approximate+Buffering' = '#00e600',
+  'Approx.+Buffering' = '#00e600',
   'Buffering+Pruning' = '#00e600',
   # Mid-tier without buffering (blue)
   'Cascading' = '#3498db',
-  'Approximate' = '#3498db',
+  'Approx.' = '#3498db',
   'Pruning' = '#d2a679',
   # Alternative methods (orange)
   'Exact' = '#ffff00',
@@ -161,9 +157,14 @@ AGG_PATTERNS <- c(
 # Helper Functions
 # ============================================================================
 
+newest_csv <- function(files) {
+  # Pick the most recent CSV by filename timestamp (YYYYMMDD_HHMMSS)
+  files[order(basename(files), decreasing = TRUE)][1]
+}
+
 format_group_label <- function(gv) {
   if (gv == 0) {
-    return('0\n(ungrouped)')
+    return('ungrouped')
   } else if (gv >= 1000000) {
     return(paste0(gv / 1000000, 'M'))
   } else if (gv >= 1000) {
@@ -185,7 +186,7 @@ plot_count_optimizations <- function(platform, platform_name, results_dir, outpu
     return(NULL)
   }
 
-  df <- read_csv(count_files[1], show_col_types = FALSE)
+  df <- read_csv(newest_csv(count_files), show_col_types = FALSE)
 
   # Filter to 1000M rows
   df <- df %>% filter(rows_m == 1000)
@@ -208,12 +209,12 @@ plot_count_optimizations <- function(platform, platform_name, results_dir, outpu
   valid_times <- df %>% filter(!is_timeout, display_time > 0) %>% pull(display_time)
   if (length(valid_times) == 0) return(NULL)
   max_time <- max(valid_times)
-  y_max <- max_time / 0.82
+  y_max <- max_time / 0.92
 
   # Prepare display times
   df <- df %>% mutate(
     plot_time = case_when(
-      is_timeout ~ y_max * 1.15,  # Overflow above plot area
+      is_timeout ~ y_max * 1.05,
       display_time > y_max ~ y_max * 0.95,
       display_time > 0 & display_time < y_max * 0.005 ~ y_max * 0.005,
       TRUE ~ display_time
@@ -224,8 +225,8 @@ plot_count_optimizations <- function(platform, platform_name, results_dir, outpu
   df <- df %>% mutate(
     time_label = case_when(
       is_timeout ~ '',  # Empty - will add geom_text separately for inside bar
-      display_time > y_max ~ sprintf('%.0fs', display_time),
-      display_time > 0 ~ sprintf('%.1fs', display_time),
+      display_time > y_max ~ sprintf('%.0f', display_time),
+      display_time > 0 ~ sprintf('%.1f', display_time),
       TRUE ~ ''
     )
   )
@@ -241,50 +242,83 @@ plot_count_optimizations <- function(platform, platform_name, results_dir, outpu
 
   # Paper plot settings
   width <- 4000
-  height <- 1800
+  height <- 1450
   res <- 200
   base_size <- 40
   base_family <- "Linux Libertine"
 
+  # Build break mark segments for overflow bars
+  overflow_df <- df %>% filter(!is_timeout, display_time > y_max)
+  break_segments <- data.frame()
+  if (nrow(overflow_df) > 0) {
+    n_variants <- length(COUNT_VARIANT_ORDER)
+    dodge_width <- 0.9
+    bar_width <- 0.85
+    single_bar_w <- bar_width / n_variants
+    for (r in seq_len(nrow(overflow_df))) {
+      row <- overflow_df[r, ]
+      var_idx <- match(as.character(row$variant_name), COUNT_VARIANT_ORDER)
+      x_center <- as.numeric(row$group_label)
+      x_offset <- (var_idx - (n_variants + 1) / 2) * (dodge_width / n_variants)
+      bx <- x_center + x_offset
+      half_w <- single_bar_w * 0.3
+      by1 <- y_max * 0.88
+      by2 <- y_max * 0.85
+      bh <- y_max * 0.04
+      break_segments <- bind_rows(break_segments, data.frame(
+        x1 = bx - half_w, x2 = bx + half_w, y1 = by1 - bh, y2 = by1 + bh
+      ), data.frame(
+        x1 = bx - half_w, x2 = bx + half_w, y1 = by2 - bh, y2 = by2 + bh
+      ))
+    }
+  }
+
   p <- ggplot(df, aes(x = group_label, y = plot_time, fill = variant_name, pattern = variant_name)) +
     geom_col_pattern(position = position_dodge(width = 0.9), width = 0.85,
                      color = 'black', linewidth = 0.5,
-                     pattern_density = 0.2, pattern_spacing = 0.03,
+                     pattern_density = 0.15, pattern_spacing = 0.035,
                      pattern_fill = 'black', pattern_color = 'black',
                      pattern_angle = 45, pattern_size = 0.1) +
+    # Break marks on overflow bars
+    { if (nrow(break_segments) > 0)
+      geom_segment(data = break_segments, aes(x = x1, xend = x2, y = y1, yend = y2),
+                   inherit.aes = FALSE, color = 'white', linewidth = 1.5)
+    } +
     # Regular time labels on top of bars
-    geom_text(aes(label = time_label, color = variant_name),
+    geom_text(aes(label = time_label),
               position = position_dodge(width = 0.9),
-              vjust = -0.3, size = base_size * 0.2, fontface = 'bold') +
+              vjust = -0.3, size = base_size * 0.28, fontface = 'bold',
+              color = 'black', family = base_family) +
     # FAILED labels inside bars - ensure variant_name is factored correctly
     geom_text(data = df %>% filter(is_timeout) %>% mutate(label_y = y_max, variant_name = factor(variant_name, levels = COUNT_VARIANT_ORDER)),
               aes(x = group_label, y = label_y, label = 'FAILED', fill = variant_name),
               position = position_dodge(width = 0.45),
-              vjust = 3.3, hjust = 0.5,
-              size = base_size * 0.25, fontface = 'bold',
+              vjust = 2.85, hjust = 1,
+              size = base_size * 0.3, fontface = 'bold',
               color = 'white', angle = 90, show.legend = FALSE) +
     scale_fill_manual(values = COUNT_VARIANT_COLORS, name = NULL) +
-    scale_color_manual(values = COUNT_VARIANT_COLORS, guide = 'none') +
     scale_pattern_manual(values = VARIANT_PATTERNS, guide = 'none') +
     labs(x = 'distinct GROUP BY values for a COUNT(*)',
          y = 'Time (seconds)') +
     theme_bw(base_size = base_size, base_family = base_family) +
     theme(
+      panel.border = element_rect(linewidth = 1.0),
       panel.grid.major = element_line(linewidth = 1.0),
       panel.grid.minor = element_blank(),
       legend.position = 'top',
       legend.justification = 'right',
       legend.direction = 'horizontal',
-      legend.margin = margin(0, 0, 0, 0),
-      legend.box.margin = margin(0, 0, -10, 0),
-      legend.text = element_text(size = base_size + 2),
+      legend.margin = margin(0, 0, -5, 0),
+      legend.box.margin = margin(0, 0, -15, 0),
+      legend.text = element_text(size = base_size + 6),
+      legend.key.size = unit(1.2, 'lines'),
       axis.text.x = element_text(angle = 0, hjust = 0.5, size = base_size + 2),
       axis.text.y = element_text(size = base_size + 2),
       axis.title.x = element_text(size = base_size + 4, margin = margin(t = 5)),
       axis.title.y = element_text(size = base_size + 4),
-      plot.margin = margin(5, 5, 5, 5)
+      plot.margin = margin(2, 5, 5, 5)
     ) +
-    coord_cartesian(ylim = c(0, y_max * 1.1), clip = 'off')
+    coord_cartesian(ylim = c(0, y_max), clip = 'off')
 
   output_file <- file.path(output_dir, paste0('count_optimizations_', platform, '_paper.png'))
   png(filename = output_file, width = width, height = height, res = res)
@@ -305,7 +339,7 @@ plot_sum_optimizations <- function(platform, platform_name, results_dir, output_
     return(NULL)
   }
 
-  df <- read_csv(sum_files[1], show_col_types = FALSE)
+  df <- read_csv(newest_csv(sum_files), show_col_types = FALSE)
 
   # Handle different column names
   test_col <- ifelse('itest' %in% colnames(df), 'itest', 'test')
@@ -313,23 +347,17 @@ plot_sum_optimizations <- function(platform, platform_name, results_dir, output_
   # Filter to sum, 1000M rows
   df <- df %>% filter(aggregate == 'sum', rows_m == 1000)
 
-  # Get grouped_scat data
-  grouped_df <- df %>% filter(!!sym(test_col) == 'grouped_scat')
-  if ('large' %in% grouped_df$dtype) {
-    grouped_df <- grouped_df %>% filter(dtype == 'large')
-  } else if ('tiny' %in% grouped_df$dtype) {
-    grouped_df <- grouped_df %>% filter(dtype == 'tiny')
-  }
-  grouped_df <- grouped_df %>% mutate(group_values = groups)
+  # Get grouped_scat data — average across all dtypes
+  grouped_df <- df %>% filter(!!sym(test_col) == 'grouped_scat') %>%
+    group_by(variant, groups) %>%
+    summarise(wall_sec = mean(wall_sec), .groups = 'drop') %>%
+    mutate(group_values = groups)
 
-  # Get ungrouped data
-  ungrouped_df <- df %>% filter(!!sym(test_col) == 'ungrouped_domain')
-  if ('large' %in% ungrouped_df$dtype) {
-    ungrouped_df <- ungrouped_df %>% filter(dtype == 'large')
-  } else if ('tiny' %in% ungrouped_df$dtype) {
-    ungrouped_df <- ungrouped_df %>% filter(dtype == 'tiny')
-  }
-  ungrouped_df <- ungrouped_df %>% mutate(group_values = 0, groups = 1)
+  # Get ungrouped data — average across all dtypes
+  ungrouped_df <- df %>% filter(!!sym(test_col) == 'ungrouped_domain') %>%
+    group_by(variant) %>%
+    summarise(wall_sec = mean(wall_sec), .groups = 'drop') %>%
+    mutate(group_values = 0, groups = 1)
 
   # Combine
   df <- bind_rows(ungrouped_df, grouped_df)
@@ -340,32 +368,32 @@ plot_sum_optimizations <- function(platform, platform_name, results_dir, output_
     is_timeout = wall_sec < 0
   )
 
-  # Calculate y_max: 10M approximate+buffering at 85%
+  # Calculate y_max: 10M Approx.+buffering at 85%
   approx_buff_df <- df %>%
-    filter(variant_name == 'Approximate+Buffering',
+    filter(variant_name == 'Approx.+Buffering',
            !is_timeout, display_time > 0) %>%
     arrange(desc(group_values)) %>%
     slice(1)
 
   if (nrow(approx_buff_df) > 0) {
-    y_max <- approx_buff_df$display_time[1] / 0.85
+    y_max <- approx_buff_df$display_time[1] / 0.92
   } else {
     valid_times <- df %>% filter(!is_timeout, display_time > 0) %>% pull(display_time)
-    y_max <- ifelse(length(valid_times) > 0, max(valid_times) / 0.85, 100)
+    y_max <- ifelse(length(valid_times) > 0, max(valid_times) / 0.92, 100)
   }
 
   # Prepare display times
   df <- df %>% mutate(
     plot_time = case_when(
-      is_timeout ~ y_max * 1.15,  # Overflow above plot area (match count plot)
+      is_timeout ~ y_max * 1.055,
       display_time > y_max ~ y_max * 0.95,
       display_time > 0 & display_time < y_max * 0.005 ~ y_max * 0.005,
       TRUE ~ display_time
     ),
     time_label = case_when(
       is_timeout ~ '',  # Empty - will add geom_text separately for inside bar
-      display_time > y_max ~ sprintf('%.0fs', display_time),
-      display_time > 0 ~ sprintf('%.1fs', display_time),
+      display_time > y_max ~ sprintf('%.0f', display_time),
+      display_time > 0 ~ sprintf('%.1f', display_time),
       TRUE ~ ''
     )
   )
@@ -378,63 +406,95 @@ plot_sum_optimizations <- function(platform, platform_name, results_dir, output_
   # Add pattern mapping
   df <- df %>% mutate(pattern = VARIANT_PATTERNS[as.character(variant_name)])
 
-  # Add custom pattern angles for sum variants: horizontal for Approximate, vertical for Exact
+  # Add custom pattern angles for sum variants: horizontal for Approx., vertical for Exact
   df <- df %>% mutate(
     pattern_angle_custom = case_when(
-      variant_name == 'Approximate' ~ 0,      # Horizontal stripes
-      variant_name == 'Exact' ~ 90,           # Vertical stripes
+      variant_name == 'Approx.' ~ 0,      # Horizontal stripes
+      variant_name == 'Exact+Cascading' ~ 90,           # Vertical stripes
       TRUE ~ 45                                # Default diagonal for others
     )
   )
 
   # Paper plot settings (wider for more variants)
-  width <- 4800
-  height <- 1700
-  res <- 225
+  width <- 4000
+  height <- 1450
+  res <- 200
   base_size <- 40
   base_family <- "Linux Libertine"
+
+  # Build break mark segments for overflow bars
+  overflow_df <- df %>% filter(!is_timeout, display_time > y_max)
+  break_segments <- data.frame()
+  if (nrow(overflow_df) > 0) {
+    n_variants <- length(SUM_VARIANT_ORDER)
+    dodge_width <- 0.9
+    bar_width <- 0.8
+    single_bar_w <- bar_width / n_variants
+    for (r in seq_len(nrow(overflow_df))) {
+      row <- overflow_df[r, ]
+      var_idx <- match(as.character(row$variant_name), SUM_VARIANT_ORDER)
+      x_center <- as.numeric(row$group_label)
+      x_offset <- (var_idx - (n_variants + 1) / 2) * (dodge_width / n_variants)
+      bx <- x_center + x_offset
+      half_w <- single_bar_w * 0.3
+      by1 <- y_max * 0.88
+      by2 <- y_max * 0.85
+      bh <- y_max * 0.04
+      break_segments <- bind_rows(break_segments, data.frame(
+        x1 = bx - half_w, x2 = bx + half_w, y1 = by1 - bh, y2 = by1 + bh
+      ), data.frame(
+        x1 = bx - half_w, x2 = bx + half_w, y1 = by2 - bh, y2 = by2 + bh
+      ))
+    }
+  }
 
   p <- ggplot(df, aes(x = group_label, y = plot_time, fill = variant_name, pattern = variant_name)) +
     geom_col_pattern(aes(pattern_angle = pattern_angle_custom),
                      position = position_dodge(width = 0.9), width = 0.8,
                      color = 'black', size = 0.5,
-                     pattern_density = 0.2, pattern_spacing = 0.03,
+                     pattern_density = 0.15, pattern_spacing = 0.035,
                      pattern_fill = 'black', pattern_color = 'black',
                      pattern_size = 0.1) +
+    # Break marks on overflow bars
+    { if (nrow(break_segments) > 0)
+      geom_segment(data = break_segments, aes(x = x1, xend = x2, y = y1, yend = y2),
+                   inherit.aes = FALSE, color = 'white', linewidth = 1.5)
+    } +
     # Regular time labels on top of bars
-    geom_text(aes(label = time_label, color = variant_name),
+    geom_text(aes(label = time_label),
               position = position_dodge(width = 0.9),
-              vjust = -0.3, size = base_size * 0.17, fontface = 'bold') +
+              vjust = -0.3, size = base_size * 0.22, fontface = 'bold',
+              color = 'black', family = base_family) +
     # FAILED labels inside bars - vertical like count plot
     geom_text(data = df %>% filter(is_timeout) %>% mutate(label_y = y_max, variant_name = factor(variant_name, levels = SUM_VARIANT_ORDER)),
               aes(x = group_label, y = label_y, label = 'FAILED', fill = variant_name),
               position = position_dodge(width = 0.8),
-              vjust = 0.5, hjust = 0.65,
-              size = base_size * 0.22, fontface = 'bold',
+              vjust = 0.5, hjust = 1,
+              size = base_size * 0.30, fontface = 'bold',
               color = 'white', angle = 90, show.legend = FALSE) +
     scale_fill_manual(values = SUM_VARIANT_COLORS, name = NULL) +
-    scale_color_manual(values = SUM_VARIANT_COLORS, guide = 'none') +
     scale_pattern_manual(values = VARIANT_PATTERNS, guide = 'none') +
     scale_pattern_angle_continuous(guide = 'none') +
     labs(x = 'distinct GROUP BY values for a SUM',
          y = 'Time (seconds)') +
     theme_bw(base_size = base_size, base_family = base_family) +
     theme(
+      panel.border = element_rect(linewidth = 1.0),
       panel.grid.major = element_line(linewidth = 1.0),
       panel.grid.minor = element_blank(),
       legend.position = 'top',
       legend.justification = 'right',
       legend.direction = 'horizontal',
-      legend.margin = margin(0, 0, 0, 0),
-      legend.box.margin = margin(0, 0, -10, 0),
-      legend.text = element_text(size = base_size - 2),
+      legend.margin = margin(0, 0, -5, 0),
+      legend.box.margin = margin(0, 0, -15, 0),
+      legend.text = element_text(size = base_size - 3),
       axis.text.x = element_text(angle = 0, hjust = 0.5, size = base_size + 2),
       axis.text.y = element_text(size = base_size + 2),
       axis.title.x = element_text(size = base_size + 4, margin = margin(t = 5)),
       axis.title.y = element_text(size = base_size + 4),
-      plot.margin = margin(5, 5, 5, 5)
+      plot.margin = margin(2, 5, 5, 5)
     ) +
-    coord_cartesian(ylim = c(0, y_max * 1.1), clip = 'off')
+    coord_cartesian(ylim = c(0, y_max), clip = 'off')
 
   output_file <- file.path(output_dir, paste0('sum_optimizations_', platform, '_paper.png'))
   png(filename = output_file, width = width, height = height, res = res)
@@ -455,7 +515,7 @@ plot_minmax_optimizations <- function(platform, platform_name, results_dir, outp
     return(NULL)
   }
 
-  df <- read_csv(minmax_files[1], show_col_types = FALSE)
+  df <- read_csv(newest_csv(minmax_files), show_col_types = FALSE)
 
   # Filter to dist_test, max, 1000M
   df <- df %>% filter(test == 'dist_test', aggregate == 'max', rows_m == 1000)
@@ -483,8 +543,8 @@ plot_minmax_optimizations <- function(platform, platform_name, results_dir, outp
     ),
     time_label = case_when(
       is_timeout ~ 'FAILED',
-      display_time > y_max ~ sprintf('%.0fs', display_time),
-      display_time > 0 ~ sprintf('%.1fs', display_time),
+      display_time > y_max ~ sprintf('%.0f', display_time),
+      display_time > 0 ~ sprintf('%.1f', display_time),
       TRUE ~ ''
     )
   )
@@ -501,7 +561,7 @@ plot_minmax_optimizations <- function(platform, platform_name, results_dir, outp
 
   # Paper plot settings
   width <- 4000
-  height <- 1500
+  height <- 1450
   res <- 200
   base_size <- 40
   base_family <- "Linux Libertine"
@@ -509,31 +569,31 @@ plot_minmax_optimizations <- function(platform, platform_name, results_dir, outp
   p <- ggplot(df, aes(x = dist_label, y = plot_time, fill = variant_name, pattern = variant_name)) +
     geom_col_pattern(position = position_dodge(width = 0.9), width = 0.85,
                      color = 'black', size = 0.5,
-                     pattern_density = 0.2, pattern_spacing = 0.03,
+                     pattern_density = 0.15, pattern_spacing = 0.035,
                      pattern_fill = 'black', pattern_color = 'black',
                      pattern_angle = 45, pattern_size = 0.1) +
-    geom_text(aes(label = time_label, color = variant_name),
+    geom_text(aes(label = time_label),
               position = position_dodge(width = 0.9),
-              vjust = -0.3, size = base_size * 0.30, fontface = 'bold') +
+              vjust = -0.3, size = base_size * 0.45, fontface = 'bold',
+              color = 'black', family = base_family) +
     scale_fill_manual(values = VARIANT_COLORS, name = NULL) +
-    scale_color_manual(values = VARIANT_COLORS, guide = 'none') +
     scale_pattern_manual(values = VARIANT_PATTERNS, guide = 'none') +
-    labs(x = 'Data Distribution',
+    scale_x_discrete(expand = expansion(add = 0.5)) +
+    labs(x = NULL,
          y = 'Time (seconds)') +
     theme_bw(base_size = base_size, base_family = base_family) +
     theme(
+      panel.border = element_rect(linewidth = 1.0),
       panel.grid.major = element_line(linewidth = 1.0),
       panel.grid.minor = element_blank(),
       legend.position = 'top',
-      #legend.justification = 'right',
-      legend.margin = margin(0, 0, 0, 0),
-      legend.box.margin = margin(0, 0, -10, 0),
-      legend.text = element_text(size = base_size - 2),
+      legend.margin = margin(0, 0, -5, 0),
+      legend.box.margin = margin(0, 0, -15, 0),
+      legend.text = element_text(size = base_size),
       axis.text.x = element_text(angle = 0, hjust = 0.5, size = base_size + 2),
       axis.text.y = element_text(size = base_size + 2),
-      axis.title.x = element_text(size = base_size + 4, margin = margin(t = 5)),
       axis.title.y = element_text(size = base_size + 4),
-      plot.margin = margin(5, 5, 5, 5)
+      plot.margin = margin(2, 5, 5, 5)
     ) +
     ylim(0, y_max * 1.1)
 
@@ -552,7 +612,7 @@ load_count_simd_factor <- function(platform_dir) {
   count_files <- list.files(platform_dir, pattern = "^count_.*\\.csv$", full.names = TRUE)
   if (length(count_files) == 0) return(list(factor = NA, n = 0))
 
-  df <- read_csv(count_files[1], show_col_types = FALSE)
+  df <- read_csv(newest_csv(count_files), show_col_types = FALSE)
 
   message("DEBUG: load_count_simd_factor for ", basename(platform_dir))
   message("  Total rows in file: ", nrow(df))
@@ -592,7 +652,7 @@ load_max_simd_factor <- function(platform_dir) {
   minmax_files <- list.files(platform_dir, pattern = "^min_max_.*\\.csv$", full.names = TRUE)
   if (length(minmax_files) == 0) return(list(factor = NA, n = 0))
 
-  df <- read_csv(minmax_files[1], show_col_types = FALSE)
+  df <- read_csv(newest_csv(minmax_files), show_col_types = FALSE)
 
   message("DEBUG: load_max_simd_factor for ", basename(platform_dir))
   message("  Total rows in file: ", nrow(df))
@@ -650,7 +710,7 @@ load_sum_simd_factor <- function(platform_dir) {
   sum_files <- list.files(platform_dir, pattern = "^sum_avg_.*\\.csv$", full.names = TRUE)
   if (length(sum_files) == 0) return(list(factor = NA, n = 0))
 
-  df <- read_csv(sum_files[1], show_col_types = FALSE)
+  df <- read_csv(newest_csv(sum_files), show_col_types = FALSE)
   test_col <- ifelse('itest' %in% colnames(df), 'itest', 'test')
 
   message("DEBUG: load_sum_simd_factor for ", basename(platform_dir))
@@ -741,8 +801,8 @@ plot_simd_improvements <- function(results_dir, output_dir) {
   data_long$aggregate <- factor(data_long$aggregate, levels = AGG_ORDER)
 
   # Paper plot settings
-  width <- 2000
-  height <- 1000
+  width <- 4000
+  height <- 1450
   res <- 200
   base_size <- 40
   base_family <- "Linux Libertine"
@@ -752,25 +812,28 @@ plot_simd_improvements <- function(results_dir, output_dir) {
              color = 'black', size = 0.5) +
     geom_text(aes(label = sprintf('%.1fx', factor)),
               position = position_dodge(width = 0.8),
-              vjust = -0.3, size = base_size * 0.18, fontface = 'bold') +
+              vjust = -0.3, size = base_size * 0.35, fontface = 'bold',
+              color = 'black', family = base_family) +
     geom_hline(yintercept = 1, linetype = 'dashed', color = '#666666', size = 0.8) +
     scale_fill_manual(values = AGG_COLORS, name = 'Aggregate') +
     labs(x = 'Architecture',
          y = 'Improvement Factor') +
     theme_bw(base_size = base_size, base_family = base_family) +
     theme(
+      panel.border = element_rect(linewidth = 1.0),
       panel.grid.major = element_line(linewidth = 1.0),
       panel.grid.minor = element_blank(),
       legend.position = 'top',
       legend.justification = 'left',
-      legend.margin = margin(0, 0, 0, 0),
-      legend.box.margin = margin(0, 0, -10, 0),
-      legend.title = element_text(size = base_size - 14),
-      legend.text = element_text(size = base_size - 16),
-      axis.text.x = element_text(angle = 0, hjust = 0.5, size = base_size - 20),
-      axis.text.y = element_text(size = base_size - 12),
-      axis.title = element_text(size = base_size - 10),
-      plot.margin = margin(5, 5, 5, 5)
+      legend.margin = margin(0, 0, -5, 0),
+      legend.box.margin = margin(0, 0, -15, 0),
+      legend.title = element_text(size = base_size + 4),
+      legend.text = element_text(size = base_size + 6),
+      axis.text.x = element_text(angle = 0, hjust = 0.5, size = base_size + 2),
+      axis.text.y = element_text(size = base_size + 2),
+      axis.title.y = element_text(size = base_size + 4),
+      axis.title.x = element_blank(),
+      plot.margin = margin(2, 5, 5, 5)
     ) +
     ylim(0, 50)
 
@@ -818,6 +881,7 @@ plot_hash_distribution <- function(output_dir) {
          y = 'Observed frequency') +
     theme_bw(base_size = base_size, base_family = base_family) +
     theme(
+      panel.border = element_rect(linewidth = 1.0),
       panel.grid.major = element_line(linewidth = 1.0),
       panel.grid.minor = element_blank(),
       legend.position = 'top',

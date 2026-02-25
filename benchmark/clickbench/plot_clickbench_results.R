@@ -198,20 +198,22 @@ method_colors <- c(
 # Paper color palette (matches TPC-H paper style)
 paper_colors <- c(
   "DuckDB" = "#95a5a6",
-  "PAC" = "#4dff4d"
+  "SIMD-PAC" = "#4dff4d"
 )
 
 # Build plot function for standard output
-build_plot <- function(df, out_file, plot_title, width = 4000, height = 2000, res = 200, base_size = 36, base_family = "sans") {
+build_plot <- function(df, out_file, plot_title, width = 4000, height = 1700, res = 200, base_size = 36, base_family = "sans") {
  failed_queries <- df %>% filter(all_failed) %>% pull(query) %>% unique()
   df_success <- df %>% filter(!query %in% failed_queries)
   p <- ggplot(df_success, aes(x = query, y = mean_time_plot, fill = mode)) +
     geom_col(position = position_dodge(width = 0.8), width = 0.7) +
     scale_fill_manual(values = method_colors, name = "Mode") +
+    scale_x_discrete(labels = function(x) paste0("Q", x)) +
     scale_y_log10(labels = scales::comma) +
-    labs(x = "Query", y = "Time (ms, log scale)", fill = "Mode") +
+    labs(x = NULL, y = "Time (ms, log scale)", fill = "Mode") +
     theme_bw(base_size = base_size, base_family = base_family) +
     theme(
+      panel.border = element_rect(linewidth = 1.0),
       panel.grid.major = element_line(linewidth = 0.8),
       panel.grid.minor = element_blank(),
       legend.position = "top",
@@ -231,33 +233,51 @@ build_plot <- function(df, out_file, plot_title, width = 4000, height = 2000, re
 }
 
 # Build plot function for paper (matches TPC-H paper style)
-build_plot_paper <- function(df, out_file, plot_title, width = 4000, height = 1800, res = 350, base_size = 40, base_family = "Linux Libertine") {
+build_plot_paper <- function(df, out_file, plot_title, width = 4000, height = 1600, res = 350, base_size = 40, base_family = "Linux Libertine") {
   # Only plot queries where all modes succeeded
   failed_queries <- df %>% filter(all_failed) %>% pull(query) %>% unique()
   df_success <- df %>% filter(!query %in% failed_queries)
 
   # Rename "baseline" to "DuckDB" to match TPC-H style
-  df_success <- df_success %>% mutate(mode = ifelse(mode == "baseline", "DuckDB", mode))
+  df_success <- df_success %>% mutate(mode = ifelse(mode == "baseline", "DuckDB", "SIMD-PAC"))
+
+  # Compute per-query slowdown labels
+  baseline_times <- df_success %>% filter(mode == "DuckDB") %>% select(query, base_time = mean_time_plot)
+  pac_times <- df_success %>% filter(mode == "SIMD-PAC") %>% select(query, pac_time = mean_time_plot)
+  slowdown_labels <- pac_times %>%
+    inner_join(baseline_times, by = "query") %>%
+    mutate(
+      slowdown = pac_time / base_time,
+      label = sprintf("%.1fx", slowdown),
+      y_pos = pac_time * 1.15
+    )
 
   p <- ggplot(df_success, aes(x = query, y = mean_time_plot, fill = mode)) +
     geom_col(position = position_dodge(width = 0.8), width = 0.7) +
+    geom_text(data = slowdown_labels,
+              aes(x = query, y = y_pos, label = label),
+              inherit.aes = FALSE, size = 5, vjust = 0, fontface = 'bold',
+              nudge_x = 0.2, family = base_family) +
     scale_fill_manual(values = paper_colors, name = NULL) +
-    scale_y_log10(labels = scales::comma) +
-    labs(x = "Query", y = "Time (ms, log scale)") +
+    scale_x_discrete(labels = function(x) paste0("Q", x), expand = expansion(add = 0.8)) +
+    scale_y_log10(labels = function(x) ifelse(x >= 100, paste0(x / 1000, "s"), paste0(x, "ms")),
+                  expand = expansion(mult = c(0, 0.15))) +
+    labs(x = NULL, y = NULL) +
     theme_bw(base_size = base_size, base_family = base_family) +
     theme(
+      panel.border = element_rect(linewidth = 1.0),
       panel.grid.major = element_line(linewidth = 1.0),
       panel.grid.minor = element_blank(),
       legend.position = "top",
       legend.title = element_blank(),
       legend.text = element_text(size = 28),
-      legend.margin = margin(0, 0, 0, 0),
-      legend.box.margin = margin(0, 0, -15, 0),
-      axis.text.x = element_text(angle = 45, hjust = 1, size = 24),
-      axis.text.y = element_text(size = 28),
+      legend.margin = margin(-5, 0, -5, 0),
+      legend.box.margin = margin(-5, 0, -20, 0),
+      axis.text.x = element_text(angle = 45, hjust = 1, size = 21),
+      axis.text.y = element_text(size = 24),
       axis.title = element_text(size = 32),
       plot.title = element_blank(),
-      plot.margin = margin(5, 5, 5, 5)
+      plot.margin = margin(15, 15, 5, 15)
     )
 
   png(filename = out_file, width = width, height = height, res = res)
