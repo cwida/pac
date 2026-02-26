@@ -33,6 +33,11 @@ suppressPackageStartupMessages({
   library(ggpattern)
 })
 
+# Font fallback: use Linux Libertine if available, otherwise serif
+base_font <- tryCatch({
+  if (any(grepl("Linux Libertine", systemfonts::system_fonts()$family, fixed = TRUE))) "Linux Libertine" else "serif"
+}, error = function(e) "serif")
+
 # ============================================================================
 # Platform and Variant Definitions
 # ============================================================================
@@ -248,7 +253,7 @@ plot_count_optimizations <- function(platform, platform_name, results_dir, outpu
   height <- 1450
   res <- 200
   base_size <- 40
-  base_family <- "Linux Libertine"
+  base_family <- base_font
 
   # Build break mark segments for overflow bars
   overflow_df <- df %>% filter(!is_timeout, display_time > y_max)
@@ -423,7 +428,7 @@ plot_sum_optimizations <- function(platform, platform_name, results_dir, output_
   height <- 1450
   res <- 200
   base_size <- 40
-  base_family <- "Linux Libertine"
+  base_family <- base_font
 
   # Build break mark segments for overflow bars
   overflow_df <- df %>% filter(!is_timeout, display_time > y_max)
@@ -567,7 +572,7 @@ plot_minmax_optimizations <- function(platform, platform_name, results_dir, outp
   height <- 1450
   res <- 200
   base_size <- 40
-  base_family <- "Linux Libertine"
+  base_family <- base_font
 
   p <- ggplot(df, aes(x = dist_label, y = plot_time, fill = variant_name, pattern = variant_name)) +
     geom_col_pattern(position = position_dodge(width = 0.9), width = 0.85,
@@ -808,7 +813,7 @@ plot_simd_improvements <- function(results_dir, output_dir) {
   height <- 1450
   res <- 200
   base_size <- 40
-  base_family <- "Linux Libertine"
+  base_family <- base_font
 
   p <- ggplot(data_long, aes(x = platform_name, y = factor, fill = aggregate)) +
     geom_col(position = position_dodge(width = 0.8), width = 0.7,
@@ -873,7 +878,7 @@ plot_hash_distribution <- function(output_dir) {
   height <- 1800
   res <- 200
   base_size <- 40
-  base_family <- "Linux Libertine"
+  base_family <- base_font
 
   p <- ggplot(df, aes(x = num_ones)) +
     geom_col(aes(y = observed), width = 0.8, alpha = 0.7, fill = '#3498db',

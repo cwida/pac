@@ -36,6 +36,11 @@ suppressPackageStartupMessages({
   library(grid)
 })
 
+# Font fallback: use Linux Libertine if available, otherwise serif
+base_font <- tryCatch({
+  if (any(grepl("Linux Libertine", systemfonts::system_fonts()$family, fixed = TRUE))) "Linux Libertine" else "serif"
+}, error = function(e) "serif")
+
 args <- commandArgs(trailingOnly = TRUE)
 # Default to clickbench_micro_results.csv in the script directory
 # Get script directory from commandArgs (works with Rscript)
@@ -233,7 +238,7 @@ build_plot <- function(df, out_file, plot_title, width = 4000, height = 1700, re
 }
 
 # Build plot function for paper (matches TPC-H paper style)
-build_plot_paper <- function(df, out_file, plot_title, width = 4000, height = 1600, res = 350, base_size = 40, base_family = "Linux Libertine") {
+build_plot_paper <- function(df, out_file, plot_title, width = 4000, height = 1600, res = 350, base_size = 40, base_family = base_font) {
   # Only plot queries where all modes succeeded
   failed_queries <- df %>% filter(all_failed) %>% pull(query) %>% unique()
   df_success <- df %>% filter(!query %in% failed_queries)

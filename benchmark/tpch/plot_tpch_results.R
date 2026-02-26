@@ -31,6 +31,11 @@ suppressPackageStartupMessages({
   library(stringr)
 })
 
+# Font fallback: use Linux Libertine if available, otherwise serif
+base_font <- tryCatch({
+  if (any(grepl("Linux Libertine", systemfonts::system_fonts()$family, fixed = TRUE))) "Linux Libertine" else "serif"
+}, error = function(e) "serif")
+
 args <- commandArgs(trailingOnly = TRUE)
 if (length(args) < 1) stop("Usage: Rscript plot_tpch_results.R path/to/results.csv [output_dir]")
 input_csv <- args[1]
@@ -225,16 +230,16 @@ if (!has_pacdb) {
 
   p <- p +
     geom_text(data = slowdown_labels, aes(x = x_pos, y = y_pos, label = label),
-              inherit.aes = FALSE, size = 8, vjust = 0, fontface = 'bold', family = "Linux Libertine") +
+              inherit.aes = FALSE, size = 8, vjust = 0, fontface = 'bold', family = base_font) +
     { if (nrow(failed_bars) > 0)
       geom_text(data = failed_bars, aes(x = x_pos, y = time, label = "FAILED"),
                 inherit.aes = FALSE, angle = 90, vjust = 0.5, hjust = 1,
                 size = 5, fontface = "bold", color = "black",
-                family = "Linux Libertine")
+                family = base_font)
     } +
     scale_y_log10(labels = function(x) ifelse(x >= 100, paste0(x / 1000, "s"), paste0(x, "ms"))) +
     coord_cartesian(ylim = c(NA, y_upper), clip = 'off') +
-    theme_bw(base_size = 40, base_family = "Linux Libertine") +
+    theme_bw(base_size = 40, base_family = base_font) +
     theme(
       panel.border = element_rect(linewidth = 1.0),
       panel.grid.major = element_line(linewidth = 1.0),
@@ -351,16 +356,16 @@ if (!has_pacdb) {
 
   p_paper <- p_paper +
     geom_text(data = paper_slowdown, aes(x = x_pos, y = y_pos, label = label),
-              inherit.aes = FALSE, size = 5, vjust = 0, fontface = 'bold', family = "Linux Libertine") +
+              inherit.aes = FALSE, size = 5, vjust = 0, fontface = 'bold', family = base_font) +
     { if (nrow(paper_failed_bars) > 0)
       geom_text(data = paper_failed_bars, aes(x = x_pos, y = time, label = "FAILED"),
                 inherit.aes = FALSE, angle = 90, vjust = 0.5, hjust = 1,
                 size = 5, fontface = "bold", color = "black",
-                family = "Linux Libertine")
+                family = base_font)
     } +
     scale_y_log10(labels = function(x) ifelse(x >= 100, paste0(x / 1000, "s"), paste0(x, "ms"))) +
     coord_cartesian(ylim = c(NA, y_upper), clip = 'off') +
-    theme_bw(base_size = 40, base_family = "Linux Libertine") +
+    theme_bw(base_size = 40, base_family = base_font) +
     theme(
       panel.border = element_rect(linewidth = 1.0),
       panel.grid.major = element_line(linewidth = 1.0),

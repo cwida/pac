@@ -1,0 +1,97 @@
+query,mode,median_ms
+q01,baseline,548.463417
+q01,SIMD PAC,2943.424416
+q01,simple hash PAC,2352.971458
+q01,PAC-DB,83412.261312
+q04,baseline,251.3305
+q04,SIMD PAC,255.427792
+q04,simple hash PAC,250.250667
+q04,PAC-DB,-1
+q05,baseline,272.117459
+q05,SIMD PAC,277.71075
+q05,simple hash PAC,276.785833
+q05,PAC-DB,15417.290624
+q06,baseline,73.795584
+q06,SIMD PAC,216.62525
+q06,simple hash PAC,98.421542
+q06,PAC-DB,16881.288
+q07,baseline,254.037333
+q07,SIMD PAC,258.437375
+q07,simple hash PAC,258.941292
+q07,PAC-DB,17685.162688
+q08,baseline,306.503083
+q08,SIMD PAC,307.562541
+q08,simple hash PAC,307.707458
+q08,PAC-DB,21487.018688
+q08-nolambda,baseline,306.503083
+q08-nolambda,SIMD PAC,308.6785
+q08-nolambda,simple hash PAC,308.161792
+q08-nolambda,PAC-DB,20959.653376
+q09,baseline,925.860917
+q09,SIMD PAC,984.344958
+q09,simple hash PAC,953.048584
+q09,PAC-DB,64342.954624
+q12,baseline,227.008875
+q12,SIMD PAC,229.524959
+q12,simple hash PAC,229.943292
+q12,PAC-DB,-1
+q13,baseline,973.128042
+q13,SIMD PAC,941.89225
+q13,simple hash PAC,935.905417
+q13,PAC-DB,56443.136
+q14,baseline,149.736791
+q14,SIMD PAC,427.822708
+q14,simple hash PAC,176.060834
+q14,PAC-DB,-1
+q14-nolambda,baseline,149.736791
+q14-nolambda,SIMD PAC,418.700792
+q14-nolambda,simple hash PAC,176.181375
+q14-nolambda,PAC-DB,-1
+q15,baseline,112.553834
+q15,SIMD PAC,687.574291
+q15,simple hash PAC,407.422625
+q15,PAC-DB,28173.077376
+q17,baseline,470.8825
+q17,SIMD PAC,790.909542
+q17,simple hash PAC,488.064875
+q17,PAC-DB,36519
+q17-nofuse,baseline,470.8825
+q17-nofuse,SIMD PAC,809.9625
+q17-nofuse,simple hash PAC,492.361166
+q17-nofuse,PAC-DB,36537.930688
+q17-nolambda,baseline,470.8825
+q17-nolambda,SIMD PAC,803.25975
+q17-nolambda,simple hash PAC,487.792375
+q17-nolambda,PAC-DB,36590.237312
+q19,baseline,312.765458
+q19,SIMD PAC,378.991875
+q19,simple hash PAC,335.730167
+q19,PAC-DB,25865.066624
+q20,baseline,315.52975
+q20,SIMD PAC,287.51
+q20,simple hash PAC,238.259667
+q20,PAC-DB,18415.181376
+q20-nofuse,baseline,315.52975
+q20-nofuse,SIMD PAC,341.436792
+q20-nofuse,simple hash PAC,259.674209
+q20-nofuse,PAC-DB,18651.152
+q20-nolambda,baseline,315.52975
+q20-nolambda,SIMD PAC,435.486459
+q20-nolambda,simple hash PAC,245.562875
+q20-nolambda,PAC-DB,19082.226688
+q21,baseline,861.370625
+q21,SIMD PAC,1063.418708
+q21,simple hash PAC,861.416458
+q21,PAC-DB,34325.274688
+q22,baseline,156.715208
+q22,SIMD PAC,137.567541
+q22,simple hash PAC,155.068834
+q22,PAC-DB,28190.698624
+q22-nofuse,baseline,156.715208
+q22-nofuse,SIMD PAC,287.654459
+q22-nofuse,simple hash PAC,153.295959
+q22-nofuse,PAC-DB,27629.488
+q22-nolambda,baseline,156.715208
+q22-nolambda,SIMD PAC,150.93175
+q22-nolambda,simple hash PAC,153.211542
+q22-nolambda,PAC-DB,27634.597312
