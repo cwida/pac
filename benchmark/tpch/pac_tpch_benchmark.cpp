@@ -310,62 +310,97 @@ static void PacDBDropTables(Connection &con) {
 // Create all PAC-DB sampling tables once (customer-based, orders-based, q21 extras)
 // Uses IF NOT EXISTS so tables persist across runs on existing databases.
 static void PacDBCreateTables(Connection &con) {
-    Log("Creating random_samples (customer-based)...");
-    auto r1 = con.Query(
-        "CREATE TABLE IF NOT EXISTS random_samples AS "
-        "WITH sample_numbers AS MATERIALIZED ("
-        "  SELECT range AS sample_id FROM range(128)"
-        "), random_values AS MATERIALIZED ("
-        "  SELECT sample_numbers.sample_id, customer.rowid AS row_id,"
-        "         (RANDOM() > 0.5)::BOOLEAN AS random_binary"
-        "  FROM sample_numbers JOIN customer ON TRUE"
-        ") "
-        "SELECT sample_id, row_id, random_binary "
-        "FROM random_values "
-        "ORDER BY sample_id, row_id;");
-    if (r1 && r1->HasError()) {
-        Log(string("random_samples creation error: ") + r1->GetError());
-    } else {
-        Log("random_samples ready.");
+    Log("Creating random_samples (customer-based, batched)...");
+    {
+        auto chk = con.Query("SELECT 1 FROM random_samples LIMIT 1;");
+        if (chk && !chk->HasError()) {
+            Log("random_samples already exists, skipping.");
+        } else {
+            con.Query("CREATE TABLE IF NOT EXISTS random_samples ("
+                       "sample_id INTEGER, row_id BIGINT, random_binary BOOLEAN);");
+            bool batch_failed = false;
+            for (int sid = 0; sid < 128; ++sid) {
+                auto rb = con.Query(
+                    "INSERT INTO random_samples "
+                    "SELECT " + std::to_string(sid) + " AS sample_id, "
+                    "customer.rowid AS row_id, "
+                    "(RANDOM() > 0.5)::BOOLEAN AS random_binary "
+                    "FROM customer;");
+                if (rb && rb->HasError()) {
+                    Log("random_samples batch " + std::to_string(sid) +
+                        " error: " + rb->GetError());
+                    batch_failed = true;
+                    break;
+                }
+                if (sid % 16 == 15) {
+                    Log("  random_samples: " + std::to_string(sid + 1) + "/128 samples inserted.");
+                }
+            }
+            if (!batch_failed) {
+                Log("random_samples ready.");
+            }
+        }
     }
 
-    Log("Creating random_samples_orders (orders-based)...");
-    auto r2 = con.Query(
-        "CREATE TABLE IF NOT EXISTS random_samples_orders AS "
-        "WITH sample_numbers AS MATERIALIZED ("
-        "  SELECT range AS sample_id FROM range(128)"
-        "), random_values AS MATERIALIZED ("
-        "  SELECT sample_numbers.sample_id, orders.rowid AS row_id,"
-        "         (RANDOM() > 0.5)::BOOLEAN AS random_binary"
-        "  FROM sample_numbers JOIN orders ON TRUE"
-        ") "
-        "SELECT sample_id, row_id, random_binary "
-        "FROM random_values "
-        "ORDER BY sample_id, row_id;");
-    if (r2 && r2->HasError()) {
-        Log(string("random_samples_orders creation error: ") + r2->GetError());
-    } else {
-        Log("random_samples_orders ready.");
+    Log("Creating random_samples_orders (orders-based, batched)...");
+    {
+        // Check if table already exists
+        auto chk = con.Query("SELECT 1 FROM random_samples_orders LIMIT 1;");
+        if (chk && !chk->HasError()) {
+            Log("random_samples_orders already exists, skipping.");
+        } else {
+            // Build in batches of one sample_id at a time to avoid OOM on large SF
+            con.Query("CREATE TABLE IF NOT EXISTS random_samples_orders ("
+                       "sample_id INTEGER, row_id BIGINT, random_binary BOOLEAN);");
+            bool batch_failed = false;
+            for (int sid = 0; sid < 128; ++sid) {
+                auto rb = con.Query(
+                    "INSERT INTO random_samples_orders "
+                    "SELECT " + std::to_string(sid) + " AS sample_id, "
+                    "orders.rowid AS row_id, "
+                    "(RANDOM() > 0.5)::BOOLEAN AS random_binary "
+                    "FROM orders;");
+                if (rb && rb->HasError()) {
+                    Log("random_samples_orders batch " + std::to_string(sid) +
+                        " error: " + rb->GetError());
+                    batch_failed = true;
+                    break;
+                }
+                if (sid % 16 == 15) {
+                    Log("  random_samples_orders: " + std::to_string(sid + 1) + "/128 samples inserted.");
+                }
+            }
+            if (!batch_failed) {
+                Log("random_samples_orders ready.");
+            }
+        }
     }
 
     Log("Creating lineitem_enhanced...");
-    auto r3 = con.Query(
-        "CREATE TABLE IF NOT EXISTS lineitem_enhanced AS "
-        "SELECT l.l_orderkey, l.l_suppkey, l.l_linenumber,"
-        "  c.rowid AS c_rowid, s.s_name AS s_name,"
-        "  (l.l_receiptdate > l.l_commitdate) AS is_late,"
-        "  (o.o_orderstatus = 'F') AS is_orderstatus_f,"
-        "  (n.n_name = 'SAUDI ARABIA') AS is_nation_saudi_arabia "
-        "FROM lineitem l "
-        "JOIN orders o ON o.o_orderkey = l.l_orderkey "
-        "JOIN customer c ON c.c_custkey = o.o_custkey "
-        "JOIN supplier s ON s.s_suppkey = l.l_suppkey "
-        "JOIN nation n ON s.s_nationkey = n.n_nationkey "
-        "ORDER BY l.l_orderkey, l.l_linenumber;");
-    if (r3 && r3->HasError()) {
-        Log(string("lineitem_enhanced creation error: ") + r3->GetError());
-    } else {
-        Log("lineitem_enhanced ready.");
+    {
+        auto chk = con.Query("SELECT 1 FROM lineitem_enhanced LIMIT 1;");
+        if (chk && !chk->HasError()) {
+            Log("lineitem_enhanced already exists, skipping.");
+        } else {
+            auto r3 = con.Query(
+                "CREATE TABLE IF NOT EXISTS lineitem_enhanced AS "
+                "SELECT l.l_orderkey, l.l_suppkey, l.l_linenumber,"
+                "  c.rowid AS c_rowid, s.s_name AS s_name,"
+                "  (l.l_receiptdate > l.l_commitdate) AS is_late,"
+                "  (o.o_orderstatus = 'F') AS is_orderstatus_f,"
+                "  (n.n_name = 'SAUDI ARABIA') AS is_nation_saudi_arabia "
+                "FROM lineitem l "
+                "JOIN orders o ON o.o_orderkey = l.l_orderkey "
+                "JOIN customer c ON c.c_custkey = o.o_custkey "
+                "JOIN supplier s ON s.s_suppkey = l.l_suppkey "
+                "JOIN nation n ON s.s_nationkey = n.n_nationkey "
+                "ORDER BY l.l_orderkey, l.l_linenumber;");
+            if (r3 && r3->HasError()) {
+                Log(string("lineitem_enhanced creation error: ") + r3->GetError());
+            } else {
+                Log("lineitem_enhanced ready.");
+            }
+        }
     }
 
     auto r4 = con.Query(
@@ -504,13 +539,12 @@ int RunTPCHBenchmark(const string &db_path, const string &queries_dir, double sf
     	// Cache baseline median per query number (avoid re-running for variants like q08-nolambda)
     	std::map<int, double> baseline_cache;
 
-        // Create PAC-DB sampling tables once before the query loop (not timed).
-        // Uses IF NOT EXISTS so tables are reused across runs on existing databases.
-        if (run_pacdb) {
-            Log("Creating PAC-DB sampling tables (if not already present)...");
-            PacDBCreateTables(con);
-            Log("PAC-DB sampling tables ready.");
-        }
+        // Always create sampling/helper tables at startup (uses IF NOT EXISTS,
+        // so this is a no-op when the tables already exist in a persistent DB).
+        // These tables may be needed by pacdb, simple_hash, or other modes.
+        Log("Creating PAC-DB sampling tables (if not already present)...");
+        PacDBCreateTables(con);
+        Log("PAC-DB sampling tables ready.");
 
         for (auto &entry : query_entries) {
             Log("=== " + entry.label + " (Q" + std::to_string(entry.query_number) + ") ===");
