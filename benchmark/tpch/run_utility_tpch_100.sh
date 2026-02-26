@@ -31,3 +31,12 @@ done
 
 ELAPSED=$(( $(date +%s) - START ))
 printf "\rDone: %d runs, %d errors, %dm%02ds total\n" "$RUNS" "$ERRORS" $((ELAPSED/60)) $((ELAPSED%60))
+
+# Move result CSVs into the utility folder
+for DEST in "benchmark/tpch/utility" "../benchmark/tpch/utility" "../../benchmark/tpch/utility"; do
+    if [ -d "$DEST" ]; then
+        mv -f q*.csv "$DEST/" 2>/dev/null
+        echo "Results moved to $DEST/"
+        break
+    fi
+done

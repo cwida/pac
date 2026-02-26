@@ -299,10 +299,11 @@ static bool InvokePlotScript(const string &abs_actual_out, const string &out_dir
     return false;
 }
 
-int RunTPCHBenchmark(const string &db_path, const string &queries_dir, double sf, const string &out_csv, bool run_naive, bool run_simple_hash, int threads) {
+int RunTPCHBenchmark(const string &db_path, const string &queries_dir, double sf, const string &out_csv, bool run_naive, bool run_simple_hash, bool run_pacdb, int threads) {
     try {
         Log(string("run_naive flag: ") + (run_naive ? string("true") : string("false")));
     	Log(string("run_simple_hash flag: ") + (run_simple_hash ? string("true") : string("false")));
+    	Log(string("run_pacdb flag: ") + (run_pacdb ? string("true") : string("false")));
 
         // Open (file-backed) DuckDB database
         // Decide whether the caller explicitly provided a DB path (not the default) so we can
@@ -411,6 +412,7 @@ int RunTPCHBenchmark(const string &db_path, const string &queries_dir, double sf
     	string bitslice_dir = queries_dir + string("/tpch/tpch_pac_queries");
     	string naive_dir = queries_dir + string("/tpch/tpch_pac_naive_queries");
     	string simple_hash_dir = queries_dir + string("/tpch/tpch_pac_simple_hash_queries");
+    	string pacdb_dir = queries_dir + string("/tpch/tpch_pacdb_queries");
 
     	// Discover all .sql files in the bitslice directory
     	auto query_entries = DiscoverQueryFiles(bitslice_dir);
@@ -545,6 +547,66 @@ int RunTPCHBenchmark(const string &db_path, const string &queries_dir, double sf
                     csv << entry.label << "," << mode_str << ",-1\n";
                 }
             }
+
+            // PAC-DB mode: run on a 50% random sample, multiply median by 64
+            if (run_pacdb) {
+                string pacdb_qfile = FindQueryFile(pacdb_dir, entry.query_number);
+                if (FileExists(pacdb_qfile)) {
+                    string pacdb_sql = ReadFileToString(pacdb_qfile);
+                    if (!pacdb_sql.empty()) {
+                        try {
+                            // Split at last EXECUTE to get setup_sql and execute_sql
+                            auto exec_pos = pacdb_sql.rfind("EXECUTE");
+                            if (exec_pos == string::npos) {
+                                Log("PAC-DB " + entry.label + ": no EXECUTE found in query file, skipping");
+                                csv << entry.label << ",PAC-DB,-1\n";
+                            } else {
+                                string setup_sql = pacdb_sql.substr(0, exec_pos);
+                                string execute_sql = pacdb_sql.substr(exec_pos);
+
+                                // Deallocate any previous prepared statement (ignore error)
+                                con.Query("DEALLOCATE PREPARE run_query;");
+
+                                // Run setup: creates random_samples table + PREPARE statement
+                                auto r_setup = con.Query(setup_sql);
+                                if (r_setup && r_setup->HasError()) {
+                                    Log("PAC-DB " + entry.label + " setup error: " + r_setup->GetError());
+                                    csv << entry.label << ",PAC-DB,-1\n";
+                                } else {
+                                    // Time EXECUTE 5 times, take median
+                                    vector<double> pacdb_times_ms;
+                                    bool pacdb_failed = false;
+                                    for (int run = 1; run <= 5; ++run) {
+                                        auto t0 = std::chrono::steady_clock::now();
+                                        auto r_exec = con.Query(execute_sql);
+                                        auto t1 = std::chrono::steady_clock::now();
+                                        double t_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+                                        if (r_exec && r_exec->HasError()) {
+                                            Log("PAC-DB " + entry.label + " run " + std::to_string(run) + " error: " + r_exec->GetError());
+                                            pacdb_failed = true;
+                                            break;
+                                        }
+                                        pacdb_times_ms.push_back(t_ms);
+                                        Log("PAC-DB " + entry.label + " run " + std::to_string(run) + " time (ms): " + FormatNumber(t_ms));
+                                    }
+                                    if (pacdb_failed) {
+                                        csv << entry.label << ",PAC-DB,-1\n";
+                                    } else {
+                                        double pacdb_median = Median(pacdb_times_ms) * 64.0;
+                                        Log("PAC-DB " + entry.label + " median*64 (ms): " + FormatNumber(pacdb_median));
+                                        csv << entry.label << ",PAC-DB," << FormatNumber(pacdb_median) << "\n";
+                                    }
+                                }
+                            }
+                        } catch (const std::exception &e) {
+                            Log("PAC-DB " + entry.label + " exception: " + string(e.what()));
+                            csv << entry.label << ",PAC-DB,-1\n";
+                        }
+                    }
+                } else {
+                    Log("PAC-DB " + entry.label + ": no query file found at " + pacdb_qfile + ", skipping");
+                }
+            }
         }
 
          csv.close();
@@ -584,7 +646,7 @@ int RunTPCHBenchmark(const string &db_path, const string &queries_dir, double sf
 
 // Add a small helper for printing usage (placed outside of namespace to avoid analyzer warnings)
 static void PrintUsageMain() {
-     std::cout << "Usage: pac_tpch_benchmark [sf] [db_path] [queries_dir] [out_csv] [--run-naive] [--run-simple-hash]\n"
+     std::cout << "Usage: pac_tpch_benchmark [sf] [db_path] [queries_dir] [out_csv] [--run-naive] [--run-simple-hash] [--run-pacdb]\n"
                << "  sf: TPCH scale factor (int, default 10)\n"
                << "  db_path: DuckDB database file (default 'tpch.db')\n"
                << "  queries_dir: root directory containing PAC SQL variants (default 'benchmark').\n"
@@ -592,6 +654,7 @@ static void PrintUsageMain() {
                << "  out_csv: optional output CSV path (auto-named if omitted)\n"
                << "  --run-naive: optional flag to instruct the benchmark to run a naive PAC variant as well\n"
                << "  --run-simple-hash: optional flag to instruct the benchmark to run a simple hash PAC variant as well\n"
+               << "  --run-pacdb: optional flag to run PAC-DB (sampling) mode — runs each query on a 50% sample, multiplies median by 64\n"
                << "  --threads=N: number of DuckDB threads (default 8)\n";
 }
 
@@ -605,7 +668,7 @@ int main(int argc, char **argv) {
             return 0;
         }
     }
-    if (argc > 7) {
+    if (argc > 8) {
         std::cout << "Error: too many arguments provided." << '\n';
         PrintUsageMain();
         return 1;
@@ -614,6 +677,7 @@ int main(int argc, char **argv) {
     // Preprocess argv to detect optional flags and remove them from positional parsing
     bool run_naive = false;
     bool run_simple_hash = false;
+    bool run_pacdb = false;
     int threads = 8;
     std::vector<char*> filtered_argv;
     filtered_argv.reserve(argc);
@@ -626,6 +690,10 @@ int main(int argc, char **argv) {
         }
         if (a == "--run-simple-hash") {
             run_simple_hash = true;
+            continue;
+        }
+        if (a == "--run-pacdb") {
+            run_pacdb = true;
             continue;
         }
         if (a.rfind("--threads=", 0) == 0) {
@@ -646,5 +714,5 @@ int main(int argc, char **argv) {
     if (filtered_argc > 3) queries_dir = filtered_argv[3];
     if (filtered_argc > 4) out_csv = filtered_argv[4];
 
-    return duckdb::RunTPCHBenchmark(db_path, queries_dir, sf, out_csv, run_naive, run_simple_hash, threads);
+    return duckdb::RunTPCHBenchmark(db_path, queries_dir, sf, out_csv, run_naive, run_simple_hash, run_pacdb, threads);
 }
