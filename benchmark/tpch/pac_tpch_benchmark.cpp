@@ -331,6 +331,12 @@ int RunTPCHBenchmark(const string &db_path, const string &queries_dir, double sf
         Log("Setting threads to " + std::to_string(threads));
         con.Query("SET threads TO " + std::to_string(threads) + ";");
 
+        // Enable spilling to disk when memory is insufficient
+        auto r_temp = con.Query("SET temp_directory='/tmp/duckdb_temp';");
+        if (r_temp && r_temp->HasError()) {
+            Log(string("SET temp_directory error: ") + r_temp->GetError());
+        }
+
         // Decide output filename if empty
         string actual_out = out_csv;
         if (actual_out.empty()) {
