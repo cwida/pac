@@ -720,6 +720,33 @@ SELECT COUNT(*) FROM (
 ----
 3
 
+# Test 29: Top-K with non-numerical CASE WHEN on PAC aggregate (SQLStorm Q25283 pattern)
+# CASE WHEN returning VARCHAR that internally compares a PAC aggregate (AVG) must not crash.
+# The TopK rewriter converts pac_avg to pac_avg_counters (LIST<FLOAT>), then WrapListRefs
+# must wrap the col refs inside the CASE WHEN with pac_noised + cast to DOUBLE so the
+# comparison operators get the correct type.
+query I
+SELECT COUNT(*) FROM (
+    SELECT
+        n_name,
+        SUM(l_quantity) AS total_quantity,
+        CASE
+            WHEN AVG(l_discount) > 0.08 THEN 'High Discount'
+            WHEN AVG(l_discount) BETWEEN 0.04 AND 0.08 THEN 'Medium Discount'
+            ELSE 'Low Discount'
+        END AS discount_category
+    FROM
+        customer
+    JOIN orders ON c_custkey = o_custkey
+    JOIN lineitem ON l_orderkey = o_orderkey
+    JOIN nation ON c_nationkey = n_nationkey
+    GROUP BY n_name
+    ORDER BY total_quantity DESC
+    LIMIT 3
+);
+----
+3
+
 # ============================================================
 # Cleanup
 # ============================================================

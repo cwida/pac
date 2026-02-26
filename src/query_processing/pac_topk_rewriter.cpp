@@ -851,6 +851,17 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 		}
 
 		// Wrap LIST-typed column refs inside compound expressions with pac_noised()
+		// and cast to original type. We must save original col ref types before FixTypes
+		// overwrites them (e.g., DOUBLE for pac_avg), so we can cast pac_noised output
+		// (FLOAT) back to the type the parent expression was bound for.
+		// Build a map: binding hash → original return type, from all col refs in all
+		// intermediate projections (captured before FixTypes/FixAggTypes above).
+		// Since FixTypes already ran, we reconstruct original types from pac_aggs.
+		unordered_map<uint64_t, LogicalType> pac_orig_type_map;
+		for (auto &info : pac_aggs) {
+			pac_orig_type_map[HashBinding(info.agg_binding)] = info.original_type;
+		}
+
 		for (idx_t pi = 0; pi < ctx.intermediate_projections.size(); pi++) {
 			auto *proj = ctx.intermediate_projections[pi];
 			auto MakeKeyhashRef = [&]() -> unique_ptr<Expression> {
@@ -871,6 +882,29 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 				}
 				return make_uniq<BoundConstantExpression>(Value::UBIGINT(~uint64_t(0)));
 			};
+			// Resolve the original type for a col ref by tracing its binding through
+			// projections back to the aggregate and looking up in pac_orig_type_map.
+			auto ResolveOrigType = [&](const ColumnBinding &binding) -> LogicalType {
+				// Find which projection this binding belongs to, then trace to aggregate
+				for (idx_t start = 0; start < ctx.intermediate_projections.size(); start++) {
+					if (binding.table_index == ctx.intermediate_projections[start]->table_index) {
+						ColumnBinding resolved;
+						if (TraceBindingThroughProjections(binding, ctx.intermediate_projections, start, resolved)) {
+							auto it = pac_orig_type_map.find(HashBinding(resolved));
+							if (it != pac_orig_type_map.end()) {
+								return it->second;
+							}
+						}
+						break;
+					}
+				}
+				// Direct match (col ref directly references aggregate output)
+				auto it = pac_orig_type_map.find(HashBinding(binding));
+				if (it != pac_orig_type_map.end()) {
+					return it->second;
+				}
+				return PacFloatLogicalType();
+			};
 			for (idx_t i = 0; i < proj->expressions.size(); i++) {
 				auto &expr = proj->expressions[i];
 				if (expr->type == ExpressionType::BOUND_COLUMN_REF) {
@@ -878,7 +912,14 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 				}
 				std::function<void(unique_ptr<Expression> &)> WrapListRefs = [&](unique_ptr<Expression> &e) {
 					if (e->type == ExpressionType::BOUND_COLUMN_REF && e->return_type.id() == LogicalTypeId::LIST) {
+						auto &ref = e->Cast<BoundColumnRefExpression>();
+						auto orig_type = ResolveOrigType(ref.binding);
 						e = input.optimizer.BindScalarFunction("pac_noised", std::move(e), MakeKeyhashRef());
+						// Cast pac_noised (returns FLOAT) to original type if different,
+						// so parent expressions (e.g., GreaterThan<double,double>) get the expected type.
+						if (orig_type != PacFloatLogicalType()) {
+							e = BoundCastExpression::AddCastToType(input.context, std::move(e), orig_type);
+						}
 						return;
 					}
 					if (e->GetExpressionClass() == ExpressionClass::BOUND_CAST) {
