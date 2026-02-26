@@ -308,10 +308,11 @@ static void PacDBDropTables(Connection &con) {
 }
 
 // Create all PAC-DB sampling tables once (customer-based, orders-based, q21 extras)
+// Uses IF NOT EXISTS so tables persist across runs on existing databases.
 static void PacDBCreateTables(Connection &con) {
-    PacDBDropTables(con);
-    con.Query(
-        "CREATE TABLE random_samples AS "
+    Log("Creating random_samples (customer-based)...");
+    auto r1 = con.Query(
+        "CREATE TABLE IF NOT EXISTS random_samples AS "
         "WITH sample_numbers AS MATERIALIZED ("
         "  SELECT range AS sample_id FROM range(128)"
         "), random_values AS MATERIALIZED ("
@@ -322,8 +323,15 @@ static void PacDBCreateTables(Connection &con) {
         "SELECT sample_id, row_id, random_binary "
         "FROM random_values "
         "ORDER BY sample_id, row_id;");
-    con.Query(
-        "CREATE TABLE random_samples_orders AS "
+    if (r1 && r1->HasError()) {
+        Log(string("random_samples creation error: ") + r1->GetError());
+    } else {
+        Log("random_samples ready.");
+    }
+
+    Log("Creating random_samples_orders (orders-based)...");
+    auto r2 = con.Query(
+        "CREATE TABLE IF NOT EXISTS random_samples_orders AS "
         "WITH sample_numbers AS MATERIALIZED ("
         "  SELECT range AS sample_id FROM range(128)"
         "), random_values AS MATERIALIZED ("
@@ -334,8 +342,15 @@ static void PacDBCreateTables(Connection &con) {
         "SELECT sample_id, row_id, random_binary "
         "FROM random_values "
         "ORDER BY sample_id, row_id;");
-    con.Query(
-        "CREATE TABLE lineitem_enhanced AS "
+    if (r2 && r2->HasError()) {
+        Log(string("random_samples_orders creation error: ") + r2->GetError());
+    } else {
+        Log("random_samples_orders ready.");
+    }
+
+    Log("Creating lineitem_enhanced...");
+    auto r3 = con.Query(
+        "CREATE TABLE IF NOT EXISTS lineitem_enhanced AS "
         "SELECT l.l_orderkey, l.l_suppkey, l.l_linenumber,"
         "  c.rowid AS c_rowid, s.s_name AS s_name,"
         "  (l.l_receiptdate > l.l_commitdate) AS is_late,"
@@ -347,9 +362,18 @@ static void PacDBCreateTables(Connection &con) {
         "JOIN supplier s ON s.s_suppkey = l.l_suppkey "
         "JOIN nation n ON s.s_nationkey = n.n_nationkey "
         "ORDER BY l.l_orderkey, l.l_linenumber;");
-    con.Query(
-        "CREATE INDEX idx_lineitem_enhanced_order_supp "
+    if (r3 && r3->HasError()) {
+        Log(string("lineitem_enhanced creation error: ") + r3->GetError());
+    } else {
+        Log("lineitem_enhanced ready.");
+    }
+
+    auto r4 = con.Query(
+        "CREATE INDEX IF NOT EXISTS idx_lineitem_enhanced_order_supp "
         "ON lineitem_enhanced(l_orderkey, l_suppkey);");
+    if (r4 && r4->HasError()) {
+        Log(string("idx_lineitem_enhanced_order_supp creation error: ") + r4->GetError());
+    }
 }
 
 int RunTPCHBenchmark(const string &db_path, const string &queries_dir, double sf, const string &out_csv, bool run_naive, bool run_simple_hash, bool run_pacdb, int threads) {
@@ -480,12 +504,12 @@ int RunTPCHBenchmark(const string &db_path, const string &queries_dir, double sf
     	// Cache baseline median per query number (avoid re-running for variants like q08-nolambda)
     	std::map<int, double> baseline_cache;
 
-        // Create PAC-DB sampling tables once before the query loop (not timed)
+        // Create PAC-DB sampling tables once before the query loop (not timed).
+        // Uses IF NOT EXISTS so tables are reused across runs on existing databases.
         if (run_pacdb) {
-            PacDBDropTables(con);
-            Log("Creating PAC-DB sampling tables...");
+            Log("Creating PAC-DB sampling tables (if not already present)...");
             PacDBCreateTables(con);
-            Log("PAC-DB sampling tables created.");
+            Log("PAC-DB sampling tables ready.");
         }
 
         for (auto &entry : query_entries) {
@@ -674,10 +698,7 @@ int RunTPCHBenchmark(const string &db_path, const string &queries_dir, double sf
             }
         }
 
-        // Drop PAC-DB tables after all queries
-        if (run_pacdb) {
-            PacDBDropTables(con);
-        }
+        // Keep PAC-DB tables in the database so they are reused on the next run
 
          csv.close();
          Log(string("Benchmark finished. Results written to ") + actual_out);
