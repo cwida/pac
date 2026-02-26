@@ -764,9 +764,16 @@ static vector<QuerySummary> RunPass(const string &label, vector<string> &query_f
 			try { con->Query("FORCE CHECKPOINT"); } catch (...) {}
 		}
 
-		// Periodically reconnect to fully reclaim memory from interrupted queries
-		// (DuckDB's soft memory limit can be exceeded by temp allocations during
-		// query execution, and interrupted queries may not fully release memory)
+		// Reconnect after timeouts to reclaim memory from interrupted queries
+		// (DuckDB may not fully release memory from interrupted query execution;
+		// crashes already reconnect inside the handler above)
+		if (qr.state == "timeout") {
+			worker.reset();
+			reconnect();
+			worker = make_uniq<QueryWorker>();
+		}
+
+		// Periodically reconnect as a safety net
 		if ((i + 1) % 1000 == 0) {
 			Log("[" + label + "] periodic reconnect to reclaim memory (" + std::to_string(i + 1) + "/" + std::to_string(total) + ")");
 			worker.reset();
