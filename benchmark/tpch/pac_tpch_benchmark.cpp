@@ -308,9 +308,10 @@ static void PacDBDropTables(Connection &con) {
 }
 
 // Create all PAC-DB sampling tables once (customer-based, orders-based, q21 extras)
-static void PacDBCreateTables(Connection &con) {
+static bool PacDBCreateTables(Connection &con) {
     PacDBDropTables(con);
-    con.Query(
+
+    auto r1 = con.Query(
         "CREATE TABLE random_samples AS "
         "WITH sample_numbers AS MATERIALIZED ("
         "  SELECT range AS sample_id FROM range(128)"
@@ -322,7 +323,13 @@ static void PacDBCreateTables(Connection &con) {
         "SELECT sample_id, row_id, random_binary "
         "FROM random_values "
         "ORDER BY sample_id, row_id;");
-    con.Query(
+    if (r1 && r1->HasError()) {
+        Log("PacDBCreateTables: random_samples error: " + r1->GetError());
+        return false;
+    }
+    Log("PacDBCreateTables: random_samples created.");
+
+    auto r2 = con.Query(
         "CREATE TABLE random_samples_orders AS "
         "WITH sample_numbers AS MATERIALIZED ("
         "  SELECT range AS sample_id FROM range(128)"
@@ -334,7 +341,13 @@ static void PacDBCreateTables(Connection &con) {
         "SELECT sample_id, row_id, random_binary "
         "FROM random_values "
         "ORDER BY sample_id, row_id;");
-    con.Query(
+    if (r2 && r2->HasError()) {
+        Log("PacDBCreateTables: random_samples_orders error: " + r2->GetError());
+        return false;
+    }
+    Log("PacDBCreateTables: random_samples_orders created.");
+
+    auto r3 = con.Query(
         "CREATE TABLE lineitem_enhanced AS "
         "SELECT l.l_orderkey, l.l_suppkey, l.l_linenumber,"
         "  c.rowid AS c_rowid, s.s_name AS s_name,"
@@ -347,9 +360,22 @@ static void PacDBCreateTables(Connection &con) {
         "JOIN supplier s ON s.s_suppkey = l.l_suppkey "
         "JOIN nation n ON s.s_nationkey = n.n_nationkey "
         "ORDER BY l.l_orderkey, l.l_linenumber;");
-    con.Query(
+    if (r3 && r3->HasError()) {
+        Log("PacDBCreateTables: lineitem_enhanced error: " + r3->GetError());
+        return false;
+    }
+    Log("PacDBCreateTables: lineitem_enhanced created.");
+
+    auto r4 = con.Query(
         "CREATE INDEX idx_lineitem_enhanced_order_supp "
         "ON lineitem_enhanced(l_orderkey, l_suppkey);");
+    if (r4 && r4->HasError()) {
+        Log("PacDBCreateTables: index error: " + r4->GetError());
+        return false;
+    }
+    Log("PacDBCreateTables: index created.");
+
+    return true;
 }
 
 int RunTPCHBenchmark(const string &db_path, const string &queries_dir, double sf, const string &out_csv, bool run_naive, bool run_simple_hash, bool run_pacdb, int threads) {
