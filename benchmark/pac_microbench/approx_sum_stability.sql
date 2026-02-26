@@ -28,18 +28,19 @@ UNION ALL SELECT * FROM all_same;
 -- So people use the RMSE (Root Mean Squared Error) / variance, if you can run an experiment many times. Well, we can run it 64 times, of course. RMSE is ((exact_sum[i]/pac_sum_counters[i])^2/64). You can further divide by variance: z_square = RMSE / variance(pac_sum_counters[]). 
 
 -- test query:
+SET pac_mi = 0;
 WITH bit_positions AS (SELECT unnest(range(64)) as bit_pos),
-    exact_sums AS (SELECT dist, bit_pos, sum(val * ((hash(rowid) >> bit_pos) & 1))::DOUBLE as exact_sum
+    exact_sums AS (SELECT dist, bit_pos, sum(val * ((pac_hash(hash(rowid)) >> bit_pos) & 1))::DOUBLE as exact_sum
                    FROM accuracy_test, bit_positions GROUP BY dist, bit_pos),
     exact_lists AS (SELECT dist, list(exact_sum ORDER BY bit_pos) as exact_counters
                     FROM exact_sums GROUP BY dist),
-    approx_sums AS (SELECT dist, pac_sum_counters(hash(rowid), val, 0.0) as approx_counters
+    approx_sums AS (SELECT dist, pac_sum_counters(pac_hash(hash(rowid)), val) as approx_counters
                     FROM accuracy_test GROUP BY dist),
     per_counter_stats AS (
         SELECT e.dist, e.exact_counters, a.approx_counters,
-               [POWER(e.exact_counters[x+1] - a.approx_counters[x+1], 2) FOR x IN range(64)] as sq_diffs,
+               [POWER(e.exact_counters[x+1] - a.approx_counters[x+1] / 2, 2) FOR x IN range(64)] as sq_diffs,
                [CASE WHEN e.exact_counters[x+1] = 0 THEN NULL
-                     ELSE 100.0 * (a.approx_counters[x+1] - e.exact_counters[x+1]) / e.exact_counters[x+1]
+                     ELSE 100.0 * (a.approx_counters[x+1] / 2 - e.exact_counters[x+1]) / e.exact_counters[x+1]
                 END FOR x IN range(64)] as pct_diffs
         FROM exact_lists e JOIN approx_sums a ON e.dist = a.dist)
     SELECT
