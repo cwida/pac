@@ -278,6 +278,22 @@ struct BenchmarkQueryResult {
 	bool pac_applied; // true if EXPLAIN output contains pac_ functions
 };
 
+// Lightweight per-query summary for cross-pass comparison (no strings allocated)
+struct QuerySummary {
+	double time_ms;
+	uint8_t state;      // 0=success, 1=error, 2=timeout, 3=crash
+	bool pac_applied;
+
+	bool IsSuccess() const { return state == 0; }
+};
+
+static uint8_t StateToInt(const string &s) {
+	if (s == "success") return 0;
+	if (s == "error") return 1;
+	if (s == "timeout") return 2;
+	return 3; // crash
+}
+
 struct PassStats {
 	int success = 0;
 	int failed = 0;
@@ -285,6 +301,14 @@ struct PassStats {
 	int crashed = 0;
 	int pac_applied = 0;
 	double total_success_time = 0;
+	// Error tracking (accumulated during the pass)
+	std::map<string, int> error_counts;
+	std::map<string, vector<string>> error_queries;
+	vector<string> timeout_queries;
+	vector<string> crash_queries;
+	// Unsupported aggregate tracking
+	std::map<string, int> unsupported_agg_counts;
+	int unsupported_agg_total = 0;
 };
 
 // Execute a SQL file statement-by-statement (PAC parser needs individual statements).
@@ -549,21 +573,56 @@ static BenchmarkQueryResult RunQuery(QueryWorker &worker, Connection &con, const
 	return qr;
 }
 
-// Run all queries in a single pass, reconnecting on crashes
-static vector<BenchmarkQueryResult> RunPass(const string &label, vector<string> &query_files,
-                                            unique_ptr<DuckDB> &db, unique_ptr<Connection> &con,
-                                            const string &db_path, double timeout_s,
-                                            PassStats &stats, bool check_pac = false) {
+// Track error/crash info for a query result into PassStats
+static void TrackQueryErrors(PassStats &stats, const BenchmarkQueryResult &qr) {
+	if (qr.state == "error" || qr.state == "crash") {
+		stats.error_counts[qr.error]++;
+		stats.error_queries[qr.error].push_back(qr.name);
+	}
+	if (qr.state == "timeout") {
+		stats.timeout_queries.push_back(qr.name);
+	} else if (qr.state == "crash") {
+		stats.crash_queries.push_back(qr.name);
+	}
+	// Track unsupported aggregates
+	if (qr.state == "error" || qr.state == "crash") {
+		const string marker = "unsupported aggregate function ";
+		auto pos = qr.error.find(marker);
+		if (pos != string::npos) {
+			string func_name = qr.error.substr(pos + marker.size());
+			while (!func_name.empty() && (func_name.back() == ' ' || func_name.back() == '\n' || func_name.back() == '\r')) {
+				func_name.pop_back();
+			}
+			if (!func_name.empty()) {
+				stats.unsupported_agg_counts[func_name]++;
+				stats.unsupported_agg_total++;
+			}
+		}
+	}
+}
+
+// Run all queries in a single pass, reconnecting on crashes.
+// Returns lightweight summaries for cross-pass comparison (no strings allocated).
+static vector<QuerySummary> RunPass(const string &label, vector<string> &query_files,
+                                    unique_ptr<DuckDB> &db, unique_ptr<Connection> &con,
+                                    const string &db_path, double timeout_s,
+                                    PassStats &stats, bool check_pac = false,
+                                    const string &pac_schema = "") {
 	int total = static_cast<int>(query_files.size());
 	int log_interval = std::max(1, total / 10);
-	vector<BenchmarkQueryResult> results;
-	QueryWorker worker;
+	vector<QuerySummary> summaries;
+	summaries.reserve(total);
+	// Track previous query name+state for crash attribution
+	string prev_name;
+	uint8_t prev_state_int = 1; // error
+	auto worker = make_uniq<QueryWorker>();
 
 	auto reconnect = [&]() {
 		con.reset();
 		db.reset();
 		db = make_uniq<DuckDB>(db_path.c_str());
 		con = make_uniq<Connection>(*db);
+		con->Query("PRAGMA threads=16");
 		con->Query("INSTALL icu");
 		con->Query("LOAD icu");
 		con->Query("INSTALL tpch");
@@ -571,6 +630,15 @@ static vector<BenchmarkQueryResult> RunPass(const string &label, vector<string> 
 		auto r = con->Query("LOAD pac");
 		if (r->HasError()) {
 			throw std::runtime_error("Failed to load PAC extension: " + r->GetError());
+		}
+		// Reload PAC schema after crash so subsequent queries still get PAC transforms
+		if (!pac_schema.empty()) {
+			try {
+				LoadPACSchema(*con, pac_schema);
+				Log("Reloaded PAC schema after crash recovery");
+			} catch (std::exception &e) {
+				Log("WARNING: Failed to reload PAC schema after crash: " + string(e.what()));
+			}
 		}
 	};
 
@@ -581,17 +649,26 @@ static vector<BenchmarkQueryResult> RunPass(const string &label, vector<string> 
 		string name = QueryName(qf);
 		string sql = ReadFileToString(qf);
 		if (sql.empty()) {
-			results.push_back({name, "error", 0, 0, "empty query file"});
+			BenchmarkQueryResult qr_empty;
+			qr_empty.name = name;
+			qr_empty.state = "error";
+			qr_empty.time_ms = 0;
+			qr_empty.rows = 0;
+			qr_empty.error = "empty query file";
+			qr_empty.pac_applied = false;
+			TrackQueryErrors(stats, qr_empty);
+			summaries.push_back({0, StateToInt("error"), false});
 			stats.failed++;
+			prev_name = name;
+			prev_state_int = 1;
 			continue;
 		}
 
-		auto qr = RunQuery(worker, *con, name, sql, timeout_s);
+		auto qr = RunQuery(*worker, *con, name, sql, timeout_s);
 
 		if (qr.state == "success") {
 			stats.success++;
 			stats.total_success_time += qr.time_ms;
-			// Check if PAC was actually applied via EXPLAIN
 			if (check_pac) {
 				try {
 					auto explain_result = con->Query("EXPLAIN " + sql);
@@ -605,34 +682,28 @@ static vector<BenchmarkQueryResult> RunPass(const string &label, vector<string> 
 							}
 						}
 					}
-				} catch (...) {
-					// EXPLAIN failed — skip silently
-				}
+				} catch (...) {}
 			}
 		} else if (qr.state == "timeout") {
 			stats.timed_out++;
 		} else if (qr.state == "crash") {
-			// When the database was invalidated by a previous query, this query
-			// never actually ran.  Attribute the crash to the previous query,
-			// reconnect, and retry the current query on a fresh connection.
-			if (qr.error.find("database has been invalidated") != string::npos && !results.empty()) {
-				auto &prev = results.back();
-				Log("Database crash caused by query " + prev.name + " (detected on query " + name + ")");
-				if (prev.state != "crash") {
-					if (prev.state == "error") {
+			if (qr.error.find("database has been invalidated") != string::npos && !summaries.empty()) {
+				Log("Database crash caused by query " + prev_name + " (detected on query " + name + ")");
+				// Reclassify previous query as crash
+				auto &prev_summary = summaries.back();
+				if (prev_summary.state != 3) { // not already crash
+					if (prev_summary.state == 1) { // was error
 						stats.failed--;
-					} else if (prev.state == "success") {
+					} else if (prev_summary.state == 0) { // was success
 						stats.success--;
-						stats.total_success_time -= prev.time_ms;
+						stats.total_success_time -= prev_summary.time_ms;
 					}
-					prev.state = "crash";
+					prev_summary.state = 3; // crash
 					stats.crashed++;
 				}
 				Log("  reconnecting...");
 				reconnect();
-				// Retry this query on the fresh connection
-				qr = RunQuery(worker, *con, name, sql, timeout_s);
-				// Classify the retried result normally
+				qr = RunQuery(*worker, *con, name, sql, timeout_s);
 				if (qr.state == "success") {
 					stats.success++;
 					stats.total_success_time += qr.time_ms;
@@ -671,7 +742,10 @@ static vector<BenchmarkQueryResult> RunPass(const string &label, vector<string> 
 			stats.failed++;
 		}
 
-		results.push_back(qr);
+		TrackQueryErrors(stats, qr);
+		summaries.push_back({qr.time_ms, StateToInt(qr.state), qr.pac_applied});
+		prev_name = name;
+		prev_state_int = StateToInt(qr.state);
 
 		if ((i + 1) % log_interval == 0 || i + 1 == total) {
 			string progress = "[" + label + "] [" + std::to_string(i + 1) + "/" + std::to_string(total) +
@@ -685,13 +759,23 @@ static vector<BenchmarkQueryResult> RunPass(const string &label, vector<string> 
 			Log(progress);
 		}
 
-		// Periodically checkpoint to reclaim DuckDB memory
+		// Periodically force checkpoint to reclaim DuckDB memory
+		if ((i + 1) % 100 == 0) {
+			try { con->Query("FORCE CHECKPOINT"); } catch (...) {}
+		}
+
+		// Periodically reconnect to fully reclaim memory from interrupted queries
+		// (DuckDB's soft memory limit can be exceeded by temp allocations during
+		// query execution, and interrupted queries may not fully release memory)
 		if ((i + 1) % 1000 == 0) {
-			try { con->Query("CHECKPOINT"); } catch (...) {}
+			Log("[" + label + "] periodic reconnect to reclaim memory (" + std::to_string(i + 1) + "/" + std::to_string(total) + ")");
+			worker.reset();
+			reconnect();
+			worker = make_uniq<QueryWorker>();
 		}
 	}
 
-	return results;
+	return summaries;
 }
 
 static void PrintPassStats(const string &label, const PassStats &stats, int total) {
@@ -729,58 +813,34 @@ static string FormatQueryList(const vector<string> &names, size_t max_show = 10)
 	return out;
 }
 
-static void PrintUnsupportedAggregateBreakdown(const string &label, const vector<BenchmarkQueryResult> &results, int total) {
-	const string marker = "unsupported aggregate function ";
-	std::map<string, int> agg_counts;
-	int agg_total = 0;
+static void PrintUnsupportedAggregateBreakdown(const string &label, const PassStats &stats, int total) {
+	if (stats.unsupported_agg_counts.empty()) return;
 
-	for (auto &r : results) {
-		if (r.state != "error" && r.state != "crash") continue;
-		auto pos = r.error.find(marker);
-		if (pos == string::npos) continue;
-		string func_name = r.error.substr(pos + marker.size());
-		// Trim trailing whitespace / junk
-		while (!func_name.empty() && (func_name.back() == ' ' || func_name.back() == '\n' || func_name.back() == '\r')) {
-			func_name.pop_back();
-		}
-		if (!func_name.empty()) {
-			agg_counts[func_name]++;
-			agg_total++;
-		}
-	}
-
-	if (agg_counts.empty()) return;
-
-	vector<std::pair<string, int>> sorted(agg_counts.begin(), agg_counts.end());
+	vector<std::pair<string, int>> sorted(stats.unsupported_agg_counts.begin(), stats.unsupported_agg_counts.end());
 	std::sort(sorted.begin(), sorted.end(),
 	          [](const std::pair<string, int> &a, const std::pair<string, int> &b) {
 		          return a.second > b.second;
 	          });
 
-	Log("=== " + label + " Unsupported Aggregate Breakdown (" + std::to_string(agg_total) +
-	    " queries, " + FormatNumber(100.0 * agg_total / total) + "% of total) ===");
+	Log("=== " + label + " Unsupported Aggregate Breakdown (" + std::to_string(stats.unsupported_agg_total) +
+	    " queries, " + FormatNumber(100.0 * stats.unsupported_agg_total / total) + "% of total) ===");
 	for (auto &e : sorted) {
 		string pct_total = FormatNumber(100.0 * e.second / total);
-		string pct_agg = FormatNumber(100.0 * e.second / agg_total);
+		string pct_agg = FormatNumber(100.0 * e.second / stats.unsupported_agg_total);
 		Log("  " + e.first + ": " + std::to_string(e.second) +
 		    " (" + pct_agg + "% of unsupported aggs, " + pct_total + "% of total)");
 	}
 }
 
-static void PrintErrorBreakdown(const string &label, const vector<BenchmarkQueryResult> &results, int total) {
-	int total_errors = 0;
-	std::map<string, int> error_counts;
-	std::map<string, vector<string>> error_queries;
-	for (auto &r : results) {
-		if (r.state == "error" || r.state == "crash") {
-			error_counts[r.error]++;
-			error_queries[r.error].push_back(r.name);
-			total_errors++;
-		}
-	}
-	if (error_counts.empty()) return;
+static void PrintErrorBreakdown(const string &label, const PassStats &stats, int total) {
+	if (stats.error_counts.empty()) return;
 
-	vector<std::pair<string, int>> sorted_errors(error_counts.begin(), error_counts.end());
+	int total_errors = 0;
+	for (auto &e : stats.error_counts) {
+		total_errors += e.second;
+	}
+
+	vector<std::pair<string, int>> sorted_errors(stats.error_counts.begin(), stats.error_counts.end());
 	std::sort(sorted_errors.begin(), sorted_errors.end(),
 	          [](const std::pair<string, int> &a, const std::pair<string, int> &b) {
 		          return a.second > b.second;
@@ -800,7 +860,10 @@ static void PrintErrorBreakdown(const string &label, const vector<BenchmarkQuery
 	std::map<string, vector<string>> internal_groups;
 	for (auto &e : sorted_errors) {
 		if (e.first.find("INTERNAL") != string::npos) {
-			internal_groups[e.first] = error_queries[e.first];
+			auto it = stats.error_queries.find(e.first);
+			if (it != stats.error_queries.end()) {
+				internal_groups[e.first] = it->second;
+			}
 		}
 	}
 	if (!internal_groups.empty()) {
@@ -815,60 +878,208 @@ static void PrintErrorBreakdown(const string &label, const vector<BenchmarkQuery
 		}
 	}
 
-	// Timeout and crash details
-	vector<string> timeout_queries, crash_queries;
-	for (auto &r : results) {
-		if (r.state == "timeout") timeout_queries.push_back(r.name);
-		else if (r.state == "crash") crash_queries.push_back(r.name);
+	if (!stats.timeout_queries.empty()) {
+		Log("=== " + label + " Timeouts (" + std::to_string(stats.timeout_queries.size()) + ") ===");
+		Log("  queries: " + FormatQueryList(stats.timeout_queries, 20));
 	}
-	if (!timeout_queries.empty()) {
-		Log("=== " + label + " Timeouts (" + std::to_string(timeout_queries.size()) + ") ===");
-		Log("  queries: " + FormatQueryList(timeout_queries, 20));
-	}
-	if (!crash_queries.empty()) {
-		Log("=== " + label + " Crashes (" + std::to_string(crash_queries.size()) + ") ===");
-		Log("  queries: " + FormatQueryList(crash_queries, 20));
+	if (!stats.crash_queries.empty()) {
+		Log("=== " + label + " Crashes (" + std::to_string(stats.crash_queries.size()) + ") ===");
+		Log("  queries: " + FormatQueryList(stats.crash_queries, 20));
 	}
 }
 
-static void WriteCSV(const string &csv_path, const vector<BenchmarkQueryResult> &baseline_results,
-                     const vector<BenchmarkQueryResult> &pac_results) {
-	std::ofstream csv(csv_path, std::ofstream::out | std::ofstream::trunc);
-	if (!csv.is_open()) {
-		Log("ERROR: Failed to open output CSV: " + csv_path);
+
+static double Median(vector<double> v) {
+	if (v.empty()) return 0.0;
+	std::sort(v.begin(), v.end());
+	size_t n = v.size();
+	if (n % 2 == 1) {
+		return v[n / 2];
+	}
+	return (v[n / 2 - 1] + v[n / 2]) / 2.0;
+}
+
+static string StateIntToString(uint8_t s) {
+	switch (s) {
+		case 0: return "success";
+		case 1: return "error";
+		case 2: return "timeout";
+		default: return "crash";
+	}
+}
+
+// Write per-query degradation CSV and compute/log degradation score.
+// Returns the absolute path to the written CSV (empty on failure).
+static string WriteDegradationCSV(const vector<string> &query_files,
+                                  const vector<QuerySummary> &baseline_summaries,
+                                  const vector<QuerySummary> &pac_summaries,
+                                  const string &csv_path) {
+	std::ofstream out(csv_path);
+	if (!out.is_open()) {
+		Log("ERROR: Cannot open CSV for writing: " + csv_path);
+		return "";
+	}
+	out << "query_index,query,mode,time_ms,state,pac_applied\n";
+	size_t n = std::min({query_files.size(), baseline_summaries.size(), pac_summaries.size()});
+	for (size_t i = 0; i < n; ++i) {
+		string name = QueryName(query_files[i]);
+		int idx = static_cast<int>(i) + 1;
+		out << idx << "," << name << ",DuckDB,"
+		    << std::fixed << std::setprecision(3) << baseline_summaries[i].time_ms << ","
+		    << StateIntToString(baseline_summaries[i].state) << ","
+		    << (baseline_summaries[i].pac_applied ? "true" : "false") << "\n";
+		out << idx << "," << name << ",SIMD-PAC,"
+		    << std::fixed << std::setprecision(3) << pac_summaries[i].time_ms << ","
+		    << StateIntToString(pac_summaries[i].state) << ","
+		    << (pac_summaries[i].pac_applied ? "true" : "false") << "\n";
+	}
+	out.close();
+	Log("Degradation CSV written to: " + csv_path);
+
+	// --- Degradation score ---
+	// Collect times for queries where both passes succeeded
+	vector<double> baseline_times, pac_times;
+	for (size_t i = 0; i < n; ++i) {
+		if (baseline_summaries[i].IsSuccess() && pac_summaries[i].IsSuccess()) {
+			baseline_times.push_back(baseline_summaries[i].time_ms);
+			pac_times.push_back(pac_summaries[i].time_ms);
+		}
+	}
+	if (baseline_times.size() >= 2) {
+		size_t half = baseline_times.size() / 2;
+		vector<double> b_first(baseline_times.begin(), baseline_times.begin() + half);
+		vector<double> b_second(baseline_times.begin() + half, baseline_times.end());
+		vector<double> p_first(pac_times.begin(), pac_times.begin() + half);
+		vector<double> p_second(pac_times.begin() + half, pac_times.end());
+
+		double b_med1 = Median(b_first), b_med2 = Median(b_second);
+		double p_med1 = Median(p_first), p_med2 = Median(p_second);
+		double b_ratio = (b_med1 > 0) ? b_med2 / b_med1 : 0;
+		double p_ratio = (p_med1 > 0) ? p_med2 / p_med1 : 0;
+
+		Log("--- Degradation Score ---");
+		Log("  DuckDB:   first-half median=" + FormatNumber(b_med1) + "ms, second-half median=" +
+		    FormatNumber(b_med2) + "ms, ratio=" + FormatNumber(b_ratio) + "x");
+		Log("  SIMD-PAC: first-half median=" + FormatNumber(p_med1) + "ms, second-half median=" +
+		    FormatNumber(p_med2) + "ms, ratio=" + FormatNumber(p_ratio) + "x");
+	} else {
+		Log("--- Degradation Score ---");
+		Log("  Not enough successful queries to compute degradation score.");
+	}
+
+	// Return absolute path
+	char rbuf[PATH_MAX];
+	if (realpath(csv_path.c_str(), rbuf)) {
+		return string(rbuf);
+	}
+	return csv_path;
+}
+
+// Find Rscript executable via 'which'
+static string FindRscriptAbsolute() {
+	FILE *pipe = popen("which Rscript 2>/dev/null", "r");
+	if (!pipe) { return string(); }
+	char buf[PATH_MAX];
+	string out;
+	while (fgets(buf, sizeof(buf), pipe)) {
+		out += string(buf);
+	}
+	pclose(pipe);
+	while (!out.empty() && (out.back() == '\n' || out.back() == '\r' || out.back() == ' ')) {
+		out.pop_back();
+	}
+	return out;
+}
+
+// Find the degradation plot R script
+static string FindDegradationPlotScript() {
+	vector<string> candidates = {
+	    "benchmark/sqlstorm/plot_sqlstorm_degradation.R",
+	    "../benchmark/sqlstorm/plot_sqlstorm_degradation.R",
+	    "../../benchmark/sqlstorm/plot_sqlstorm_degradation.R",
+	};
+
+	char cwd[PATH_MAX];
+	if (getcwd(cwd, sizeof(cwd))) {
+		string p = string(cwd) + "/benchmark/sqlstorm/plot_sqlstorm_degradation.R";
+		if (FileExists(p)) {
+			char rbuf[PATH_MAX];
+			if (realpath(p.c_str(), rbuf)) return string(rbuf);
+			return p;
+		}
+	}
+
+	for (auto &c : candidates) {
+		if (FileExists(c)) {
+			char rbuf[PATH_MAX];
+			if (realpath(c.c_str(), rbuf)) return string(rbuf);
+			return c;
+		}
+	}
+
+	// Try relative to executable
+	char exe_path[PATH_MAX];
+	ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
+	if (len != -1) {
+		exe_path[len] = '\0';
+		string dir = string(exe_path);
+		auto pos = dir.find_last_of('/');
+		if (pos != string::npos) dir = dir.substr(0, pos);
+		for (int i = 0; i < 6; ++i) {
+			string cand = dir + "/benchmark/sqlstorm/plot_sqlstorm_degradation.R";
+			if (FileExists(cand)) {
+				char rbuf[PATH_MAX];
+				if (realpath(cand.c_str(), rbuf)) return string(rbuf);
+				return cand;
+			}
+			auto p2 = dir.find_last_of('/');
+			if (p2 == string::npos) break;
+			dir = dir.substr(0, p2);
+		}
+	}
+
+	return "";
+}
+
+// Invoke the degradation plot script
+static void InvokeDegradationPlotScript(const string &abs_csv_path) {
+	string script = FindDegradationPlotScript();
+	if (script.empty()) {
+		Log("Degradation plot script not found. Skipping plotting.");
 		return;
 	}
-	csv << "query,baseline_state,baseline_time_ms,baseline_rows,pac_state,pac_time_ms,pac_rows,pac_applied,pac_error\n";
-
-	// Build a map from query name to pac result for easy lookup
-	std::map<string, const BenchmarkQueryResult *> pac_map;
-	for (auto &r : pac_results) {
-		pac_map[r.name] = &r;
+	string rscript = FindRscriptAbsolute();
+	if (rscript.empty()) {
+		Log("Rscript not found on PATH. Skipping degradation plot.");
+		return;
 	}
-
-	for (auto &b : baseline_results) {
-		csv << b.name << "," << b.state << "," << FormatNumber(b.time_ms) << "," << b.rows;
-
-		auto it = pac_map.find(b.name);
-		if (it != pac_map.end()) {
-			auto &p = *it->second;
-			csv << "," << p.state << "," << FormatNumber(p.time_ms) << "," << p.rows
-			    << "," << (p.pac_applied ? "yes" : "no");
-			// Write error message (quote it for CSV safety)
-			csv << ",\"";
-			for (char c : p.error) {
-				if (c == '"') csv << "\"\"";
-				else if (c == '\n' || c == '\r') csv << ' ';
-				else csv << c;
-			}
-			csv << "\"";
-		} else {
-			csv << ",,,,,";
-		}
-		csv << "\n";
+	string cmd = rscript + " --vanilla \"" + script + "\" \"" + abs_csv_path + "\" 2>&1";
+	Log("Calling degradation plot script: " + cmd);
+	FILE *pipe = popen(cmd.c_str(), "r");
+	if (!pipe) {
+		Log("popen failed for degradation plot script.");
+		return;
 	}
-	csv.close();
-	Log("Results written to: " + csv_path);
+	char buffer[4096];
+	string output;
+	while (true) {
+		size_t n = fread(buffer, 1, sizeof(buffer), pipe);
+		if (n > 0) output.append(buffer, buffer + n);
+		if (n < sizeof(buffer)) break;
+	}
+	int rc = pclose(pipe);
+	int exit_code = rc;
+	if (rc != -1 && WIFEXITED(rc)) exit_code = WEXITSTATUS(rc);
+	if (!output.empty()) {
+		string out_log = output;
+		if (out_log.size() > 4000) out_log = out_log.substr(0, 4000) + "\n...[truncated]...";
+		Log("Degradation plot output:\n" + out_log);
+	}
+	if (exit_code == 0) {
+		Log("Degradation plot script completed successfully.");
+	} else {
+		Log("Degradation plot script failed (exit code " + std::to_string(exit_code) + ").");
+	}
 }
 
 static string FormatSF(double sf) {
@@ -936,6 +1147,7 @@ int RunSQLStormBenchmark(const string &queries_dir, const string &out_csv, doubl
 				db.reset();
 				db = make_uniq<DuckDB>(db_path.c_str());
 				con = make_uniq<Connection>(*db);
+				con->Query("PRAGMA threads=16");
 				con->Query("INSTALL icu");
 				con->Query("LOAD icu");
 				auto ri = con->Query("INSTALL tpch");
@@ -975,14 +1187,15 @@ int RunSQLStormBenchmark(const string &queries_dir, const string &out_csv, doubl
 			Log("Cleared PAC metadata for baseline pass");
 
 			PassStats baseline_stats;
-			auto baseline_results = RunPass("baseline", query_files, db, con, db_path, timeout_s, baseline_stats);
+			auto baseline_summaries = RunPass("baseline", query_files, db, con, db_path, timeout_s, baseline_stats);
 
 			// ===== Load PAC schema =====
 			LoadPACSchema(*con, "pac_tpch_schema.sql");
 
 			// ===== PASS 2: PAC =====
 			PassStats pac_stats;
-			auto pac_results = RunPass("PAC", query_files, db, con, db_path, timeout_s, pac_stats, true);
+			auto pac_summaries = RunPass("PAC", query_files, db, con, db_path, timeout_s, pac_stats, true,
+			                             "pac_tpch_schema.sql");
 
 			// ===== Print statistics =====
 			int total = static_cast<int>(query_files.size());
@@ -994,9 +1207,9 @@ int RunSQLStormBenchmark(const string &queries_dir, const string &out_csv, doubl
 
 			// Comparison: queries that changed state between passes
 			int baseline_only_success = 0, pac_only_success = 0, both_success = 0;
-			for (size_t i = 0; i < baseline_results.size() && i < pac_results.size(); ++i) {
-				bool b_ok = baseline_results[i].state == "success";
-				bool p_ok = pac_results[i].state == "success";
+			for (size_t i = 0; i < baseline_summaries.size() && i < pac_summaries.size(); ++i) {
+				bool b_ok = baseline_summaries[i].IsSuccess();
+				bool p_ok = pac_summaries[i].IsSuccess();
 				if (b_ok && p_ok) both_success++;
 				else if (b_ok && !p_ok) baseline_only_success++;
 				else if (!b_ok && p_ok) pac_only_success++;
@@ -1011,13 +1224,13 @@ int RunSQLStormBenchmark(const string &queries_dir, const string &out_csv, doubl
 				double sum_baseline = 0, sum_pac = 0;
 				double sum_pac_applied_baseline = 0, sum_pac_applied_pac = 0;
 				int pac_applied_both = 0;
-				for (size_t i = 0; i < baseline_results.size() && i < pac_results.size(); ++i) {
-					if (baseline_results[i].state == "success" && pac_results[i].state == "success") {
-						sum_baseline += baseline_results[i].time_ms;
-						sum_pac += pac_results[i].time_ms;
-						if (pac_results[i].pac_applied) {
-							sum_pac_applied_baseline += baseline_results[i].time_ms;
-							sum_pac_applied_pac += pac_results[i].time_ms;
+				for (size_t i = 0; i < baseline_summaries.size() && i < pac_summaries.size(); ++i) {
+					if (baseline_summaries[i].IsSuccess() && pac_summaries[i].IsSuccess()) {
+						sum_baseline += baseline_summaries[i].time_ms;
+						sum_pac += pac_summaries[i].time_ms;
+						if (pac_summaries[i].pac_applied) {
+							sum_pac_applied_baseline += baseline_summaries[i].time_ms;
+							sum_pac_applied_pac += pac_summaries[i].time_ms;
 							pac_applied_both++;
 						}
 					}
@@ -1045,15 +1258,24 @@ int RunSQLStormBenchmark(const string &queries_dir, const string &out_csv, doubl
 				}
 			}
 
-			PrintErrorBreakdown("baseline", baseline_results, total);
-			PrintErrorBreakdown("PAC", pac_results, total);
-			PrintUnsupportedAggregateBreakdown("PAC", pac_results, total);
+			PrintErrorBreakdown("baseline", baseline_stats, total);
+			PrintErrorBreakdown("PAC", pac_stats, total);
+			PrintUnsupportedAggregateBreakdown("PAC", pac_stats, total);
 
-			// Write CSV with both passes
-			string csv_path = out_csv.empty()
-			    ? "benchmark/sqlstorm/sqlstorm_benchmark_results_tpch_sf" + sf_str + ".csv"
-			    : out_csv;
-			WriteCSV(csv_path, baseline_results, pac_results);
+			// Write degradation CSV
+			string tpch_csv = out_csv;
+			if (tpch_csv.empty()) {
+				string sqlstorm_dir = FindSQLStormDir();
+				if (!sqlstorm_dir.empty()) {
+					tpch_csv = sqlstorm_dir + "/sqlstorm_degradation_tpch_sf" + sf_str + ".csv";
+				} else {
+					tpch_csv = "sqlstorm_degradation_tpch_sf" + sf_str + ".csv";
+				}
+			}
+			string tpch_abs_csv = WriteDegradationCSV(query_files, baseline_summaries, pac_summaries, tpch_csv);
+			if (!tpch_abs_csv.empty()) {
+				InvokeDegradationPlotScript(tpch_abs_csv);
+			}
 
 			// NOTE: PAC metadata is intentionally NOT cleared at the end
 		}
@@ -1101,6 +1323,7 @@ int RunSQLStormBenchmark(const string &queries_dir, const string &out_csv, doubl
 				so_db.reset();
 				so_db = make_uniq<DuckDB>(so_db_path.c_str());
 				so_con = make_uniq<Connection>(*so_db);
+				so_con->Query("PRAGMA threads=16");
 				so_con->Query("INSTALL icu; LOAD icu;");
 				auto r = so_con->Query("LOAD pac");
 				if (r->HasError()) {
@@ -1220,16 +1443,17 @@ int RunSQLStormBenchmark(const string &queries_dir, const string &out_csv, doubl
 			Log("Cleared PAC metadata for baseline pass");
 
 			PassStats so_baseline_stats;
-			auto so_baseline_results = RunPass("DuckDB baseline", so_query_files, so_db, so_con,
-			                                   so_db_path, timeout_s, so_baseline_stats);
+			auto so_baseline_summaries = RunPass("DuckDB baseline", so_query_files, so_db, so_con,
+			                                     so_db_path, timeout_s, so_baseline_stats);
 
 			// ===== Load PAC schema =====
 			LoadPACSchema(*so_con, "pac_stackoverflow_schema.sql");
 
 			// ===== PASS 2: PAC =====
 			PassStats so_pac_stats;
-			auto so_pac_results = RunPass("SO-PAC", so_query_files, so_db, so_con,
-			                              so_db_path, timeout_s, so_pac_stats, true);
+			auto so_pac_summaries = RunPass("SO-PAC", so_query_files, so_db, so_con,
+			                                so_db_path, timeout_s, so_pac_stats, true,
+			                                "pac_stackoverflow_schema.sql");
 
 			// ===== Print statistics =====
 			int so_total = static_cast<int>(so_query_files.size());
@@ -1240,9 +1464,9 @@ int RunSQLStormBenchmark(const string &queries_dir, const string &out_csv, doubl
 			PrintPassStats("SO-PAC", so_pac_stats, so_total);
 
 			int so_baseline_only = 0, so_pac_only = 0, so_both = 0;
-			for (size_t i = 0; i < so_baseline_results.size() && i < so_pac_results.size(); ++i) {
-				bool b_ok = so_baseline_results[i].state == "success";
-				bool p_ok = so_pac_results[i].state == "success";
+			for (size_t i = 0; i < so_baseline_summaries.size() && i < so_pac_summaries.size(); ++i) {
+				bool b_ok = so_baseline_summaries[i].IsSuccess();
+				bool p_ok = so_pac_summaries[i].IsSuccess();
 				if (b_ok && p_ok) so_both++;
 				else if (b_ok && !p_ok) so_baseline_only++;
 				else if (!b_ok && p_ok) so_pac_only++;
@@ -1256,13 +1480,13 @@ int RunSQLStormBenchmark(const string &queries_dir, const string &out_csv, doubl
 				double sum_baseline = 0, sum_pac = 0;
 				double sum_pac_applied_baseline = 0, sum_pac_applied_pac = 0;
 				int pac_applied_both = 0;
-				for (size_t i = 0; i < so_baseline_results.size() && i < so_pac_results.size(); ++i) {
-					if (so_baseline_results[i].state == "success" && so_pac_results[i].state == "success") {
-						sum_baseline += so_baseline_results[i].time_ms;
-						sum_pac += so_pac_results[i].time_ms;
-						if (so_pac_results[i].pac_applied) {
-							sum_pac_applied_baseline += so_baseline_results[i].time_ms;
-							sum_pac_applied_pac += so_pac_results[i].time_ms;
+				for (size_t i = 0; i < so_baseline_summaries.size() && i < so_pac_summaries.size(); ++i) {
+					if (so_baseline_summaries[i].IsSuccess() && so_pac_summaries[i].IsSuccess()) {
+						sum_baseline += so_baseline_summaries[i].time_ms;
+						sum_pac += so_pac_summaries[i].time_ms;
+						if (so_pac_summaries[i].pac_applied) {
+							sum_pac_applied_baseline += so_baseline_summaries[i].time_ms;
+							sum_pac_applied_pac += so_pac_summaries[i].time_ms;
 							pac_applied_both++;
 						}
 					}
@@ -1290,22 +1514,24 @@ int RunSQLStormBenchmark(const string &queries_dir, const string &out_csv, doubl
 				}
 			}
 
-			PrintErrorBreakdown("SO-baseline", so_baseline_results, so_total);
-			PrintErrorBreakdown("SO-PAC", so_pac_results, so_total);
-			PrintUnsupportedAggregateBreakdown("SO-PAC", so_pac_results, so_total);
+			PrintErrorBreakdown("SO-baseline", so_baseline_stats, so_total);
+			PrintErrorBreakdown("SO-PAC", so_pac_stats, so_total);
+			PrintUnsupportedAggregateBreakdown("SO-PAC", so_pac_stats, so_total);
 
-			// Write CSV
-			string so_csv_path = out_csv.empty() ? "benchmark/sqlstorm/sqlstorm_benchmark_results_so.csv" : out_csv;
-			if (!out_csv.empty() && run_tpch) {
-				// If both benchmarks run and user specified --out, suffix the SO one
-				auto dot = so_csv_path.find_last_of('.');
-				if (dot != string::npos) {
-					so_csv_path = so_csv_path.substr(0, dot) + "_so" + so_csv_path.substr(dot);
+			// Write degradation CSV
+			string so_csv = out_csv;
+			if (so_csv.empty()) {
+				string so_sqlstorm_dir = FindSQLStormDir();
+				if (!so_sqlstorm_dir.empty()) {
+					so_csv = so_sqlstorm_dir + "/sqlstorm_degradation_stackoverflow.csv";
 				} else {
-					so_csv_path += "_so";
+					so_csv = "sqlstorm_degradation_stackoverflow.csv";
 				}
 			}
-			WriteCSV(so_csv_path, so_baseline_results, so_pac_results);
+			string so_abs_csv = WriteDegradationCSV(so_query_files, so_baseline_summaries, so_pac_summaries, so_csv);
+			if (!so_abs_csv.empty()) {
+				InvokeDegradationPlotScript(so_abs_csv);
+			}
 		}
 
 		return 0;

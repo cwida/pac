@@ -13,7 +13,8 @@ SELECT o_year,
                   list_transform(
                     pac_sum_counters(hash(all_nations.c_custkey), volume),
                     lambda y: CAST(y AS DECIMAL(18,2)))),
-                lambda x: CAST(x[1] / x[2] AS FLOAT))) AS FLOAT) AS mkt_share
+                lambda x: CAST(x[1] / x[2] AS FLOAT)),
+              pac_keyhash(hash(all_nations.c_custkey))) AS FLOAT) AS mkt_share
 FROM (SELECT EXTRACT(year FROM o_orderdate) AS o_year, l_extendedprice * (1 - l_discount) AS volume, n2.n_name AS nation, customer.c_custkey
          FROM part, supplier, lineitem, orders, customer, nation n1, nation n2, region
          WHERE p_partkey = l_partkey AND s_suppkey = l_suppkey AND l_orderkey = o_orderkey AND o_custkey = c_custkey

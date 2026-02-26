@@ -243,10 +243,12 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// Register PAC categorical functions (pac_select, pac_filter, pac_filter_<cmp>, etc.)
 	RegisterPacCategoricalFunctions(loader);
 
-	// Register pac_mean scalar function (used by top-k pushdown for ordering)
+	// Register pac_mean scalar function (kept for backward compat / debugging)
 	RegisterPacMeanFunction(loader);
-	// Register pac_unnoised scalar function (single-world extraction for top-k ranking)
+	// Register pac_unnoised scalar function (kept for backward compat / debugging)
 	RegisterPacUnnoisedFunction(loader);
+	// Register pac_topk_superset window aggregate (per-world local ranking for top-k)
+	RegisterPacTopKSupersetFunction(loader);
 
 	// Register pac_keyhash aggregate function (UBIGINT -> UBIGINT, bitwise OR of key_hashes)
 	RegisterPacKeyHashFunction(loader);

@@ -1204,9 +1204,11 @@ static void RewriteProjectionExpression(OptimizerExtensionInput &input, LogicalP
 		return;
 	}
 	if (!IsNumericalType(expr->return_type) && !is_filter_pattern) {
-		return; // we currently only support numeric PAC computations (noising..)
-		        // but filter patterns need counter pass-through regardless of type
-		        // (e.g., EXISTS decorrelation produces BOOLEAN comparison on aggregate)
+		// Non-numerical expressions (e.g., CASE WHEN returning VARCHAR) can't be
+		// turned into counter list transforms. But PAC column refs inside them still
+		// need wrapping with pac_noised since the aggregate was converted to _counters.
+		WrapHavingPacRefsWithNoised(expr, pac_bindings, input, keyhash_bindings);
+		return;
 	}
 	// Filter pattern simple cast (single aggregate): replace with direct counters ref
 	if (is_filter_pattern && pac_bindings.size() == 1) {
@@ -1452,14 +1454,14 @@ static void RewriteBottomUp(unique_ptr<LogicalOperator> &op_ptr, OptimizerExtens
 				idx_t keyhash_idx = agg.expressions.size();
 				agg.expressions.push_back(std::move(keyhash_aggr));
 				agg.types.push_back(LogicalType::UBIGINT);
-				ColumnBinding keyhash_binding(agg.aggregate_index, agg.groups.size() + keyhash_idx);
+				ColumnBinding keyhash_binding(agg.aggregate_index, keyhash_idx);
 				// Map each PAC counters binding to this keyhash binding
 				for (idx_t i = 0; i < keyhash_idx; i++) {
 					auto &expr = agg.expressions[i];
 					if (expr->type == ExpressionType::BOUND_AGGREGATE) {
 						auto &ba = expr->Cast<BoundAggregateExpression>();
 						if (ba.function.name.find("_counters") != string::npos) {
-							ColumnBinding counters_binding(agg.aggregate_index, agg.groups.size() + i);
+							ColumnBinding counters_binding(agg.aggregate_index, i);
 							keyhash_bindings[HashBinding(counters_binding)] = keyhash_binding;
 						}
 					}

@@ -15,23 +15,30 @@
 #include "duckdb/planner/operator/logical_aggregate.hpp"
 #include "duckdb/planner/operator/logical_projection.hpp"
 #include "duckdb/planner/operator/logical_order.hpp"
+#include "duckdb/planner/operator/logical_filter.hpp"
+#include "duckdb/planner/operator/logical_window.hpp"
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
+#include "duckdb/planner/expression/bound_function_expression.hpp"
+#include "duckdb/planner/expression/bound_window_expression.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/optimizer/optimizer.hpp"
 #include "duckdb/common/vector_operations/generic_executor.hpp"
+#include "duckdb/common/types/column/column_data_collection.hpp"
+#include "duckdb/common/types/column/column_data_scan_states.hpp"
 
 #include <cmath>
+#include <algorithm>
 
 namespace duckdb {
 
 // ============================================================================
 // pac_mean(LIST<PAC_FLOAT>) -> PAC_FLOAT
 // Computes the mean of non-NULL elements in a list of 64 counters.
-// Used for ordering in TopN: gives the true aggregate value before noise.
+// Kept for backward compatibility / debugging. Not used in plan rewriting.
 // ============================================================================
 static void PacMeanFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &list_vec = args.data[0];
@@ -65,7 +72,6 @@ static void PacMeanFunction(DataChunk &args, ExpressionState &state, Vector &res
 			continue;
 		}
 
-		// Compute mean of non-NULL elements
 		PAC_FLOAT sum = 0;
 		idx_t valid_count = 0;
 		for (idx_t j = 0; j < entry.length; j++) {
@@ -92,15 +98,42 @@ void RegisterPacMeanFunction(ExtensionLoader &loader) {
 
 // ============================================================================
 // pac_unnoised(LIST<PAC_FLOAT>) -> PAC_FLOAT
-// Extracts a single world's counter value for non-private ranking in TopK.
-// Per Xiaochen's "approach (b)": rank by a single world's value rather than
-// cross-world aggregation (pac_mean), to avoid distributional leakage.
-// Uses world 0 — arbitrary but deterministic. Any single world gives an
-// unbiased estimate since world assignment is random via the hash function.
-// NULL counters are replaced with 0 (per Xiaochen: "NULLs are replaced with
-// zeros" and "we must hide the secret value from 64 values, not a reduced set").
+// Extracts counter[J] where J = query_hash % 64, using the same world
+// selection as PacNoisySampleFrom64Counters. Kept for debugging / manual use.
 // ============================================================================
+
+struct PacUnnoisedBindData : public FunctionData {
+	idx_t world_idx; // J = query_hash % 64
+	explicit PacUnnoisedBindData(idx_t world_idx) : world_idx(world_idx) {
+	}
+	unique_ptr<FunctionData> Copy() const override {
+		return make_uniq<PacUnnoisedBindData>(world_idx);
+	}
+	bool Equals(const FunctionData &other) const override {
+		return world_idx == other.Cast<PacUnnoisedBindData>().world_idx;
+	}
+};
+
+static unique_ptr<FunctionData> PacUnnoisedBind(ClientContext &ctx, ScalarFunction &,
+                                                vector<unique_ptr<Expression>> &) {
+	// Compute world index J using the same formula as PacBindData
+	uint64_t seed = 42;
+	Value pac_seed_val;
+	if (ctx.TryGetCurrentSetting("pac_seed", pac_seed_val) && !pac_seed_val.IsNull()) {
+		seed = static_cast<uint64_t>(pac_seed_val.GetValue<int64_t>());
+	}
+	double mi = GetPacMiFromSetting(ctx);
+	if (mi != 0.0) {
+		seed ^= PAC_MAGIC_HASH * static_cast<uint64_t>(ctx.ActiveTransaction().GetActiveQuery());
+	}
+	uint64_t query_hash = (seed * PAC_MAGIC_HASH) ^ PAC_MAGIC_HASH;
+	return make_uniq<PacUnnoisedBindData>(query_hash % 64);
+}
+
 static void PacUnnoisedFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	auto &bind_info = state.expr.Cast<BoundFunctionExpression>().bind_info->Cast<PacUnnoisedBindData>();
+	idx_t J = bind_info.world_idx;
+
 	auto &list_vec = args.data[0];
 	idx_t count = args.size();
 
@@ -132,20 +165,182 @@ static void PacUnnoisedFunction(DataChunk &args, ExpressionState &state, Vector 
 			continue;
 		}
 
-		// Extract counter[0] — NULL counters become 0
-		auto child_idx = child_data.sel->get_index(entry.offset);
-		if (child_data.validity.RowIsValid(child_idx)) {
-			result_data[i] = child_values[child_idx];
-		} else {
-			result_data[i] = 0;
+		PAC_FLOAT val = 0;
+		if (J < entry.length) {
+			auto child_idx = child_data.sel->get_index(entry.offset + J);
+			if (child_data.validity.RowIsValid(child_idx)) {
+				val = child_values[child_idx];
+			}
 		}
+		result_data[i] = val;
 	}
 }
 
 void RegisterPacUnnoisedFunction(ExtensionLoader &loader) {
 	auto list_type = LogicalType::LIST(PacFloatLogicalType());
-	ScalarFunction pac_unnoised("pac_unnoised", {list_type}, PacFloatLogicalType(), PacUnnoisedFunction);
+	ScalarFunction pac_unnoised("pac_unnoised", {list_type}, PacFloatLogicalType(), PacUnnoisedFunction,
+	                            PacUnnoisedBind);
 	loader.RegisterFunction(pac_unnoised);
+}
+
+// ============================================================================
+// pac_topk_superset — Custom window aggregate for single-world top-K ranking
+//
+// Selects one world J (= query_hash % 64, consistent with PacBindData /
+// PacNoisySampleFrom64Counters) and marks the top-K groups by counter[J].
+// Only those K groups are kept (via a downstream filter), noised, and
+// re-ranked by the final TopN.
+//
+// This is implemented as a custom DuckDB window aggregate:
+//   window_init: scans all rows, ranks by counter[J] descending, marks
+//                top-K rows in a boolean vector
+//   window:      returns the precomputed boolean for each row
+// ============================================================================
+
+// Bind data: stores K (the TopN limit) and the world index J
+struct PacTopKSupersetBindData : public FunctionData {
+	idx_t k;
+	idx_t world_idx; // J = query_hash % 64
+	PacTopKSupersetBindData(idx_t k, idx_t world_idx) : k(k), world_idx(world_idx) {
+	}
+	unique_ptr<FunctionData> Copy() const override {
+		return make_uniq<PacTopKSupersetBindData>(k, world_idx);
+	}
+	bool Equals(const FunctionData &other) const override {
+		auto &o = other.Cast<PacTopKSupersetBindData>();
+		return k == o.k && world_idx == o.world_idx;
+	}
+};
+
+// Aggregate state: used for both global (window_init) and local (window) purposes
+struct PacTopKSupersetState {
+	// Global: precomputed superset membership (one per row in partition)
+	vector<bool> in_superset;
+	// Local: sequential counter to map per-batch rid to global row index
+	idx_t total_processed = 0;
+};
+
+static idx_t PacTopKSupersetStateSize(const AggregateFunction &) {
+	return sizeof(PacTopKSupersetState);
+}
+
+static void PacTopKSupersetInit(const AggregateFunction &, data_ptr_t state) {
+	new (state) PacTopKSupersetState();
+}
+
+static void PacTopKSupersetDestroy(Vector &state_vec, AggregateInputData &, idx_t count) {
+	auto states = FlatVector::GetData<data_ptr_t>(state_vec);
+	for (idx_t i = 0; i < count; i++) {
+		reinterpret_cast<PacTopKSupersetState *>(states[i])->~PacTopKSupersetState();
+	}
+}
+
+// window_init: scan all rows, rank by counter[J] descending, mark top-K
+static void PacTopKSupersetWindowInit(AggregateInputData &aggr_input_data, const WindowPartitionInput &partition,
+                                      data_ptr_t g_state) {
+	auto &state = *reinterpret_cast<PacTopKSupersetState *>(g_state);
+	auto &bind_data = aggr_input_data.bind_data->Cast<PacTopKSupersetBindData>();
+	idx_t K = bind_data.k;
+	idx_t J = bind_data.world_idx;
+	auto count = partition.count;
+
+	state.in_superset.resize(count, false);
+	if (count == 0 || K == 0 || !partition.inputs) {
+		return;
+	}
+
+	// Collect counter[J] for every row: (row_idx, value)
+	vector<pair<idx_t, PAC_FLOAT>> values;
+	values.reserve(count);
+
+	auto *inputs = partition.inputs;
+	auto counters_col_idx = partition.column_ids[0]; // first argument = counters list
+
+	DataChunk chunk;
+	inputs->InitializeScanChunk(chunk);
+	ColumnDataScanState scan_state;
+	inputs->InitializeScan(scan_state);
+
+	idx_t row_offset = 0;
+	while (inputs->Scan(scan_state, chunk)) {
+		auto &list_vec = chunk.data[counters_col_idx];
+		idx_t chunk_size = chunk.size();
+
+		UnifiedVectorFormat list_data;
+		list_vec.ToUnifiedFormat(chunk_size, list_data);
+		auto list_entries = UnifiedVectorFormat::GetData<list_entry_t>(list_data);
+
+		auto &child_vec = ListVector::GetEntry(list_vec);
+		UnifiedVectorFormat child_data;
+		child_vec.ToUnifiedFormat(ListVector::GetListSize(list_vec), child_data);
+		auto child_values = UnifiedVectorFormat::GetData<PAC_FLOAT>(child_data);
+
+		for (idx_t i = 0; i < chunk_size; i++) {
+			auto list_idx = list_data.sel->get_index(i);
+
+			if (!list_data.validity.RowIsValid(list_idx)) {
+				// NULL list → treat as 0 for this world
+				values.emplace_back(row_offset, PAC_FLOAT(0));
+				row_offset++;
+				continue;
+			}
+
+			auto &entry = list_entries[list_idx];
+			PAC_FLOAT val = 0;
+			if (J < entry.length) {
+				auto child_idx = child_data.sel->get_index(entry.offset + J);
+				if (child_data.validity.RowIsValid(child_idx)) {
+					val = child_values[child_idx];
+				}
+			}
+			values.emplace_back(row_offset, val);
+			row_offset++;
+		}
+	}
+
+	// Sort descending by counter[J] and mark top-K rows
+	std::sort(values.begin(), values.end(),
+	          [](const pair<idx_t, PAC_FLOAT> &a, const pair<idx_t, PAC_FLOAT> &b) { return a.second > b.second; });
+	idx_t top_k = std::min(K, static_cast<idx_t>(values.size()));
+	for (idx_t i = 0; i < top_k; i++) {
+		state.in_superset[values[i].first] = true;
+	}
+
+#if PAC_DEBUG
+	PAC_DEBUG_PRINT("pac_topk_superset: K=" + std::to_string(K) + " world_idx=" + std::to_string(J) +
+	                " total_groups=" + std::to_string(count) + " selected=" + std::to_string(top_k));
+#endif
+}
+
+// window: return the precomputed superset membership for each row
+static void PacTopKSupersetWindow(AggregateInputData &, const WindowPartitionInput &, const_data_ptr_t g_state,
+                                  data_ptr_t l_state, const SubFrames &, Vector &result, idx_t rid) {
+	auto &gstate = *reinterpret_cast<const PacTopKSupersetState *>(g_state);
+	auto &lstate = *reinterpret_cast<PacTopKSupersetState *>(l_state);
+
+	idx_t global_row = lstate.total_processed;
+	lstate.total_processed++;
+
+	auto result_data = FlatVector::GetData<bool>(result);
+	result_data[rid] = (global_row < gstate.in_superset.size()) ? gstate.in_superset[global_row] : false;
+}
+
+void RegisterPacTopKSupersetFunction(ExtensionLoader &loader) {
+	auto list_type = LogicalType::LIST(PacFloatLogicalType());
+	// Window-only aggregate: only window_init and window callbacks are used
+	AggregateFunction pac_topk_superset("pac_topk_superset", {list_type}, LogicalType::BOOLEAN,
+	                                    PacTopKSupersetStateSize, PacTopKSupersetInit,
+	                                    nullptr, // update (unused — window-only)
+	                                    nullptr, // combine (unused — window-only)
+	                                    nullptr, // finalize (unused — window-only)
+	                                    FunctionNullHandling::DEFAULT_NULL_HANDLING,
+	                                    nullptr, // simple_update
+	                                    nullptr, // bind
+	                                    PacTopKSupersetDestroy,
+	                                    nullptr, // statistics
+	                                    PacTopKSupersetWindow);
+	pac_topk_superset.window_init = PacTopKSupersetWindowInit;
+	loader.RegisterFunction(AggregateFunctionSet(pac_topk_superset));
 }
 
 // ============================================================================
@@ -455,37 +650,6 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 	PAC_DEBUG_PRINT("PACTopKRule: Found " + std::to_string(pac_aggs.size()) + " PAC aggregates to rewrite");
 #endif
 
-	// Save original TopN orders for the ORDER BY we'll add on top after rewriting.
-	// After TopN selects the right top-k groups by true means, and NoisedProj applies
-	// noise, we need to re-sort the results so the output is ordered by noised values.
-	vector<BoundOrderByNode> saved_orders;
-	for (auto &order : ctx.topn->orders) {
-		saved_orders.push_back(order.Copy());
-	}
-	// Maps original column bindings to NoisedProj bindings (populated by PATH A or B)
-	unordered_map<uint64_t, ColumnBinding> order_remap;
-
-	// Save original TopN limit/offset for the final TopN when expansion > 1
-	idx_t original_limit = ctx.topn->limit;
-	idx_t original_offset = ctx.topn->offset;
-
-	// Read expansion factor setting (superset approach)
-	double expansion = 1.0;
-	{
-		Value exp_val;
-		if (input.context.TryGetCurrentSetting("pac_topk_expansion", exp_val) && !exp_val.IsNull()) {
-			expansion = exp_val.GetValue<double>();
-			if (expansion < 1.0) {
-				expansion = 1.0;
-			}
-		}
-	}
-
-	// Apply expansion factor to inner TopN: select ceil(c * K) candidates
-	if (expansion > 1.0) {
-		ctx.topn->limit = static_cast<idx_t>(std::ceil(expansion * static_cast<double>(original_limit)));
-	}
-
 	auto &binder = input.optimizer.binder;
 	auto &agg = *ctx.aggregate;
 	auto list_type = LogicalType::LIST(PacFloatLogicalType());
@@ -579,279 +743,190 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 		}
 	}
 
-	// ==========================================================================
-	// Step 2: Build the "mean projection" between Aggregate and TopN.
-	//         This projection passes through all existing columns and adds
-	//         pac_mean(counters) columns for ordering.
-	// ==========================================================================
-#if PAC_DEBUG
-	PAC_DEBUG_PRINT("PACTopKRule: Step 2 - Building mean projection");
-#endif
-	idx_t mean_proj_idx = binder.GenerateTableIndex();
-	vector<unique_ptr<Expression>> mean_proj_exprs;
-
-	// Get all column bindings from the aggregate
+	// Get aggregate output bindings (groups + aggregates including keyhash)
 	auto agg_bindings = agg.GetColumnBindings();
 
-	// Pass through all existing aggregate output columns
-	for (idx_t i = 0; i < agg_bindings.size(); i++) {
-		auto &binding = agg_bindings[i];
-		auto col_ref = make_uniq<BoundColumnRefExpression>(agg.types[i], binding);
-		mean_proj_exprs.push_back(std::move(col_ref));
-	}
-
-	// Map from pac aggregate binding -> index of the pac_mean column in the mean projection
-	unordered_map<uint64_t, idx_t> pac_mean_column_map;
-
-	// Add pac_mean(counters) for each PAC aggregate
-	for (auto &info : pac_aggs) {
-		idx_t mean_col_idx = mean_proj_exprs.size();
-		auto counters_ref = make_uniq<BoundColumnRefExpression>(list_type, info.agg_binding);
-		auto mean_expr = input.optimizer.BindScalarFunction("pac_unnoised", std::move(counters_ref));
-		mean_proj_exprs.push_back(std::move(mean_expr));
-		pac_mean_column_map[HashBinding(info.agg_binding)] = mean_col_idx;
-	}
-
-	// Track keyhash column index in agg_bindings and mean projection passthrough
-	idx_t keyhash_mean_proj_idx = DConstants::INVALID_INDEX;
+	// Track keyhash column index in agg_bindings
 	idx_t keyhash_agg_bindings_idx = DConstants::INVALID_INDEX;
 	if (has_keyhash) {
 		for (idx_t i = 0; i < agg_bindings.size(); i++) {
 			if (agg_bindings[i] == keyhash_agg_binding) {
-				keyhash_mean_proj_idx = i;
 				keyhash_agg_bindings_idx = i;
 				break;
 			}
 		}
 	}
 
-	auto mean_proj = make_uniq<LogicalProjection>(mean_proj_idx, std::move(mean_proj_exprs));
+	// ==========================================================================
+	// Step 2: Per-world local top-K ranking via window function.
+	//
+	// Per Xiaochen's approach: for each world w (0..63), independently rank
+	// all groups by counter[w] and select the top-K. The union of all 64
+	// per-world top-K sets forms the superset. Only superset members are
+	// noised and considered for the final top-K selection.
+	//
+	// Plan structure (both PATH A and PATH B):
+	//   FinalTopN(K, ORDER BY noised DESC)
+	//     → NoisedProj(pac_noised(counters, keyhash), passthrough group_cols)
+	//       → Filter(superset_flag = TRUE)
+	//         → Window(pac_topk_superset(counters) OVER () as superset_flag)
+	//           → [IntermediateProjs?] → Aggregate(_counters + keyhash)
+	// ==========================================================================
+#if PAC_DEBUG
+	PAC_DEBUG_PRINT("PACTopKRule: Step 2 - Building per-world ranking pipeline");
+#endif
 
+	// Determine which PAC aggregate the ORDER BY references (for ranking).
+	// Default to the first PAC aggregate.
+	idx_t ranking_agg_idx = 0;
+	for (idx_t oi = 0; oi < ctx.topn->orders.size(); oi++) {
+		if (OrderExprReferencesPacAgg(*ctx.topn->orders[oi].expression, pac_aggs, ctx.intermediate_projections, 0)) {
+			// Find which PAC agg this order references
+			for (idx_t j = 0; j < pac_aggs.size(); j++) {
+				auto *stripped = StripCasts(ctx.topn->orders[oi].expression.get());
+				if (stripped->type == ExpressionType::BOUND_COLUMN_REF) {
+					auto &ref = stripped->Cast<BoundColumnRefExpression>();
+					ColumnBinding resolved;
+					if (ctx.has_intermediate_projection) {
+						TraceBindingThroughProjections(ref.binding, ctx.intermediate_projections, 0, resolved);
+					} else {
+						resolved = ref.binding;
+					}
+					if (resolved == pac_aggs[j].agg_binding) {
+						ranking_agg_idx = j;
+						break;
+					}
+				}
+			}
+			break;
+		}
+	}
+
+	// ---- Fix intermediate projection types if PATH A ----
+	// After Step 1 changed PAC aggregates to _counters (BIGINT -> LIST<FLOAT>),
+	// ColRef return_types in intermediate projections are stale. Fix them.
 	if (ctx.has_intermediate_projection) {
-		// ==================================================================
-		// PATH A: Intermediate projections exist (e.g. string decompress).
-		// Keep them in place. Insert MeanProj below them, add pac_mean
-		// passthrough columns, rewrite only PAC ORDER BY refs.
-		//
-		// Before: TopN -> Proj_outer -> ... -> Proj_inner -> Aggregate
-		// After:  NoisedProj -> TopN -> Proj_outer -> ... -> Proj_inner -> MeanProj -> Aggregate
-		// ==================================================================
-
-		auto *outermost = ctx.intermediate_projections[0];
 		auto *innermost = ctx.intermediate_projections.back();
 
-		// ------------------------------------------------------------------
-		// Step A1: Pre-analysis on UNMODIFIED projections.
-		// We trace ORDER BY expressions and outermost projection columns
-		// through the projection chain to identify which ones reference PAC
-		// aggregates. This must happen before Step A2 modifies bindings.
-		// TraceBindingThroughProjections will succeed for PAC agg columns
-		// (simple ColRef chains) but fail for decompress wrappers (which
-		// are group columns, not PAC aggregates) — and that's correct.
-		// ------------------------------------------------------------------
-
-		// Map: ORDER BY index -> pac_aggs vector index (for expressions that reference PAC aggs)
-		unordered_map<idx_t, idx_t> order_pac_refs;
-		for (idx_t oi = 0; oi < ctx.topn->orders.size(); oi++) {
-			auto *stripped = StripCasts(ctx.topn->orders[oi].expression.get());
-			auto *col_ref = stripped->type == ExpressionType::BOUND_COLUMN_REF
-			                    ? &stripped->Cast<BoundColumnRefExpression>()
-			                    : nullptr;
-			if (!col_ref) {
-				continue;
-			}
-			ColumnBinding resolved;
-			if (TraceBindingThroughProjections(col_ref->binding, ctx.intermediate_projections, 0, resolved)) {
-				for (idx_t j = 0; j < pac_aggs.size(); j++) {
-					if (resolved == pac_aggs[j].agg_binding) {
-						order_pac_refs[oi] = j;
-						break;
-					}
-				}
-			}
-		}
-
-		// Map: outermost projection column index -> pac_aggs index (for PAC aggregate columns)
-		unordered_map<idx_t, idx_t> outermost_pac_col_map;
-		for (idx_t i = 0; i < outermost->expressions.size(); i++) {
-			if (outermost->expressions[i]->type != ExpressionType::BOUND_COLUMN_REF) {
-				continue; // function calls (e.g. decompress) are non-PAC group columns
-			}
-			auto &ref = outermost->expressions[i]->Cast<BoundColumnRefExpression>();
-			ColumnBinding resolved;
-			if (TraceBindingThroughProjections(ref.binding, ctx.intermediate_projections, 1, resolved)) {
-				for (idx_t j = 0; j < pac_aggs.size(); j++) {
-					if (resolved == pac_aggs[j].agg_binding) {
-						outermost_pac_col_map[i] = j;
-						break;
-					}
-				}
-			}
-		}
-
-		idx_t original_outermost_col_count = outermost->expressions.size();
-
-		// ------------------------------------------------------------------
-		// Step A2: Insert MeanProj between innermost projection and aggregate.
-		// The innermost projection previously referenced the aggregate directly;
-		// now it references MeanProj (which passes through all aggregate columns
-		// at the same positions, plus pac_mean columns at the end).
-		// ------------------------------------------------------------------
-		mean_proj->children.push_back(std::move(innermost->children[0]));
-		mean_proj->ResolveOperatorTypes();
-		innermost->children[0] = std::move(mean_proj);
-
-		// Rewrite all ColRefs in innermost projection: aggregate bindings -> MeanProj bindings.
-		// Also update return_type since PAC columns changed from e.g. BIGINT to LIST<FLOAT>.
-		std::function<void(unique_ptr<Expression> &)> UpdateRefs = [&](unique_ptr<Expression> &e) {
+		// Fix ColRef return_types in innermost projection (references aggregate directly)
+		std::function<void(unique_ptr<Expression> &)> FixAggTypes = [&](unique_ptr<Expression> &e) {
 			if (e->type == ExpressionType::BOUND_COLUMN_REF) {
 				auto &col_ref = e->Cast<BoundColumnRefExpression>();
 				for (idx_t i = 0; i < agg_bindings.size(); i++) {
-					if (col_ref.binding == agg_bindings[i]) {
-						col_ref.binding = ColumnBinding(mean_proj_idx, i);
+					if (col_ref.binding == agg_bindings[i] && i < agg.types.size()) {
 						col_ref.return_type = agg.types[i];
 						break;
 					}
 				}
 			}
-			ExpressionIterator::EnumerateChildren(*e, UpdateRefs);
+			ExpressionIterator::EnumerateChildren(*e, FixAggTypes);
 		};
 		for (auto &proj_expr : innermost->expressions) {
-			UpdateRefs(proj_expr);
+			FixAggTypes(proj_expr);
 		}
 
-		// ------------------------------------------------------------------
-		// Step A3: Add pac_mean passthrough columns to each intermediate
-		// projection (bottom-up: innermost first). Each projection gets a
-		// new column that references the pac_mean column from the projection
-		// below it, forming a chain: MeanProj -> innermost -> ... -> outermost.
-		// ------------------------------------------------------------------
-		vector<vector<idx_t>> pac_mean_col_indices(ctx.intermediate_projections.size());
-
+		// Resolve types bottom-up through projection chain
 		for (int pi = static_cast<int>(ctx.intermediate_projections.size()) - 1; pi >= 0; pi--) {
 			auto *proj = ctx.intermediate_projections[pi];
-			for (idx_t j = 0; j < pac_aggs.size(); j++) {
-				idx_t new_col_idx = proj->expressions.size();
-				pac_mean_col_indices[pi].push_back(new_col_idx);
-
-				if (pi == static_cast<int>(ctx.intermediate_projections.size()) - 1) {
-					// Innermost: reference MeanProj's pac_mean column directly
-					idx_t mean_col = pac_mean_column_map[HashBinding(pac_aggs[j].agg_binding)];
-					proj->expressions.push_back(make_uniq<BoundColumnRefExpression>(
-					    PacFloatLogicalType(), ColumnBinding(mean_proj_idx, mean_col)));
-				} else {
-					// Reference the projection below's pac_mean passthrough column
-					auto *below = ctx.intermediate_projections[pi + 1];
-					idx_t below_col = pac_mean_col_indices[pi + 1][j];
-					proj->expressions.push_back(make_uniq<BoundColumnRefExpression>(
-					    PacFloatLogicalType(), ColumnBinding(below->table_index, below_col)));
-				}
-			}
-		}
-
-		// Add keyhash passthrough column to each intermediate projection (bottom-up)
-		vector<idx_t> keyhash_proj_indices(ctx.intermediate_projections.size(), DConstants::INVALID_INDEX);
-		if (has_keyhash && keyhash_mean_proj_idx != DConstants::INVALID_INDEX) {
-			for (int pi = static_cast<int>(ctx.intermediate_projections.size()) - 1; pi >= 0; pi--) {
-				auto *proj = ctx.intermediate_projections[pi];
-				keyhash_proj_indices[pi] = proj->expressions.size();
-				if (pi == static_cast<int>(ctx.intermediate_projections.size()) - 1) {
-					// Innermost: reference MeanProj's keyhash column
-					proj->expressions.push_back(make_uniq<BoundColumnRefExpression>(
-					    LogicalType::UBIGINT, ColumnBinding(mean_proj_idx, keyhash_mean_proj_idx)));
-				} else {
-					// Reference the projection below
-					auto *below = ctx.intermediate_projections[pi + 1];
-					proj->expressions.push_back(make_uniq<BoundColumnRefExpression>(
-					    LogicalType::UBIGINT, ColumnBinding(below->table_index, keyhash_proj_indices[pi + 1])));
-				}
-			}
-		}
-
-		// Resolve types bottom-up. After Step 1 changed PAC aggregates to _counters
-		// (BIGINT -> LIST<FLOAT>), ColRef return_types in outer projections are stale.
-		// Fix them by matching against the child operator's resolved column types.
-		for (int pi = static_cast<int>(ctx.intermediate_projections.size()) - 1; pi >= 0; pi--) {
-			auto *proj = ctx.intermediate_projections[pi];
-			auto child_bindings = proj->children[0]->GetColumnBindings();
-			auto &child_types = proj->children[0]->types;
-			// Update ColRef return_types based on the child operator's resolved types
-			std::function<void(unique_ptr<Expression> &)> FixTypes = [&](unique_ptr<Expression> &e) {
-				if (e->type == ExpressionType::BOUND_COLUMN_REF) {
-					auto &col_ref = e->Cast<BoundColumnRefExpression>();
-					for (idx_t ci = 0; ci < child_bindings.size(); ci++) {
-						if (col_ref.binding == child_bindings[ci] && ci < child_types.size()) {
-							col_ref.return_type = child_types[ci];
-							break;
+			if (pi < static_cast<int>(ctx.intermediate_projections.size()) - 1) {
+				auto child_bindings = proj->children[0]->GetColumnBindings();
+				auto &child_types = proj->children[0]->types;
+				std::function<void(unique_ptr<Expression> &)> FixTypes = [&](unique_ptr<Expression> &e) {
+					if (e->type == ExpressionType::BOUND_COLUMN_REF) {
+						auto &col_ref = e->Cast<BoundColumnRefExpression>();
+						for (idx_t ci = 0; ci < child_bindings.size(); ci++) {
+							if (col_ref.binding == child_bindings[ci] && ci < child_types.size()) {
+								col_ref.return_type = child_types[ci];
+								break;
+							}
 						}
 					}
+					ExpressionIterator::EnumerateChildren(*e, FixTypes);
+				};
+				for (auto &proj_expr : proj->expressions) {
+					FixTypes(proj_expr);
 				}
-				ExpressionIterator::EnumerateChildren(*e, FixTypes);
-			};
-			for (auto &proj_expr : proj->expressions) {
-				FixTypes(proj_expr);
 			}
 			proj->ResolveOperatorTypes();
 		}
 
-		// ------------------------------------------------------------------
-		// Step A3b: Wrap LIST-typed column refs inside compound expressions
-		// with pac_noised(). After _counters conversion, PAC aggregate
-		// columns are LIST<FLOAT>. Simple column refs are handled later by
-		// NoisedProj, but compound expressions (e.g. CONCAT using aggregate
-		// results) need scalar values at evaluation time.
-		// ------------------------------------------------------------------
-#if PAC_DEBUG
-		PAC_DEBUG_PRINT("PACTopKRule: Step A3b - Wrapping LIST refs in compound expressions");
-#endif
+		// Wrap LIST-typed column refs inside compound expressions with pac_noised()
+		// and cast to original type. We must save original col ref types before FixTypes
+		// overwrites them (e.g., DOUBLE for pac_avg), so we can cast pac_noised output
+		// (FLOAT) back to the type the parent expression was bound for.
+		// Build a map: binding hash → original return type, from all col refs in all
+		// intermediate projections (captured before FixTypes/FixAggTypes above).
+		// Since FixTypes already ran, we reconstruct original types from pac_aggs.
+		unordered_map<uint64_t, LogicalType> pac_orig_type_map;
+		for (auto &info : pac_aggs) {
+			pac_orig_type_map[HashBinding(info.agg_binding)] = info.original_type;
+		}
+
 		for (idx_t pi = 0; pi < ctx.intermediate_projections.size(); pi++) {
 			auto *proj = ctx.intermediate_projections[pi];
-			// Compute keyhash binding accessible from this projection's expressions
-			// (references the projection's child operator)
 			auto MakeKeyhashRef = [&]() -> unique_ptr<Expression> {
-				if (!has_keyhash || keyhash_mean_proj_idx == DConstants::INVALID_INDEX) {
+				if (!has_keyhash) {
 					return make_uniq<BoundConstantExpression>(Value::UBIGINT(~uint64_t(0)));
 				}
-				if (pi == ctx.intermediate_projections.size() - 1) {
-					// Innermost: reference MeanProj's keyhash column
-					return make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT,
-					                                           ColumnBinding(mean_proj_idx, keyhash_mean_proj_idx));
+				// Find keyhash in the child operator's bindings
+				auto child_bindings = proj->children[0]->GetColumnBindings();
+				auto &child_types = proj->children[0]->types;
+				for (idx_t ci = 0; ci < child_bindings.size(); ci++) {
+					if (ci < child_types.size() && child_types[ci] == LogicalType::UBIGINT) {
+						// Check if this is the keyhash column by tracing
+						ColumnBinding resolved = child_bindings[ci];
+						if (resolved == keyhash_agg_binding) {
+							return make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT, child_bindings[ci]);
+						}
+					}
 				}
-				// Reference the projection below's keyhash passthrough column
-				auto *below = ctx.intermediate_projections[pi + 1];
-				return make_uniq<BoundColumnRefExpression>(
-				    LogicalType::UBIGINT, ColumnBinding(below->table_index, keyhash_proj_indices[pi + 1]));
+				return make_uniq<BoundConstantExpression>(Value::UBIGINT(~uint64_t(0)));
+			};
+			// Resolve the original type for a col ref by tracing its binding through
+			// projections back to the aggregate and looking up in pac_orig_type_map.
+			auto ResolveOrigType = [&](const ColumnBinding &binding) -> LogicalType {
+				// Find which projection this binding belongs to, then trace to aggregate
+				for (idx_t start = 0; start < ctx.intermediate_projections.size(); start++) {
+					if (binding.table_index == ctx.intermediate_projections[start]->table_index) {
+						ColumnBinding resolved;
+						if (TraceBindingThroughProjections(binding, ctx.intermediate_projections, start, resolved)) {
+							auto it = pac_orig_type_map.find(HashBinding(resolved));
+							if (it != pac_orig_type_map.end()) {
+								return it->second;
+							}
+						}
+						break;
+					}
+				}
+				// Direct match (col ref directly references aggregate output)
+				auto it = pac_orig_type_map.find(HashBinding(binding));
+				if (it != pac_orig_type_map.end()) {
+					return it->second;
+				}
+				return PacFloatLogicalType();
 			};
 			for (idx_t i = 0; i < proj->expressions.size(); i++) {
 				auto &expr = proj->expressions[i];
-#if PAC_DEBUG
-				PAC_DEBUG_PRINT("PACTopKRule:   A3b proj expr[" + std::to_string(i) +
-				                "] type=" + std::to_string((int)expr->type) +
-				                " return_type=" + expr->return_type.ToString() + " expr=" + expr->ToString());
-#endif
 				if (expr->type == ExpressionType::BOUND_COLUMN_REF) {
 					continue;
 				}
 				std::function<void(unique_ptr<Expression> &)> WrapListRefs = [&](unique_ptr<Expression> &e) {
 					if (e->type == ExpressionType::BOUND_COLUMN_REF && e->return_type.id() == LogicalTypeId::LIST) {
-#if PAC_DEBUG
-						PAC_DEBUG_PRINT("PACTopKRule:     A3b WRAPPING LIST colref: " + e->ToString());
-#endif
+						auto &ref = e->Cast<BoundColumnRefExpression>();
+						auto orig_type = ResolveOrigType(ref.binding);
 						e = input.optimizer.BindScalarFunction("pac_noised", std::move(e), MakeKeyhashRef());
+						// Cast pac_noised (returns FLOAT) to original type if different,
+						// so parent expressions (e.g., GreaterThan<double,double>) get the expected type.
+						if (orig_type != PacFloatLogicalType()) {
+							e = BoundCastExpression::AddCastToType(input.context, std::move(e), orig_type);
+						}
 						return;
 					}
-					// If this is a CAST whose child is a LIST colref, replace the
-					// entire CAST so the bound cast function matches the new source
-					// type (FLOAT from pac_noised instead of original INT64/DECIMAL).
 					if (e->GetExpressionClass() == ExpressionClass::BOUND_CAST) {
 						auto &cast_expr = e->Cast<BoundCastExpression>();
 						if (cast_expr.child->type == ExpressionType::BOUND_COLUMN_REF &&
 						    cast_expr.child->return_type.id() == LogicalTypeId::LIST) {
 							auto target_type = cast_expr.return_type;
-#if PAC_DEBUG
-							PAC_DEBUG_PRINT("PACTopKRule:     A3b REPLACING CAST(LIST->" + target_type.ToString() +
-							                ") with CAST(pac_noised()->" + target_type.ToString() + ")");
-#endif
 							auto noised = input.optimizer.BindScalarFunction("pac_noised", std::move(cast_expr.child),
 							                                                 MakeKeyhashRef());
 							e = BoundCastExpression::AddCastToType(input.context, std::move(noised), target_type);
@@ -864,232 +939,309 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 			}
 			proj->ResolveOperatorTypes();
 		}
+	}
 
-		// ------------------------------------------------------------------
-		// Step A4: Rewrite TopN ORDER BY — only PAC aggregate references
-		// are rewritten to point to the pac_mean passthrough column in the
-		// outermost projection. Non-PAC refs (e.g. o_orderpriority through
-		// __internal_decompress_string) are left unchanged since the
-		// intermediate projections are preserved in the plan.
-		// ------------------------------------------------------------------
-		for (auto &kv : order_pac_refs) {
-			auto *stripped = StripCasts(ctx.topn->orders[kv.first].expression.get());
-			auto *col_ref = stripped->type == ExpressionType::BOUND_COLUMN_REF
-			                    ? &stripped->Cast<BoundColumnRefExpression>()
-			                    : nullptr;
-			if (col_ref) {
-				col_ref->binding = ColumnBinding(outermost->table_index, pac_mean_col_indices[0][kv.second]);
-				col_ref->return_type = PacFloatLogicalType();
-			}
-		}
+	// ---- Determine the operator that the Window will sit above ----
+	// For PATH A: Window sits above outermost projection
+	// For PATH B: Window sits above aggregate directly
+	// In both cases, we need to find the counters binding in the child's output.
 
-		// Resolve types for TopN
-		plan->ResolveOperatorTypes();
+	LogicalOperator *window_child_op;      // the operator below our Window
+	ColumnBinding window_counters_binding; // counters column binding in window child's output
+	ColumnBinding window_keyhash_binding;  // keyhash column binding in window child's output
+	bool window_has_keyhash = false;
 
-		// ------------------------------------------------------------------
-		// Step A5: Build NoisedProj above TopN. Only covers the ORIGINAL
-		// columns of the outermost projection (not the pac_mean passthrough
-		// columns, which were just for sorting). PAC aggregate columns get
-		// pac_noised() applied then cast back to the original return type.
-		// Non-PAC columns are passed through unchanged.
-		// ------------------------------------------------------------------
-		idx_t noised_proj_idx = binder.GenerateTableIndex();
-		vector<unique_ptr<Expression>> noised_proj_exprs;
+	if (ctx.has_intermediate_projection) {
+		auto *outermost = ctx.intermediate_projections[0];
+		window_child_op = outermost;
 
-		for (idx_t i = 0; i < original_outermost_col_count; i++) {
-			auto it_pac = outermost_pac_col_map.find(i);
-			if (it_pac != outermost_pac_col_map.end()) {
-				// PAC aggregate column: apply pac_noised to counter LIST, cast back to original type
-				auto counters_ref =
-				    make_uniq<BoundColumnRefExpression>(list_type, ColumnBinding(outermost->table_index, i));
-				unique_ptr<Expression> keyhash_ref;
-				if (has_keyhash && keyhash_proj_indices[0] != DConstants::INVALID_INDEX) {
-					keyhash_ref = make_uniq<BoundColumnRefExpression>(
-					    LogicalType::UBIGINT, ColumnBinding(outermost->table_index, keyhash_proj_indices[0]));
-				} else {
-					keyhash_ref = make_uniq<BoundConstantExpression>(Value::UBIGINT(~uint64_t(0)));
-				}
-				auto noised =
-				    input.optimizer.BindScalarFunction("pac_noised", std::move(counters_ref), std::move(keyhash_ref));
-				auto &orig_type = pac_aggs[it_pac->second].original_type;
-				if (orig_type != noised->return_type) {
-					noised = BoundCastExpression::AddCastToType(input.context, std::move(noised), orig_type);
-				}
-				noised_proj_exprs.push_back(std::move(noised));
-			} else {
-				// Non-PAC column: passthrough (preserves decompress result, etc.)
-				auto ref =
-				    make_uniq<BoundColumnRefExpression>(outermost->types[i], ColumnBinding(outermost->table_index, i));
-				noised_proj_exprs.push_back(std::move(ref));
-			}
-		}
-
-		auto noised_proj = make_uniq<LogicalProjection>(noised_proj_idx, std::move(noised_proj_exprs));
-
-		// Build order remap: original outermost projection columns -> NoisedProj columns
-		for (idx_t i = 0; i < original_outermost_col_count; i++) {
-			order_remap[HashBinding(ColumnBinding(outermost->table_index, i))] = ColumnBinding(noised_proj_idx, i);
-		}
-
-		// ------------------------------------------------------------------
-		// Step A6: Reassemble the plan tree.
-		// Before: plan(TopN) -> Proj_outer -> ... -> Proj_inner -> MeanProj -> Agg
-		// After:  OrderBy -> NoisedProj -> TopN -> Proj_outer -> ... -> Proj_inner -> MeanProj -> Agg
-		// ------------------------------------------------------------------
-#if PAC_DEBUG
-		PAC_DEBUG_PRINT("PACTopKRule: Step A6 - Reassembling plan tree (with intermediate projections)");
-		PAC_DEBUG_PRINT("PACTopKRule:   mean_proj table_index=" + std::to_string(mean_proj_idx));
-		PAC_DEBUG_PRINT("PACTopKRule:   noised_proj table_index=" + std::to_string(noised_proj_idx));
-#endif
-
-		noised_proj->children.push_back(std::move(plan));
-		noised_proj->ResolveOperatorTypes();
-		plan = std::move(noised_proj);
-
-	} else {
-		// ==================================================================
-		// PATH B: No intermediate projections — TopN directly above Aggregate.
-		// Original approach: MeanProj between Aggregate and TopN,
-		// NoisedProj above TopN, all refs point to MeanProj.
-		//
-		// Before: TopN -> Aggregate
-		// After:  NoisedProj -> TopN -> MeanProj -> Aggregate
-		// ==================================================================
-
-		// Step B1: Rewrite TopN ORDER BY to reference MeanProj
-		std::function<void(unique_ptr<Expression> &)> RewriteOrderExpr = [&](unique_ptr<Expression> &expr) {
-			if (expr->type == ExpressionType::BOUND_COLUMN_REF) {
-				auto &col_ref = expr->Cast<BoundColumnRefExpression>();
-				auto it = pac_mean_column_map.find(HashBinding(col_ref.binding));
-				if (it != pac_mean_column_map.end()) {
-					col_ref.binding = ColumnBinding(mean_proj_idx, it->second);
-					col_ref.return_type = PacFloatLogicalType();
-				} else {
-					for (idx_t i = 0; i < agg_bindings.size(); i++) {
-						if (agg_bindings[i] == col_ref.binding) {
-							col_ref.binding = ColumnBinding(mean_proj_idx, i);
-							break;
-						}
-					}
-				}
-				return;
-			}
-			ExpressionIterator::EnumerateChildren(*expr,
-			                                      [&](unique_ptr<Expression> &child) { RewriteOrderExpr(child); });
-		};
-
-		for (auto &order : ctx.topn->orders) {
-			RewriteOrderExpr(order.expression);
-		}
-
-		// Step B2: Build NoisedProj
-		idx_t noised_proj_idx = binder.GenerateTableIndex();
-		vector<unique_ptr<Expression>> noised_proj_exprs;
-
-		for (idx_t i = 0; i < agg_bindings.size(); i++) {
-			// Skip keyhash column — internal, not part of query output
-			if (i == keyhash_agg_bindings_idx) {
+		// Trace the ranking PAC aggregate's binding through projections to find
+		// its binding in the outermost projection's output
+		auto ranking_agg_binding = pac_aggs[ranking_agg_idx].agg_binding;
+		for (idx_t i = 0; i < outermost->expressions.size(); i++) {
+			if (outermost->expressions[i]->type != ExpressionType::BOUND_COLUMN_REF) {
 				continue;
 			}
-			auto &binding = agg_bindings[i];
-			auto it = pac_mean_column_map.find(HashBinding(binding));
-			if (it != pac_mean_column_map.end()) {
-				auto counters_ref = make_uniq<BoundColumnRefExpression>(list_type, ColumnBinding(mean_proj_idx, i));
-				unique_ptr<Expression> keyhash_ref;
-				if (has_keyhash && keyhash_mean_proj_idx != DConstants::INVALID_INDEX) {
-					keyhash_ref = make_uniq<BoundColumnRefExpression>(
-					    LogicalType::UBIGINT, ColumnBinding(mean_proj_idx, keyhash_mean_proj_idx));
-				} else {
-					keyhash_ref = make_uniq<BoundConstantExpression>(Value::UBIGINT(~uint64_t(0)));
+			auto &ref = outermost->expressions[i]->Cast<BoundColumnRefExpression>();
+			ColumnBinding resolved;
+			if (TraceBindingThroughProjections(ref.binding, ctx.intermediate_projections, 1, resolved)) {
+				if (resolved == ranking_agg_binding) {
+					window_counters_binding = ColumnBinding(outermost->table_index, i);
+					break;
 				}
-				auto noised =
-				    input.optimizer.BindScalarFunction("pac_noised", std::move(counters_ref), std::move(keyhash_ref));
-				// Cast back to the original aggregate return type (e.g. BIGINT for count)
-				for (auto &info : pac_aggs) {
-					if (info.agg_binding == binding && info.original_type != noised->return_type) {
-						noised =
-						    BoundCastExpression::AddCastToType(input.context, std::move(noised), info.original_type);
+			}
+		}
+
+		// Similarly find keyhash binding in outermost projection
+		if (has_keyhash) {
+			for (idx_t i = 0; i < outermost->expressions.size(); i++) {
+				if (outermost->expressions[i]->type != ExpressionType::BOUND_COLUMN_REF) {
+					continue;
+				}
+				auto &ref = outermost->expressions[i]->Cast<BoundColumnRefExpression>();
+				ColumnBinding resolved;
+				if (TraceBindingThroughProjections(ref.binding, ctx.intermediate_projections, 1, resolved)) {
+					if (resolved == keyhash_agg_binding) {
+						window_keyhash_binding = ColumnBinding(outermost->table_index, i);
+						window_has_keyhash = true;
 						break;
 					}
 				}
-				noised_proj_exprs.push_back(std::move(noised));
-			} else {
-				auto ref = make_uniq<BoundColumnRefExpression>(agg.types[i], ColumnBinding(mean_proj_idx, i));
-				noised_proj_exprs.push_back(std::move(ref));
 			}
 		}
-
-		auto noised_proj = make_uniq<LogicalProjection>(noised_proj_idx, std::move(noised_proj_exprs));
-
-		// Build order remap: original aggregate bindings -> NoisedProj columns
-		{
-			idx_t noised_col = 0;
-			for (idx_t i = 0; i < agg_bindings.size(); i++) {
-				if (i == keyhash_agg_bindings_idx) {
-					continue;
-				}
-				order_remap[HashBinding(agg_bindings[i])] = ColumnBinding(noised_proj_idx, noised_col);
-				noised_col++;
-			}
+	} else {
+		window_child_op = ctx.aggregate;
+		window_counters_binding = pac_aggs[ranking_agg_idx].agg_binding;
+		if (has_keyhash) {
+			window_keyhash_binding = keyhash_agg_binding;
+			window_has_keyhash = true;
 		}
-
-		// Step B3: Reassemble
-#if PAC_DEBUG
-		PAC_DEBUG_PRINT("PACTopKRule: Step B3 - Reassembling plan tree (no intermediate projections)");
-		PAC_DEBUG_PRINT("PACTopKRule:   mean_proj table_index=" + std::to_string(mean_proj_idx));
-		PAC_DEBUG_PRINT("PACTopKRule:   noised_proj table_index=" + std::to_string(noised_proj_idx));
-#endif
-
-		mean_proj->children.push_back(std::move(plan->children[0])); // aggregate
-		mean_proj->ResolveOperatorTypes();
-		plan->children[0] = std::move(mean_proj);
-		plan->ResolveOperatorTypes();
-
-		noised_proj->children.push_back(std::move(plan));
-		noised_proj->ResolveOperatorTypes();
-		plan = std::move(noised_proj);
 	}
 
-	// ==========================================================================
-	// Final Step: Re-sort by noised values.
-	// After NoisedProj applies noise, values no longer match the sort order.
-	// When expansion > 1, the inner TopN selected c*K rows — we must also
-	// limit back to the original K via a final TopN. When expansion == 1,
-	// a simple ORDER BY suffices (the inner TopN already limited to K).
-	// ==========================================================================
+	// ---- Step 2a: Create LogicalWindow with pac_topk_superset OVER () ----
+	idx_t window_table_idx = binder.GenerateTableIndex();
+
+	// Build the BoundWindowExpression for pac_topk_superset
+	auto aggr_func = make_uniq<AggregateFunction>("pac_topk_superset", vector<LogicalType> {list_type},
+	                                              LogicalType::BOOLEAN, PacTopKSupersetStateSize, PacTopKSupersetInit,
+	                                              nullptr, // update (unused)
+	                                              nullptr, // combine (unused)
+	                                              nullptr, // finalize (unused)
+	                                              FunctionNullHandling::DEFAULT_NULL_HANDLING,
+	                                              nullptr, // simple_update
+	                                              nullptr, // bind
+	                                              PacTopKSupersetDestroy,
+	                                              nullptr, // statistics
+	                                              PacTopKSupersetWindow);
+	aggr_func->window_init = PacTopKSupersetWindowInit;
+
+	// Compute world index J = query_hash % 64, using the same formula as PacBindData
+	// so that the world used for top-K ranking is consistent with the world used
+	// by PacNoisySampleFrom64Counters for noise generation.
+	idx_t world_idx = 0;
+	{
+		uint64_t seed = 42;
+		Value pac_seed_val;
+		if (input.context.TryGetCurrentSetting("pac_seed", pac_seed_val) && !pac_seed_val.IsNull()) {
+			seed = static_cast<uint64_t>(pac_seed_val.GetValue<int64_t>());
+		}
+		double mi = GetPacMiFromSetting(input.context);
+		if (mi != 0.0) {
+			seed ^= PAC_MAGIC_HASH * static_cast<uint64_t>(input.context.ActiveTransaction().GetActiveQuery());
+		}
+		uint64_t query_hash = (seed * PAC_MAGIC_HASH) ^ PAC_MAGIC_HASH;
+		world_idx = query_hash % 64;
+	}
+
+	// Read expansion factor c (default 1.0). The window function selects
+	// ceil(c * K) candidates from world J; the final TopN limits to K.
+	double expansion = 1.0;
+	Value exp_val;
+	if (input.context.TryGetCurrentSetting("pac_topk_expansion", exp_val) && !exp_val.IsNull()) {
+		expansion = exp_val.GetValue<double>();
+		if (expansion < 1.0) {
+			expansion = 1.0;
+		}
+	}
+	idx_t expanded_k = static_cast<idx_t>(std::ceil(expansion * static_cast<double>(ctx.topn->limit)));
+
+	auto bind_data = make_uniq<PacTopKSupersetBindData>(expanded_k, world_idx);
+	auto window_expr = make_uniq<BoundWindowExpression>(ExpressionType::WINDOW_AGGREGATE, LogicalType::BOOLEAN,
+	                                                    std::move(aggr_func), std::move(bind_data));
+	// Counters list is the sole argument
+	window_expr->children.push_back(make_uniq<BoundColumnRefExpression>(list_type, window_counters_binding));
+	// OVER () = entire partition, no partitioning, no ordering
+	window_expr->start = WindowBoundary::UNBOUNDED_PRECEDING;
+	window_expr->end = WindowBoundary::UNBOUNDED_FOLLOWING;
+
+	auto window_op = make_uniq<LogicalWindow>(window_table_idx);
+	window_op->expressions.push_back(std::move(window_expr));
+
+	// Wire up: Window's child = the operator below TopN (outermost proj or aggregate)
+	if (ctx.has_intermediate_projection) {
+		// Detach outermost proj from TopN and attach to Window
+		window_op->children.push_back(std::move(plan->children[0]));
+	} else {
+		// Detach aggregate from TopN and attach to Window
+		window_op->children.push_back(std::move(plan->children[0]));
+	}
+	window_op->ResolveOperatorTypes();
+
+	// The window output = child columns + [window_table_idx, 0] (superset_flag)
+	auto window_bindings = window_op->GetColumnBindings();
+	auto superset_flag_binding = window_bindings.back(); // last column is the window result
+
+#if PAC_DEBUG
+	PAC_DEBUG_PRINT("PACTopKRule: Window table_index=" + std::to_string(window_table_idx) + " superset_flag binding=[" +
+	                std::to_string(superset_flag_binding.table_index) + "." +
+	                std::to_string(superset_flag_binding.column_index) + "]");
+#endif
+
+	// ---- Step 2b: Create LogicalFilter (superset_flag = TRUE) ----
+	auto filter_expr = make_uniq<BoundColumnRefExpression>(LogicalType::BOOLEAN, superset_flag_binding);
+	auto filter_op = make_uniq<LogicalFilter>(std::move(filter_expr));
+	filter_op->children.push_back(std::move(window_op));
+	filter_op->ResolveOperatorTypes();
+
+	// ---- Step 2c: Create NoisedProj above Filter ----
+	// The filter output = window child columns + superset_flag (all passed through).
+	// NoisedProj: for PAC aggregate columns -> pac_noised(counters, keyhash), cast to original type
+	//             for non-PAC columns -> passthrough
+	//             skip keyhash and superset_flag columns
+	auto filter_bindings = filter_op->GetColumnBindings();
+	auto &filter_types = filter_op->types;
+
+	idx_t noised_proj_idx = binder.GenerateTableIndex();
+	vector<unique_ptr<Expression>> noised_proj_exprs;
+
+	// Map: original column binding -> NoisedProj column index (for ORDER BY remap)
+	unordered_map<uint64_t, ColumnBinding> order_remap;
+
+	// Determine which filter output columns are PAC aggregates
+	// (trace through window -> [projections?] -> aggregate)
+	auto child_bindings_before_window = ctx.has_intermediate_projection
+	                                        ? ctx.intermediate_projections[0]->GetColumnBindings()
+	                                        : agg.GetColumnBindings();
+
+	for (idx_t i = 0; i < filter_bindings.size(); i++) {
+		// Skip the superset_flag column (last binding from window)
+		if (filter_bindings[i] == superset_flag_binding) {
+			continue;
+		}
+		// Skip keyhash column
+		if (i < child_bindings_before_window.size()) {
+			bool is_keyhash = false;
+			if (ctx.has_intermediate_projection) {
+				// In PATH A, check if this outermost proj column traces to keyhash
+				auto *outermost = ctx.intermediate_projections[0];
+				if (filter_bindings[i].table_index == outermost->table_index) {
+					auto col_idx = filter_bindings[i].column_index;
+					if (col_idx < outermost->expressions.size() &&
+					    outermost->expressions[col_idx]->type == ExpressionType::BOUND_COLUMN_REF) {
+						ColumnBinding resolved;
+						if (TraceBindingThroughProjections(
+						        outermost->expressions[col_idx]->Cast<BoundColumnRefExpression>().binding,
+						        ctx.intermediate_projections, 1, resolved)) {
+							is_keyhash = (has_keyhash && resolved == keyhash_agg_binding);
+						}
+					}
+				}
+			} else {
+				is_keyhash = (i == keyhash_agg_bindings_idx);
+			}
+			if (is_keyhash) {
+				continue;
+			}
+		}
+
+		// Check if this is a PAC aggregate column
+		bool is_pac = false;
+		idx_t pac_idx = 0;
+		if (ctx.has_intermediate_projection) {
+			auto *outermost = ctx.intermediate_projections[0];
+			if (filter_bindings[i].table_index == outermost->table_index) {
+				auto col_idx = filter_bindings[i].column_index;
+				if (col_idx < outermost->expressions.size() &&
+				    outermost->expressions[col_idx]->type == ExpressionType::BOUND_COLUMN_REF) {
+					ColumnBinding resolved;
+					if (TraceBindingThroughProjections(
+					        outermost->expressions[col_idx]->Cast<BoundColumnRefExpression>().binding,
+					        ctx.intermediate_projections, 1, resolved)) {
+						for (idx_t j = 0; j < pac_aggs.size(); j++) {
+							if (resolved == pac_aggs[j].agg_binding) {
+								is_pac = true;
+								pac_idx = j;
+								break;
+							}
+						}
+					}
+				}
+			}
+		} else {
+			for (idx_t j = 0; j < pac_aggs.size(); j++) {
+				if (filter_bindings[i] == pac_aggs[j].agg_binding) {
+					is_pac = true;
+					pac_idx = j;
+					break;
+				}
+			}
+		}
+
+		idx_t noised_col_idx = noised_proj_exprs.size();
+
+		if (is_pac) {
+			// PAC aggregate column: apply pac_noised, cast to original type
+			auto counters_ref = make_uniq<BoundColumnRefExpression>(list_type, filter_bindings[i]);
+			unique_ptr<Expression> keyhash_ref;
+			if (window_has_keyhash) {
+				keyhash_ref = make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT, window_keyhash_binding);
+			} else {
+				keyhash_ref = make_uniq<BoundConstantExpression>(Value::UBIGINT(~uint64_t(0)));
+			}
+			auto noised =
+			    input.optimizer.BindScalarFunction("pac_noised", std::move(counters_ref), std::move(keyhash_ref));
+			auto &orig_type = pac_aggs[pac_idx].original_type;
+			if (orig_type != noised->return_type) {
+				noised = BoundCastExpression::AddCastToType(input.context, std::move(noised), orig_type);
+			}
+			noised_proj_exprs.push_back(std::move(noised));
+		} else {
+			// Non-PAC column: passthrough
+			auto ref = make_uniq<BoundColumnRefExpression>(filter_types[i], filter_bindings[i]);
+			noised_proj_exprs.push_back(std::move(ref));
+		}
+
+		// Build order remap: original binding -> NoisedProj column
+		if (ctx.has_intermediate_projection) {
+			auto *outermost = ctx.intermediate_projections[0];
+			if (filter_bindings[i].table_index == outermost->table_index) {
+				order_remap[HashBinding(filter_bindings[i])] = ColumnBinding(noised_proj_idx, noised_col_idx);
+			}
+		} else {
+			order_remap[HashBinding(filter_bindings[i])] = ColumnBinding(noised_proj_idx, noised_col_idx);
+		}
+	}
+
+	auto noised_proj = make_uniq<LogicalProjection>(noised_proj_idx, std::move(noised_proj_exprs));
+	noised_proj->children.push_back(std::move(filter_op));
+	noised_proj->ResolveOperatorTypes();
+
+	// ---- Step 2d: Create FinalTopN above NoisedProj ----
+	// Remap original ORDER BY expressions to reference NoisedProj columns
 	vector<BoundOrderByNode> final_orders;
-	for (auto &saved : saved_orders) {
-		auto expr = saved.expression->Copy();
+	for (auto &order : ctx.topn->orders) {
+		auto expr = order.expression->Copy();
 		std::function<void(unique_ptr<Expression> &)> RemapToNoised = [&](unique_ptr<Expression> &e) {
 			if (e->type == ExpressionType::BOUND_COLUMN_REF) {
 				auto &ref = e->Cast<BoundColumnRefExpression>();
 				auto it = order_remap.find(HashBinding(ref.binding));
 				if (it != order_remap.end()) {
 					ref.binding = it->second;
+					// Update return type to match NoisedProj output
+					auto noised_bindings = noised_proj->GetColumnBindings();
+					for (idx_t ni = 0; ni < noised_bindings.size(); ni++) {
+						if (noised_bindings[ni] == it->second && ni < noised_proj->types.size()) {
+							ref.return_type = noised_proj->types[ni];
+							break;
+						}
+					}
 				}
 			}
 			ExpressionIterator::EnumerateChildren(*e, RemapToNoised);
 		};
 		RemapToNoised(expr);
-		final_orders.push_back(BoundOrderByNode(saved.type, saved.null_order, std::move(expr)));
+		final_orders.push_back(BoundOrderByNode(order.type, order.null_order, std::move(expr)));
 	}
 
-	if (expansion > 1.0) {
-		// Superset: inner TopN selected c*K rows, final TopN limits to original K
-		auto final_topn = make_uniq<LogicalTopN>(std::move(final_orders), original_limit, original_offset);
-		final_topn->children.push_back(std::move(plan));
-		final_topn->ResolveOperatorTypes();
-		plan = std::move(final_topn);
-	} else {
-		// No expansion: re-sort the K rows by noised values
-		auto order_by = make_uniq<LogicalOrder>(std::move(final_orders));
-		order_by->children.push_back(std::move(plan));
-		order_by->ResolveOperatorTypes();
-		plan = std::move(order_by);
-	}
+	auto final_topn = make_uniq<LogicalTopN>(std::move(final_orders), ctx.topn->limit, ctx.topn->offset);
+	final_topn->children.push_back(std::move(noised_proj));
+	final_topn->ResolveOperatorTypes();
+
+	// Replace the original plan
+	plan = std::move(final_topn);
 
 #if PAC_DEBUG
-	PAC_DEBUG_PRINT("PACTopKRule: Successfully rewrote plan for top-k pushdown");
+	PAC_DEBUG_PRINT("PACTopKRule: Successfully rewrote plan for per-world top-k ranking");
 	PAC_DEBUG_PRINT(plan->ToString());
 #endif
 }

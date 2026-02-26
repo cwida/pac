@@ -1,17 +1,18 @@
 #!/bin/bash
 # Usage from the main project folder:
-#   bash benchmark/tpch/run_utility_tpch_100.sh [database] [duckdb_binary]
+#   bash benchmark/clickbench/run_utility_clickbench_100.sh [database] [duckdb_binary]
 #
 # Examples:
-#   bash benchmark/tpch/run_utility_tpch_100.sh tpch_sf30.db
-#   bash benchmark/tpch/run_utility_tpch_100.sh tpch_sf30.db ./build/release/duckdb
+#   bash benchmark/clickbench/run_utility_clickbench_100.sh clickbench_micro.db
+#   bash benchmark/clickbench/run_utility_clickbench_100.sh clickbench.db ./build/release/duckdb
 
-DB="${1:-tpch_sf30.db}"
+DB="${1:-clickbench_micro.db}"
 DUCKDB="${2:-./build/release/duckdb}"
-SCRIPT="benchmark/tpch/utility_tpch.sql"
+SCRIPT="benchmark/clickbench/clickbench_queries/utility.sql"
 RUNS=100
 
-SETUP="INSTALL tpch; LOAD tpch;"
+# PAC setup: mark hits as privacy-unit table and protect UserID and ClientIP
+SETUP="ALTER TABLE hits SET PU; ALTER PU TABLE hits ADD PROTECTED (UserID, ClientIP);"
 ERRORS=0
 START=$(date +%s)
 
@@ -31,12 +32,3 @@ done
 
 ELAPSED=$(( $(date +%s) - START ))
 printf "\rDone: %d runs, %d errors, %dm%02ds total\n" "$RUNS" "$ERRORS" $((ELAPSED/60)) $((ELAPSED%60))
-
-# Move result CSVs into the utility folder
-for DEST in "benchmark/tpch/utility" "../benchmark/tpch/utility" "../../benchmark/tpch/utility"; do
-    if [ -d "$DEST" ]; then
-        mv -f q*.csv "$DEST/" 2>/dev/null
-        echo "Results moved to $DEST/"
-        break
-    fi
-done

@@ -23,6 +23,7 @@ int RunTPCHBenchmark(const string &db_path = "tpch.db",
                      const string &out_csv = "",
                      bool run_naive = false,
                      bool run_simple_hash = false,
+                     bool run_pacdb = false,
                      int threads = 8);
 
 } // namespace duckdb
