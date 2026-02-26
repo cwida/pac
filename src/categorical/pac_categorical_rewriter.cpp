@@ -1454,14 +1454,14 @@ static void RewriteBottomUp(unique_ptr<LogicalOperator> &op_ptr, OptimizerExtens
 				idx_t keyhash_idx = agg.expressions.size();
 				agg.expressions.push_back(std::move(keyhash_aggr));
 				agg.types.push_back(LogicalType::UBIGINT);
-				ColumnBinding keyhash_binding(agg.aggregate_index, agg.groups.size() + keyhash_idx);
+				ColumnBinding keyhash_binding(agg.aggregate_index, keyhash_idx);
 				// Map each PAC counters binding to this keyhash binding
 				for (idx_t i = 0; i < keyhash_idx; i++) {
 					auto &expr = agg.expressions[i];
 					if (expr->type == ExpressionType::BOUND_AGGREGATE) {
 						auto &ba = expr->Cast<BoundAggregateExpression>();
 						if (ba.function.name.find("_counters") != string::npos) {
-							ColumnBinding counters_binding(agg.aggregate_index, agg.groups.size() + i);
+							ColumnBinding counters_binding(agg.aggregate_index, i);
 							keyhash_bindings[HashBinding(counters_binding)] = keyhash_binding;
 						}
 					}

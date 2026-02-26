@@ -720,32 +720,55 @@ SELECT COUNT(*) FROM (
 ----
 3
 
+statement ok
+SET explain_output='optimized_only';
+
 # Test 29: Top-K with non-numerical CASE WHEN on PAC aggregate (SQLStorm Q25283 pattern)
 # CASE WHEN returning VARCHAR that internally compares a PAC aggregate (AVG) must not crash.
 # The TopK rewriter converts pac_avg to pac_avg_counters (LIST<FLOAT>), then WrapListRefs
 # must wrap the col refs inside the CASE WHEN with pac_noised + cast to DOUBLE so the
 # comparison operators get the correct type.
-query I
-SELECT COUNT(*) FROM (
-    SELECT
-        n_name,
-        SUM(l_quantity) AS total_quantity,
-        CASE
-            WHEN AVG(l_discount) > 0.08 THEN 'High Discount'
-            WHEN AVG(l_discount) BETWEEN 0.04 AND 0.08 THEN 'Medium Discount'
-            ELSE 'Low Discount'
-        END AS discount_category
-    FROM
-        customer
-    JOIN orders ON c_custkey = o_custkey
-    JOIN lineitem ON l_orderkey = o_orderkey
-    JOIN nation ON c_nationkey = n_nationkey
-    GROUP BY n_name
-    ORDER BY total_quantity DESC
-    LIMIT 3
-);
+query II
+EXPLAIN SELECT
+    n_name,
+    SUM(l_quantity) AS total_quantity,
+    CASE
+        WHEN AVG(l_discount) > 0.08 THEN 'High Discount'
+        WHEN AVG(l_discount) BETWEEN 0.04 AND 0.08 THEN 'Medium Discount'
+        ELSE 'Low Discount'
+    END AS discount_category
+FROM
+    customer
+JOIN orders ON c_custkey = o_custkey
+JOIN lineitem ON l_orderkey = o_orderkey
+JOIN nation ON c_nationkey = n_nationkey
+GROUP BY n_name
+ORDER BY total_quantity DESC
+LIMIT 3;
 ----
-3
+logical_opt	<REGEX>:.*pac_avg_counters.*
+
+# Test 30: HAVING clause with PAC aggregate and pac_keyhash binding (SQLStorm Q28426 pattern)
+# The categorical rewriter adds pac_keyhash to the aggregate and must create bindings
+# using the correct column_index (without groups.size() offset), matching
+# LogicalAggregate::GetColumnBindings() which uses 0-based aggregate indices.
+# ROUND(AVG(...), 2) triggers a categorical pattern (arithmetic with PAC aggregate)
+# which causes the categorical rewriter to convert to _counters and add pac_keyhash.
+query II
+EXPLAIN SELECT
+    n_name,
+    SUM(l_extendedprice) AS TotalRevenue,
+    ROUND(AVG(l_quantity), 2) AS AverageQuantity
+FROM
+    customer
+JOIN orders ON c_custkey = o_custkey
+JOIN lineitem ON l_orderkey = o_orderkey
+JOIN nation ON c_nationkey = n_nationkey
+GROUP BY n_name
+HAVING SUM(l_extendedprice) > 0
+ORDER BY TotalRevenue DESC;
+----
+logical_opt	<REGEX>:.*pac_keyhash.*
 
 # ============================================================
 # Cleanup
