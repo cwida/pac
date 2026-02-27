@@ -622,12 +622,30 @@ static vector<QuerySummary> RunPass(const string &label, vector<string> &query_f
 		db.reset();
 		db = make_uniq<DuckDB>(db_path.c_str());
 		con = make_uniq<Connection>(*db);
-		con->Query("PRAGMA threads=16");
-		con->Query("PRAGMA memory_limit='25GB'");
-		con->Query("INSTALL icu");
-		con->Query("LOAD icu");
-		con->Query("INSTALL tpch");
-		con->Query("LOAD tpch");
+		auto r1 = con->Query("PRAGMA threads=16");
+		if (r1->HasError()) {
+			Log("PRAGMA threads error: " + r1->GetError());
+		}
+		auto r2 = con->Query("PRAGMA memory_limit='50%'");
+		if (r2->HasError()) {
+			Log("PRAGMA memory_limit error: " + r2->GetError());
+		}
+		auto r3 = con->Query("INSTALL icu");
+		if (r3->HasError()) {
+			Log("INSTALL icu error: " + r3->GetError());
+		}
+		auto r4 = con->Query("LOAD icu");
+		if (r4->HasError()) {
+			Log("LOAD icu error: " + r4->GetError());
+		}
+		auto r5 = con->Query("INSTALL tpch");
+		if (r5->HasError()) {
+			Log("INSTALL tpch error: " + r5->GetError());
+		}
+		auto r6 = con->Query("LOAD tpch");
+		if (r6->HasError()) {
+			Log("LOAD tpch error: " + r6->GetError());
+		}
 		auto r = con->Query("LOAD pac");
 		if (r->HasError()) {
 			throw std::runtime_error("Failed to load PAC extension: " + r->GetError());
@@ -762,7 +780,12 @@ static vector<QuerySummary> RunPass(const string &label, vector<string> &query_f
 
 		// Periodically force checkpoint to reclaim DuckDB memory
 		if ((i + 1) % 100 == 0) {
-			try { con->Query("FORCE CHECKPOINT"); } catch (...) {}
+			try {
+				auto r = con->Query("FORCE CHECKPOINT");
+				if (r->HasError()) {
+					Log("FORCE CHECKPOINT error: " + r->GetError());
+				}
+			} catch (...) {}
 		}
 
 		// Reconnect after timeouts to reclaim memory from interrupted queries
@@ -1148,10 +1171,22 @@ int RunSQLStormBenchmark(const string &queries_dir, const string &out_csv, doubl
 				db.reset();
 				db = make_uniq<DuckDB>(db_path.c_str());
 				con = make_uniq<Connection>(*db);
-				con->Query("PRAGMA threads=16");
-				con->Query("PRAGMA memory_limit='25GB'");
-				con->Query("INSTALL icu");
-				con->Query("LOAD icu");
+				auto r1 = con->Query("PRAGMA threads=16");
+				if (r1->HasError()) {
+					Log("PRAGMA threads error: " + r1->GetError());
+				}
+				auto r2 = con->Query("PRAGMA memory_limit='50%'");
+				if (r2->HasError()) {
+					Log("PRAGMA memory_limit error: " + r2->GetError());
+				}
+				auto r3 = con->Query("INSTALL icu");
+				if (r3->HasError()) {
+					Log("INSTALL icu error: " + r3->GetError());
+				}
+				auto r4 = con->Query("LOAD icu");
+				if (r4->HasError()) {
+					Log("LOAD icu error: " + r4->GetError());
+				}
 				auto ri = con->Query("INSTALL tpch");
 				if (ri->HasError()) {
 					Log("INSTALL tpch error: " + ri->GetError());
@@ -1185,7 +1220,10 @@ int RunSQLStormBenchmark(const string &queries_dir, const string &out_csv, doubl
 
 			// ===== PASS 1: baseline (no PAC) =====
 			// Clear any existing PAC metadata so queries run without PAC transforms
-			con->Query("PRAGMA clear_pac_metadata;");
+			auto r_clear = con->Query("PRAGMA clear_pac_metadata;");
+			if (r_clear->HasError()) {
+				Log("clear_pac_metadata error: " + r_clear->GetError());
+			}
 			Log("Cleared PAC metadata for baseline pass");
 
 			PassStats baseline_stats;
@@ -1325,9 +1363,22 @@ int RunSQLStormBenchmark(const string &queries_dir, const string &out_csv, doubl
 				so_db.reset();
 				so_db = make_uniq<DuckDB>(so_db_path.c_str());
 				so_con = make_uniq<Connection>(*so_db);
-				so_con->Query("PRAGMA threads=16");
-				so_con->Query("PRAGMA memory_limit='25GB'");
-				so_con->Query("INSTALL icu; LOAD icu;");
+				auto r1 = so_con->Query("PRAGMA threads=16");
+				if (r1->HasError()) {
+					Log("PRAGMA threads error: " + r1->GetError());
+				}
+				auto r2 = so_con->Query("PRAGMA memory_limit='50%'");
+				if (r2->HasError()) {
+					Log("PRAGMA memory_limit error: " + r2->GetError());
+				}
+				auto r3 = so_con->Query("INSTALL icu");
+				if (r3->HasError()) {
+					Log("INSTALL icu error: " + r3->GetError());
+				}
+				auto r4 = so_con->Query("LOAD icu");
+				if (r4->HasError()) {
+					Log("LOAD icu error: " + r4->GetError());
+				}
 				auto r = so_con->Query("LOAD pac");
 				if (r->HasError()) {
 					throw std::runtime_error("Failed to load PAC extension: " + r->GetError());
@@ -1442,7 +1493,10 @@ int RunSQLStormBenchmark(const string &queries_dir, const string &out_csv, doubl
 			}
 
 			// ===== PASS 1: baseline (no PAC) =====
-			so_con->Query("PRAGMA clear_pac_metadata;");
+			auto r_clear = so_con->Query("PRAGMA clear_pac_metadata;");
+			if (r_clear->HasError()) {
+				Log("clear_pac_metadata error: " + r_clear->GetError());
+			}
 			Log("Cleared PAC metadata for baseline pass");
 
 			PassStats so_baseline_stats;
