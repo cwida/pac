@@ -626,7 +626,7 @@ static vector<QuerySummary> RunPass(const string &label, vector<string> &query_f
 		if (r1->HasError()) {
 			Log("PRAGMA threads error: " + r1->GetError());
 		}
-		auto r2 = con->Query("PRAGMA memory_limit='50%'");
+		auto r2 = con->Query("PRAGMA memory_limit='16GB'");
 		if (r2->HasError()) {
 			Log("PRAGMA memory_limit error: " + r2->GetError());
 		}
@@ -1175,7 +1175,7 @@ int RunSQLStormBenchmark(const string &queries_dir, const string &out_csv, doubl
 				if (r1->HasError()) {
 					Log("PRAGMA threads error: " + r1->GetError());
 				}
-				auto r2 = con->Query("PRAGMA memory_limit='50%'");
+				auto r2 = con->Query("PRAGMA memory_limit='16GB'");
 				if (r2->HasError()) {
 					Log("PRAGMA memory_limit error: " + r2->GetError());
 				}
@@ -1367,7 +1367,7 @@ int RunSQLStormBenchmark(const string &queries_dir, const string &out_csv, doubl
 				if (r1->HasError()) {
 					Log("PRAGMA threads error: " + r1->GetError());
 				}
-				auto r2 = so_con->Query("PRAGMA memory_limit='50%'");
+				auto r2 = so_con->Query("PRAGMA memory_limit='16GB'");
 				if (r2->HasError()) {
 					Log("PRAGMA memory_limit error: " + r2->GetError());
 				}
