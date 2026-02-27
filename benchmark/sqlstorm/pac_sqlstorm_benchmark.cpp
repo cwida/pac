@@ -794,10 +794,12 @@ static vector<QuerySummary> RunPass(const string &label, vector<string> &query_f
 		}
 
 		// Periodically force checkpoint to reclaim DuckDB memory
-		// (skip right after reconnect — PAC schema load leaves an active transaction)
+		// Use a separate connection since FORCE CHECKPOINT cannot run
+		// when the main connection has an active transaction.
 		if ((i + 1) % 100 == 0 && !just_reconnected) {
 			try {
-				auto r = con->Query("FORCE CHECKPOINT");
+				Connection ckpt_con(*db);
+				auto r = ckpt_con.Query("FORCE CHECKPOINT");
 				if (r->HasError()) {
 					Log("FORCE CHECKPOINT error: " + r->GetError());
 				}
