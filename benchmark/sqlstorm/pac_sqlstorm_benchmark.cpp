@@ -778,15 +778,6 @@ static vector<QuerySummary> RunPass(const string &label, vector<string> &query_f
 			Log(progress);
 		}
 
-		// Periodically force checkpoint to reclaim DuckDB memory
-		if ((i + 1) % 100 == 0) {
-			try {
-				auto r = con->Query("FORCE CHECKPOINT");
-				if (r->HasError()) {
-					Log("FORCE CHECKPOINT error: " + r->GetError());
-				}
-			} catch (...) {}
-		}
 
 		// Reconnect after timeouts to reclaim memory from interrupted queries
 		// (DuckDB may not fully release memory from interrupted query execution;
