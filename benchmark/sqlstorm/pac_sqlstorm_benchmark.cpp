@@ -503,7 +503,7 @@ struct QueryWorker {
 		}
 		cv_work.notify_one();
 
-		auto deadline = std::chrono::steady_clock::now() + std::chrono::duration<double>(timeout_s);
+		auto deadline = std::chrono::steady_clock::now() + std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double>(timeout_s));
 		std::unique_lock<std::mutex> lk(mtx);
 		while (!work_done) {
 			auto poll_until = std::min(deadline, std::chrono::steady_clock::now() + std::chrono::milliseconds(500));

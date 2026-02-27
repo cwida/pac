@@ -220,7 +220,7 @@ if (!has_pacdb) {
       qidx = match(query, query_order),
       x_pos = qidx + 0.2,
       y_pos = median_ms * 1.15,
-      label = sprintf("%.1fx", slowdown)
+      label = { s <- pmax(slowdown, 1.0); ifelse(s >= 10, sprintf("%.0fx", s), sprintf("%.1fx", s)) }
     )
 
   # FAILED labels for bars with original_time < 0
@@ -257,7 +257,7 @@ if (!has_pacdb) {
     )
 
   out_file <- file.path(output_dir, paste0("tpch_benchmark_plot_sf", sf_for_name, "_paper.png"))
-  png(filename = out_file, width = 4000, height = 1450, res = 200)
+  png(filename = out_file, width = 4000, height = 1350, res = 200)
     print(p)
   dev.off()
   message("Plot saved to: ", out_file)
@@ -323,7 +323,7 @@ if (!has_pacdb) {
       qidx = match(query, query_order),
       x_pos = qidx + ifelse(bar == "PAC-DB", 0.0, 0.27),
       y_pos = median_ms * 1.15,
-      label = sprintf("%.1fx", slowdown)
+      label = { s <- pmax(slowdown, 1.0); ifelse(s >= 10, sprintf("%.0fx", s), sprintf("%.1fx", s)) }
     )
 
   if (has_simple_hash) {

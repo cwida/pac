@@ -220,11 +220,13 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
         string create_sql_path = queries_dir + "/create.sql";
         string load_sql_path = queries_dir + "/load.sql";
         string queries_sql_path = queries_dir + "/queries.sql";
+        string setup_sql_path = queries_dir + "/setup.sql";
 
         // Try to find the files
         string create_file = FindFile(create_sql_path);
         string load_file = FindFile(load_sql_path);
         string queries_file = FindFile(queries_sql_path);
+        string setup_file = FindFile(setup_sql_path);
 
         if (create_file.empty()) {
             throw std::runtime_error("Cannot find create.sql in " + queries_dir);
@@ -235,15 +237,20 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
         if (queries_file.empty()) {
             throw std::runtime_error("Cannot find queries.sql in " + queries_dir);
         }
+        if (setup_file.empty()) {
+            throw std::runtime_error("Cannot find setup.sql in " + queries_dir);
+        }
 
         Log(string("Using create.sql: ") + create_file);
         Log(string("Using load.sql: ") + load_file);
         Log(string("Using queries.sql: ") + queries_file);
+        Log(string("Using setup.sql: ") + setup_file);
 
         // Read and parse queries
         string create_sql = ReadFileToString(create_file);
         string load_sql = ReadFileToString(load_file);
         string queries_content = ReadFileToString(queries_file);
+        vector<string> setup_stmts = SplitLines(ReadFileToString(setup_file));
 
         if (create_sql.empty()) {
             throw std::runtime_error("create.sql is empty or unreadable");
@@ -324,7 +331,6 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
             }
 
             // Ensure PAC is disabled initially
-            con.Query("ALTER PU TABLE hits DROP PROTECTED (UserID, ClientIP);");
             con.Query("ALTER TABLE hits UNSET PU;");
         }
 
@@ -417,8 +423,9 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
                 // ------------------------------------------------------------------
                 {
                     // Enable PAC for this query
-                    con.Query("ALTER TABLE hits SET PU;");
-                    con.Query("ALTER PU TABLE hits ADD PROTECTED (UserID, ClientIP);");
+                    for (auto &stmt : setup_stmts) {
+                        con.Query(stmt);
+                    }
 
                     auto t0 = std::chrono::steady_clock::now();
                     auto r = con.Query(query);
@@ -457,7 +464,6 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
                     }
 
                     // Disable PAC after the run
-                    con.Query("ALTER PU TABLE hits DROP PROTECTED (UserID, ClientIP);");
                     con.Query("ALTER TABLE hits UNSET PU;");
                 }
             }

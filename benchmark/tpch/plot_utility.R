@@ -198,7 +198,11 @@ make_utility_plot <- function(data, q_levels, subtitle = NULL) {
       axis.title.y.left = element_text(size = 44),
       axis.title.y.right = element_text(size = 44),
       plot.title = element_text(size = 44, hjust = 0.5),
-      plot.margin = margin(2, 5, 5, 5)
+      plot.margin = margin(2, 5, 5, 5),
+      plot.background = element_rect(fill = "transparent", colour = NA),
+      panel.background = element_rect(fill = "transparent", colour = NA),
+      legend.background = element_rect(fill = "transparent", colour = NA),
+      legend.key = element_rect(fill = "transparent", colour = NA)
     )
 
   if (!is.null(subtitle)) {
@@ -259,42 +263,40 @@ out_file <- file.path(output_dir, "tpch_utility_boxplot.png")
 
 if (has_tpch && has_clickbench) {
   # Side-by-side layout
-  p_tpch <- make_utility_plot(tpch_data, tpch_q_levels, subtitle = "TPC-H")
-  p_cb <- make_utility_plot(clickbench_data, cb_q_levels, subtitle = "ClickBench")
+  p_tpch <- make_utility_plot(tpch_data, tpch_q_levels, subtitle = "TPC-H") +
+    theme(legend.position = "none", plot.margin = margin(2, 25, 5, 5))
+  p_cb <- make_utility_plot(clickbench_data, cb_q_levels, subtitle = "ClickBench") +
+    theme(legend.position = "none", plot.margin = margin(2, 5, 5, 25))
 
-  # Extract legend from one plot, use shared legend on top
-  g_tpch <- ggplotGrob(p_tpch)
-  g_cb <- ggplotGrob(p_cb)
-
-  # Remove individual legends; we'll add a shared one
-  p_tpch_nl <- p_tpch + theme(legend.position = "none")
-  p_cb_nl <- p_cb + theme(legend.position = "none")
-
-  # Get shared legend from the plot with more metrics (prefer one with precision)
-  legend_source <- if (any(!is.na(clickbench_data$precision))) p_cb else p_tpch
+  # Shared legend from the plot with more metrics
+  legend_source <- if (any(!is.na(clickbench_data$precision))) {
+    make_utility_plot(clickbench_data, cb_q_levels)
+  } else {
+    make_utility_plot(tpch_data, tpch_q_levels)
+  }
   tmp <- ggplotGrob(legend_source)
   leg_idx <- which(sapply(tmp$grobs, function(x) x$name) == "guide-box")
   shared_legend <- tmp$grobs[[leg_idx]]
 
-  png(filename = out_file, width = 8000, height = 1650, res = 200)
-    grid.arrange(
-      shared_legend,
-      arrangeGrob(p_tpch_nl, p_cb_nl, ncol = 2),
-      nrow = 2, heights = c(1, 12)
-    )
+  png(filename = out_file, width = 8000, height = 1650, res = 200, bg = "transparent")
+  grid.arrange(
+    shared_legend,
+    arrangeGrob(p_tpch, p_cb, ncol = 2),
+    nrow = 2, heights = c(1, 12)
+  )
   dev.off()
   message("Combined utility plot saved to: ", out_file)
 
 } else if (has_tpch) {
   p <- make_utility_plot(tpch_data, tpch_q_levels)
-  png(filename = out_file, width = 4000, height = 1450, res = 200)
+  png(filename = out_file, width = 4000, height = 1450, res = 200, bg = "transparent")
     print(p)
   dev.off()
   message("TPC-H utility plot saved to: ", out_file)
 
 } else {
   p <- make_utility_plot(clickbench_data, cb_q_levels)
-  png(filename = out_file, width = 4000, height = 1450, res = 200)
+  png(filename = out_file, width = 4000, height = 1450, res = 200, bg = "transparent")
     print(p)
   dev.off()
   message("ClickBench utility plot saved to: ", out_file)
