@@ -319,7 +319,7 @@ static void PacDBCreateTables(Connection &con) {
             con.Query("CREATE TABLE IF NOT EXISTS random_samples ("
                        "sample_id INTEGER, row_id BIGINT, random_binary BOOLEAN);");
             bool batch_failed = false;
-            for (int sid = 0; sid < 128; ++sid) {
+            for (int sid = 0; sid < 64; ++sid) {
                 auto rb = con.Query(
                     "INSERT INTO random_samples "
                     "SELECT " + std::to_string(sid) + " AS sample_id, "
@@ -333,7 +333,7 @@ static void PacDBCreateTables(Connection &con) {
                     break;
                 }
                 if (sid % 16 == 15) {
-                    Log("  random_samples: " + std::to_string(sid + 1) + "/128 samples inserted.");
+                    Log("  random_samples: " + std::to_string(sid + 1) + "/64 samples inserted.");
                 }
             }
             if (!batch_failed) {
@@ -353,7 +353,7 @@ static void PacDBCreateTables(Connection &con) {
             con.Query("CREATE TABLE IF NOT EXISTS random_samples_orders ("
                        "sample_id INTEGER, row_id BIGINT, random_binary BOOLEAN);");
             bool batch_failed = false;
-            for (int sid = 0; sid < 128; ++sid) {
+            for (int sid = 0; sid < 64; ++sid) {
                 auto rb = con.Query(
                     "INSERT INTO random_samples_orders "
                     "SELECT " + std::to_string(sid) + " AS sample_id, "
@@ -367,7 +367,7 @@ static void PacDBCreateTables(Connection &con) {
                     break;
                 }
                 if (sid % 16 == 15) {
-                    Log("  random_samples_orders: " + std::to_string(sid + 1) + "/128 samples inserted.");
+                    Log("  random_samples_orders: " + std::to_string(sid + 1) + "/64 samples inserted.");
                 }
             }
             if (!batch_failed) {
