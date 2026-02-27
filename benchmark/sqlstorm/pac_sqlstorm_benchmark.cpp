@@ -20,15 +20,14 @@
 #include <algorithm>
 #include <ctime>
 #include <iomanip>
-#include <thread>
-#include <atomic>
-#include <mutex>
-#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
+#include <poll.h>
+#include <signal.h>
 #include <limits.h>
 
 namespace duckdb {
@@ -415,72 +414,229 @@ static void LoadPACSchema(Connection &con, const string &pac_schema_filename) {
 	Log("PAC schema loaded successfully");
 }
 
-// Persistent worker thread for query execution — avoids creating a new thread per query.
-// Main thread submits work and monitors for timeouts; worker thread runs con.Query().
-struct QueryWorker {
-	std::thread thread;
-	std::mutex mtx;
-	std::condition_variable cv_work;
-	std::condition_variable cv_done;
+// Helper: write exactly n bytes to fd, handling partial writes.
+static string StateIntToString(uint8_t s);
 
-	Connection *con = nullptr;
-	const string *sql = nullptr;
-	unique_ptr<MaterializedQueryResult> result;
-	std::exception_ptr exception;
-	bool has_work = false;
-	bool work_done = false;
-	bool stop = false;
-
-	QueryWorker() {
-		thread = std::thread([this]() { WorkerLoop(); });
+static bool WriteAllBytes(int fd, const void *buf, size_t n) {
+	const char *p = static_cast<const char *>(buf);
+	while (n > 0) {
+		ssize_t w = write(fd, p, n);
+		if (w <= 0) return false;
+		p += w;
+		n -= static_cast<size_t>(w);
 	}
+	return true;
+}
 
-	~QueryWorker() {
-		{
-			std::lock_guard<std::mutex> lk(mtx);
-			stop = true;
-		}
-		cv_work.notify_one();
-		if (thread.joinable()) {
-			thread.join();
-		}
+// Helper: read exactly n bytes from fd, handling partial reads.
+static bool ReadAllBytes(int fd, void *buf, size_t n) {
+	char *p = static_cast<char *>(buf);
+	while (n > 0) {
+		ssize_t r = read(fd, p, n);
+		if (r <= 0) return false;
+		p += r;
+		n -= static_cast<size_t>(r);
 	}
+	return true;
+}
 
-	void WorkerLoop() {
+// Child worker process: opens DuckDB and processes queries received via pipe.
+// Protocol (parent->child): [uint32_t sql_len][sql_bytes]  (sql_len=0 means stop)
+// Protocol (child->parent): [double time_ms][uint8_t state][int64_t rows][uint8_t pac_applied][uint32_t err_len][err_bytes]
+[[noreturn]] static void ChildWorkerMain(int read_fd, int write_fd,
+                                          const string &db_path,
+                                          const string &pac_schema,
+                                          bool check_pac) {
+	try {
+		DuckDB db(db_path);
+		Connection con(db);
+		con.Query("PRAGMA threads=16");
+		con.Query("PRAGMA memory_limit='16GB'");
+		con.Query("SET temp_directory='/tmp/duckdb_temp'");
+		con.Query("INSTALL icu");
+		con.Query("LOAD icu");
+		con.Query("INSTALL tpch");
+		con.Query("LOAD tpch");
+		auto r = con.Query("LOAD pac");
+		if (r->HasError()) {
+			_exit(2);
+		}
+		if (!pac_schema.empty()) {
+			LoadPACSchema(con, pac_schema);
+		}
+
+		int count = 0;
 		while (true) {
-			std::unique_lock<std::mutex> lk(mtx);
-			cv_work.wait(lk, [this]() { return has_work || stop; });
-			if (stop && !has_work) {
-				return;
-			}
+			uint32_t sql_len = 0;
+			if (!ReadAllBytes(read_fd, &sql_len, sizeof(sql_len))) break;
+			if (sql_len == 0) break;
 
-			Connection *local_con = con;
-			const string &local_sql = *sql;
-			lk.unlock();
+			string sql(sql_len, '\0');
+			if (!ReadAllBytes(read_fd, &sql[0], sql_len)) break;
 
-			unique_ptr<MaterializedQueryResult> local_result;
-			std::exception_ptr local_exception;
+			// Execute query
+			auto start = std::chrono::steady_clock::now();
+			unique_ptr<MaterializedQueryResult> result;
+			std::exception_ptr exc;
 			try {
-				local_result = local_con->Query(local_sql);
+				result = con.Query(sql);
 			} catch (...) {
-				local_exception = std::current_exception();
+				exc = std::current_exception();
+			}
+			auto end = std::chrono::steady_clock::now();
+			double time_ms = std::chrono::duration<double, std::milli>(end - start).count();
+
+			uint8_t state = 0;
+			int64_t rows = 0;
+			string error;
+			bool pac_applied = false;
+
+			if (exc) {
+				try { std::rethrow_exception(exc); }
+				catch (std::exception &e) { error = e.what(); }
+				catch (...) { error = "unknown exception"; }
+			} else if (result && result->HasError()) {
+				error = result->GetError();
 			}
 
-			lk.lock();
-			result = std::move(local_result);
-			exception = local_exception;
-			work_done = true;
-			has_work = false;
-			lk.unlock();
-			cv_done.notify_one();
-		}
-	}
+			if (!error.empty()) {
+				auto sp = error.find("\n\nStack Trace");
+				if (sp != string::npos) error = error.substr(0, sp);
+				if (error.size() > 200) error = error.substr(0, 200);
 
+				if (error.find("FATAL") != string::npos ||
+				    error.find("database has been invalidated") != string::npos) {
+					state = 3; // crash
+				} else if (error.find("INTERRUPT") != string::npos ||
+				           error.find("Interrupted") != string::npos) {
+					state = 2; // timeout
+				} else {
+					state = 1; // error
+				}
+			} else {
+				if (check_pac) {
+					try {
+						auto explain_result = con.Query("EXPLAIN " + sql);
+						if (explain_result && !explain_result->HasError()) {
+							for (idx_t row = 0; row < explain_result->RowCount(); row++) {
+								string plan_text = explain_result->GetValue(1, row).ToString();
+								if (plan_text.find("pac_") != string::npos) {
+									pac_applied = true;
+									break;
+								}
+							}
+						}
+					} catch (...) {}
+				}
+			}
+			result.reset();
+
+			// Send result back to parent
+			WriteAllBytes(write_fd, &time_ms, sizeof(time_ms));
+			WriteAllBytes(write_fd, &state, sizeof(state));
+			WriteAllBytes(write_fd, &rows, sizeof(rows));
+			uint8_t pac_byte = pac_applied ? 1 : 0;
+			WriteAllBytes(write_fd, &pac_byte, sizeof(pac_byte));
+			uint32_t err_len = static_cast<uint32_t>(error.size());
+			WriteAllBytes(write_fd, &err_len, sizeof(err_len));
+			if (err_len > 0) WriteAllBytes(write_fd, error.data(), err_len);
+
+			count++;
+			if (count % 100 == 0) {
+				try { con.Query("CHECKPOINT"); } catch (...) {}
+			}
+
+			// DB invalidated — child must exit
+			if (state == 3) {
+				_exit(1);
+			}
+		}
+	} catch (...) {
+		_exit(2);
+	}
+	_exit(0);
+}
+
+// Fork-based worker: runs DuckDB queries in a child process for OOM isolation.
+// If the OS kills the child (e.g. OOM), the parent survives and spawns a new one.
+struct ForkWorker {
+	pid_t child_pid = -1;
+	int to_child_fd = -1;    // parent writes SQL here
+	int from_child_fd = -1;  // parent reads results here
+
+	string db_path;
+	string pac_schema;
+	bool check_pac = false;
 	bool memory_killed = false;
 
-	// Read current process RSS from /proc/self/statm
-	static size_t GetRSSBytes() {
-		FILE *f = fopen("/proc/self/statm", "r");
+	// Result of last Submit
+	double result_time_ms = 0;
+	uint8_t result_state = 0;
+	int64_t result_rows = 0;
+	string result_error;
+	bool result_pac_applied = false;
+
+	enum SubmitResult { SR_OK, SR_TIMEOUT, SR_CHILD_DIED };
+
+	void Start() {
+		Stop();
+		int to_child[2], from_child[2];
+		if (pipe(to_child) != 0 || pipe(from_child) != 0) {
+			throw std::runtime_error("pipe() failed");
+		}
+
+		child_pid = fork();
+		if (child_pid < 0) {
+			close(to_child[0]); close(to_child[1]);
+			close(from_child[0]); close(from_child[1]);
+			throw std::runtime_error("fork() failed");
+		}
+
+		if (child_pid == 0) {
+			// Child process
+			close(to_child[1]);
+			close(from_child[0]);
+			ChildWorkerMain(to_child[0], from_child[1], db_path, pac_schema, check_pac);
+			_exit(0); // unreachable
+		}
+
+		// Parent
+		close(to_child[0]);
+		close(from_child[1]);
+		to_child_fd = to_child[1];
+		from_child_fd = from_child[0];
+		memory_killed = false;
+	}
+
+	void Stop() {
+		if (child_pid > 0) {
+			// Send stop signal (sql_len=0)
+			uint32_t zero = 0;
+			WriteAllBytes(to_child_fd, &zero, sizeof(zero));
+
+			// Give child time to exit gracefully
+			int status;
+			for (int i = 0; i < 4; i++) {
+				int w = waitpid(child_pid, &status, WNOHANG);
+				if (w != 0) break;
+				usleep(50000); // 50ms
+			}
+			int w = waitpid(child_pid, &status, WNOHANG);
+			if (w == 0) {
+				kill(child_pid, SIGKILL);
+				waitpid(child_pid, &status, 0);
+			}
+			child_pid = -1;
+		}
+		if (to_child_fd >= 0) { close(to_child_fd); to_child_fd = -1; }
+		if (from_child_fd >= 0) { close(from_child_fd); from_child_fd = -1; }
+	}
+
+	size_t GetChildRSS() {
+		if (child_pid <= 0) return 0;
+		char path[64];
+		snprintf(path, sizeof(path), "/proc/%d/statm", child_pid);
+		FILE *f = fopen(path, "r");
 		if (!f) return 0;
 		long pages = 0, rss = 0;
 		if (fscanf(f, "%ld %ld", &pages, &rss) != 2) { rss = 0; }
@@ -488,124 +644,171 @@ struct QueryWorker {
 		return static_cast<size_t>(rss) * static_cast<size_t>(sysconf(_SC_PAGESIZE));
 	}
 
-	// Submit a query; blocks until the query completes, timeout, or memory limit hit.
-	// Polls every 500ms to check RSS; interrupts if > 25GB.
-	void Submit(Connection &c, const string &q, double timeout_s) {
+	SubmitResult Submit(const string &sql, double timeout_s) {
 		memory_killed = false;
-		{
-			std::lock_guard<std::mutex> lk(mtx);
-			con = &c;
-			sql = &q;
-			result.reset();
-			exception = nullptr;
-			has_work = true;
-			work_done = false;
-		}
-		cv_work.notify_one();
+		result_time_ms = 0;
+		result_state = 0;
+		result_rows = 0;
+		result_error.clear();
+		result_pac_applied = false;
 
-		auto deadline = std::chrono::steady_clock::now() + std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double>(timeout_s));
-		std::unique_lock<std::mutex> lk(mtx);
-		while (!work_done) {
-			auto poll_until = std::min(deadline, std::chrono::steady_clock::now() + std::chrono::milliseconds(500));
-			cv_done.wait_until(lk, poll_until, [this]() { return work_done; });
-			if (work_done) break;
-			// Check timeout
-			if (std::chrono::steady_clock::now() >= deadline) {
-				lk.unlock();
-				c.Interrupt();
-				lk.lock();
-				cv_done.wait(lk, [this]() { return work_done; });
-				break;
+		if (child_pid <= 0) return SR_CHILD_DIED;
+
+		// Send SQL to child
+		uint32_t sql_len = static_cast<uint32_t>(sql.size());
+		if (!WriteAllBytes(to_child_fd, &sql_len, sizeof(sql_len)) ||
+		    !WriteAllBytes(to_child_fd, sql.data(), sql_len)) {
+			int status;
+			waitpid(child_pid, &status, 0);
+			child_pid = -1;
+			result_state = 3;
+			result_error = "child process died (write failed)";
+			return SR_CHILD_DIED;
+		}
+
+		// Wait for result with timeout + memory monitoring
+		auto deadline = std::chrono::steady_clock::now() +
+		    std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+		        std::chrono::duration<double>(timeout_s));
+
+		while (true) {
+			auto now = std::chrono::steady_clock::now();
+			if (now >= deadline) {
+				kill(child_pid, SIGKILL);
+				waitpid(child_pid, nullptr, 0);
+				child_pid = -1;
+				result_state = 2;
+				result_error = "timeout";
+				return SR_TIMEOUT;
 			}
-			// Check memory usage
-			size_t rss = GetRSSBytes();
+
+			int remaining_ms = static_cast<int>(
+			    std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count());
+			int poll_ms = std::min(remaining_ms, 500);
+
+			struct pollfd pfd;
+			pfd.fd = from_child_fd;
+			pfd.events = POLLIN;
+			pfd.revents = 0;
+
+			int ret = poll(&pfd, 1, poll_ms);
+
+			if (ret > 0 && (pfd.revents & POLLIN)) {
+				// Data available — read result
+				if (!ReadAllBytes(from_child_fd, &result_time_ms, sizeof(result_time_ms)) ||
+				    !ReadAllBytes(from_child_fd, &result_state, sizeof(result_state)) ||
+				    !ReadAllBytes(from_child_fd, &result_rows, sizeof(result_rows))) {
+					int status;
+					waitpid(child_pid, &status, 0);
+					child_pid = -1;
+					result_state = 3;
+					result_error = "child process died (read failed)";
+					return SR_CHILD_DIED;
+				}
+				uint8_t pac_byte = 0;
+				if (!ReadAllBytes(from_child_fd, &pac_byte, sizeof(pac_byte))) {
+					int status;
+					waitpid(child_pid, &status, 0);
+					child_pid = -1;
+					result_state = 3;
+					result_error = "child process died (read failed)";
+					return SR_CHILD_DIED;
+				}
+				result_pac_applied = (pac_byte != 0);
+				uint32_t err_len = 0;
+				if (!ReadAllBytes(from_child_fd, &err_len, sizeof(err_len))) {
+					int status;
+					waitpid(child_pid, &status, 0);
+					child_pid = -1;
+					result_state = 3;
+					result_error = "child process died (read failed)";
+					return SR_CHILD_DIED;
+				}
+				if (err_len > 0) {
+					result_error.resize(err_len);
+					if (!ReadAllBytes(from_child_fd, &result_error[0], err_len)) {
+						int status;
+						waitpid(child_pid, &status, 0);
+						child_pid = -1;
+						result_state = 3;
+						return SR_CHILD_DIED;
+					}
+				}
+
+				// If child reported crash, it will exit — reap it
+				if (result_state == 3) {
+					int status;
+					waitpid(child_pid, &status, 0);
+					child_pid = -1;
+					return SR_CHILD_DIED;
+				}
+
+				return SR_OK;
+			}
+
+			if (ret > 0 && (pfd.revents & (POLLHUP | POLLERR))) {
+				int status;
+				waitpid(child_pid, &status, 0);
+				child_pid = -1;
+				result_state = 3;
+				result_error = "child process died unexpectedly";
+				return SR_CHILD_DIED;
+			}
+
+			// Check if child still alive
+			{
+				int status;
+				int w = waitpid(child_pid, &status, WNOHANG);
+				if (w > 0) {
+					child_pid = -1;
+					result_state = 3;
+					result_error = "child process died unexpectedly";
+					return SR_CHILD_DIED;
+				}
+			}
+
+			// Check child memory usage
+			size_t rss = GetChildRSS();
 			if (rss > 25ULL * 1024 * 1024 * 1024) {
 				memory_killed = true;
-				lk.unlock();
-				c.Interrupt();
-				lk.lock();
-				cv_done.wait(lk, [this]() { return work_done; });
-				break;
+				kill(child_pid, SIGKILL);
+				waitpid(child_pid, nullptr, 0);
+				child_pid = -1;
+				result_state = 2;
+				result_error = "memory limit exceeded (RSS > 25GB)";
+				return SR_TIMEOUT;
 			}
 		}
 	}
+
+	~ForkWorker() { Stop(); }
 };
 
-// Run a single query with timeout via persistent worker thread.
-static BenchmarkQueryResult RunQuery(QueryWorker &worker, Connection &con, const string &name, const string &sql, double timeout_s) {
+// Run a single query via fork worker.
+static BenchmarkQueryResult RunQuery(ForkWorker &worker, const string &name, const string &sql, double timeout_s) {
 	BenchmarkQueryResult qr;
 	qr.name = name;
 	qr.rows = 0;
 	qr.pac_applied = false;
 
-	try {
-		auto start = std::chrono::steady_clock::now();
-		worker.Submit(con, sql, timeout_s);
-		auto end = std::chrono::steady_clock::now();
+	auto start = std::chrono::steady_clock::now();
+	auto res = worker.Submit(sql, timeout_s);
+	auto end = std::chrono::steady_clock::now();
+
+	if (res == ForkWorker::SR_OK) {
+		qr.time_ms = worker.result_time_ms;
+		qr.state = StateIntToString(worker.result_state);
+		qr.rows = worker.result_rows;
+		qr.error = worker.result_error;
+		qr.pac_applied = worker.result_pac_applied;
+	} else if (res == ForkWorker::SR_TIMEOUT) {
 		qr.time_ms = std::chrono::duration<double, std::milli>(end - start).count();
-
-		// Memory limit killed this query — treat as timeout
-		if (worker.memory_killed) {
-			qr.state = "timeout";
-			qr.error = "memory limit exceeded (RSS > 25GB)";
-			worker.result.reset();
-			return qr;
-		}
-
-		if (worker.exception) {
-			std::rethrow_exception(worker.exception);
-		}
-
-		if (worker.result && worker.result->HasError()) {
-			qr.error = worker.result->GetError();
-			auto stack_pos = qr.error.find("\n\nStack Trace");
-			if (stack_pos != string::npos) {
-				qr.error = qr.error.substr(0, stack_pos);
-			}
-			if (qr.error.size() > 200) {
-				qr.error = qr.error.substr(0, 200);
-			}
-			if (qr.error.find("FATAL") != string::npos ||
-			    qr.error.find("database has been invalidated") != string::npos) {
-				qr.state = "crash";
-			} else if (qr.error.find("INTERRUPT") != string::npos ||
-			           qr.error.find("Interrupted") != string::npos) {
-				qr.state = "timeout";
-			} else {
-				qr.state = "error";
-			}
-		} else if (qr.time_ms > timeout_s * 1000) {
-			qr.state = "timeout";
-		} else {
-			qr.state = "success";
-		}
-		// Free result memory immediately (match OLAPBench fetch_result=false)
-		worker.result.reset();
-	} catch (std::exception &e) {
-		string err = e.what();
-		auto stack_pos = err.find("\n\nStack Trace");
-		if (stack_pos != string::npos) {
-			err = err.substr(0, stack_pos);
-		}
-		if (err.size() > 200) {
-			err = err.substr(0, 200);
-		}
-		qr.error = err;
-		if (err.find("FATAL") != string::npos ||
-		    err.find("database has been invalidated") != string::npos) {
-			qr.state = "crash";
-		} else if (err.find("INTERRUPT") != string::npos ||
-		           err.find("Interrupted") != string::npos) {
-			qr.state = "timeout";
-		} else {
-			qr.state = "error";
-		}
-		worker.result.reset();
-	} catch (...) {
+		qr.state = "timeout";
+		qr.error = worker.result_error;
+	} else {
+		qr.time_ms = std::chrono::duration<double, std::milli>(end - start).count();
 		qr.state = "crash";
-		qr.time_ms = 0;
-		qr.error = "unexpected crash (non-std::exception)";
-		worker.result.reset();
+		qr.error = worker.result_error.empty() ? "child process died" : worker.result_error;
 	}
 
 	return qr;
@@ -639,74 +842,32 @@ static void TrackQueryErrors(PassStats &stats, const BenchmarkQueryResult &qr) {
 	}
 }
 
-// Run all queries in a single pass, reconnecting on crashes.
-// Returns lightweight summaries for cross-pass comparison (no strings allocated).
+// Run all queries in a single pass using fork-based process isolation.
+// The parent never opens DuckDB; the child process handles all DB access.
+// If the child is killed (OOM, crash), the parent spawns a new one.
 static vector<QuerySummary> RunPass(const string &label, vector<string> &query_files,
-                                    unique_ptr<DuckDB> &db, unique_ptr<Connection> &con,
                                     const string &db_path, double timeout_s,
                                     PassStats &stats, bool check_pac = false,
                                     const string &pac_schema = "") {
 	int total = static_cast<int>(query_files.size());
 	int log_interval = std::max(1, total / 10);
-	bool just_reconnected = false;
 	vector<QuerySummary> summaries;
 	summaries.reserve(total);
-	// Track previous query name+state for crash attribution
-	string prev_name;
-	uint8_t prev_state_int = 1; // error
-	auto worker = make_uniq<QueryWorker>();
 
-	auto reconnect = [&]() {
-		con.reset();
-		db.reset();
-		db = make_uniq<DuckDB>(db_path.c_str());
-		con = make_uniq<Connection>(*db);
-		auto r1 = con->Query("PRAGMA threads=16");
-		if (r1->HasError()) {
-			Log("PRAGMA threads error: " + r1->GetError());
-		}
-		auto r2 = con->Query("PRAGMA memory_limit='16GB'");
-		if (r2->HasError()) {
-			Log("PRAGMA memory_limit error: " + r2->GetError());
-		}
-		auto r_temp = con->Query("SET temp_directory='/tmp/duckdb_temp'");
-		if (r_temp->HasError()) {
-			Log("SET temp_directory error: " + r_temp->GetError());
-		}
-		auto r3 = con->Query("INSTALL icu");
-		if (r3->HasError()) {
-			Log("INSTALL icu error: " + r3->GetError());
-		}
-		auto r4 = con->Query("LOAD icu");
-		if (r4->HasError()) {
-			Log("LOAD icu error: " + r4->GetError());
-		}
-		auto r5 = con->Query("INSTALL tpch");
-		if (r5->HasError()) {
-			Log("INSTALL tpch error: " + r5->GetError());
-		}
-		auto r6 = con->Query("LOAD tpch");
-		if (r6->HasError()) {
-			Log("LOAD tpch error: " + r6->GetError());
-		}
-		auto r = con->Query("LOAD pac");
-		if (r->HasError()) {
-			throw std::runtime_error("Failed to load PAC extension: " + r->GetError());
-		}
-		// Reload PAC schema after crash so subsequent queries still get PAC transforms
-		if (!pac_schema.empty()) {
-			try {
-				LoadPACSchema(*con, pac_schema);
-				Log("Reloaded PAC schema after crash recovery");
-			} catch (std::exception &e) {
-				Log("WARNING: Failed to reload PAC schema after crash: " + string(e.what()));
-			}
-		}
-	};
+	ForkWorker worker;
+	worker.db_path = db_path;
+	worker.pac_schema = pac_schema;
+	worker.check_pac = check_pac;
+	worker.Start();
 
 	Log("=== " + label + " pass: running " + std::to_string(total) + " queries ===");
 
 	for (int i = 0; i < total; ++i) {
+		// Ensure worker is alive
+		if (worker.child_pid <= 0) {
+			worker.Start();
+		}
+
 		auto &qf = query_files[i];
 		string name = QueryName(qf);
 		string sql = ReadFileToString(qf);
@@ -721,96 +882,31 @@ static vector<QuerySummary> RunPass(const string &label, vector<string> &query_f
 			TrackQueryErrors(stats, qr_empty);
 			summaries.push_back({0, StateToInt("error"), false});
 			stats.failed++;
-			prev_name = name;
-			prev_state_int = 1;
 			continue;
 		}
 
-		auto qr = RunQuery(*worker, *con, name, sql, timeout_s);
+		auto qr = RunQuery(worker, name, sql, timeout_s);
 
 		if (qr.state == "success") {
 			stats.success++;
 			stats.total_success_time += qr.time_ms;
-			if (check_pac) {
-				try {
-					auto explain_result = con->Query("EXPLAIN " + sql);
-					if (explain_result && !explain_result->HasError()) {
-						for (idx_t row = 0; row < explain_result->RowCount(); row++) {
-							string plan_text = explain_result->GetValue(1, row).ToString();
-							if (plan_text.find("pac_") != string::npos) {
-								qr.pac_applied = true;
-								stats.pac_applied++;
-								break;
-							}
-						}
-					}
-				} catch (...) {}
-			}
+			if (qr.pac_applied) stats.pac_applied++;
 		} else if (qr.state == "timeout") {
 			stats.timed_out++;
-		} else if (qr.state == "crash") {
-			if (qr.error.find("database has been invalidated") != string::npos && !summaries.empty()) {
-				Log("Database crash caused by query " + prev_name + " (detected on query " + name + ")");
-				// Reclassify previous query as crash
-				auto &prev_summary = summaries.back();
-				if (prev_summary.state != 3) { // not already crash
-					if (prev_summary.state == 1) { // was error
-						stats.failed--;
-					} else if (prev_summary.state == 0) { // was success
-						stats.success--;
-						stats.total_success_time -= prev_summary.time_ms;
-					}
-					prev_summary.state = 3; // crash
-					stats.crashed++;
-				}
-				Log("  reconnecting...");
-				reconnect();
-				just_reconnected = true;
-				qr = RunQuery(*worker, *con, name, sql, timeout_s);
-				if (qr.state == "success") {
-					stats.success++;
-					stats.total_success_time += qr.time_ms;
-					if (check_pac) {
-						try {
-							auto explain_result = con->Query("EXPLAIN " + sql);
-							if (explain_result && !explain_result->HasError()) {
-								for (idx_t row = 0; row < explain_result->RowCount(); row++) {
-									string plan_text = explain_result->GetValue(1, row).ToString();
-									if (plan_text.find("pac_") != string::npos) {
-										qr.pac_applied = true;
-										stats.pac_applied++;
-										break;
-									}
-								}
-							}
-						} catch (...) {}
-					}
-				} else if (qr.state == "timeout") {
-					stats.timed_out++;
-				} else if (qr.state == "crash") {
-					stats.crashed++;
-					Log("Database crash on query " + name + ": " + qr.error);
-					Log("  reconnecting...");
-					reconnect();
-					just_reconnected = true;
-				} else {
-					stats.failed++;
-				}
-			} else {
-				stats.crashed++;
-				Log("Database crash on query " + name + ": " + qr.error);
-				Log("  reconnecting...");
-				reconnect();
-				just_reconnected = true;
+			// Kill child to reclaim memory; will be restarted next iteration
+			if (worker.child_pid > 0) {
+				worker.Stop();
 			}
+		} else if (qr.state == "crash") {
+			stats.crashed++;
+			Log("Query " + name + " crashed child process: " + qr.error);
+			// Child already dead; will be restarted next iteration
 		} else {
 			stats.failed++;
 		}
 
 		TrackQueryErrors(stats, qr);
 		summaries.push_back({qr.time_ms, StateToInt(qr.state), qr.pac_applied});
-		prev_name = name;
-		prev_state_int = StateToInt(qr.state);
 
 		if ((i + 1) % log_interval == 0 || i + 1 == total) {
 			string progress = "[" + label + "] [" + std::to_string(i + 1) + "/" + std::to_string(total) +
@@ -823,31 +919,9 @@ static vector<QuerySummary> RunPass(const string &label, vector<string> &query_f
 			}
 			Log(progress);
 		}
-
-
-		// Reconnect after timeouts to reclaim memory from interrupted queries
-		// (DuckDB may not fully release memory from interrupted query execution;
-		// crashes already reconnect inside the handler above)
-		if (qr.state == "timeout") {
-			worker.reset();
-			reconnect();
-			just_reconnected = true;
-			worker = make_uniq<QueryWorker>();
-		}
-
-		// Periodically checkpoint to reclaim DuckDB memory
-		if ((i + 1) % 100 == 0 && !just_reconnected) {
-			try {
-				auto r = con->Query("CHECKPOINT");
-				if (r->HasError()) {
-					Log("CHECKPOINT error: " + r->GetError());
-				}
-			} catch (...) {}
-		}
-		just_reconnected = false;
-
 	}
 
+	worker.Stop();
 	return summaries;
 }
 
@@ -1212,82 +1286,72 @@ int RunSQLStormBenchmark(const string &queries_dir, const string &out_csv, doubl
 			string db_path = "tpch_sf" + sf_str + "_sqlstorm.db";
 			bool db_exists = FileExists(db_path);
 
-			unique_ptr<DuckDB> db;
-			unique_ptr<Connection> con;
-
-			auto reconnect = [&]() {
-				con.reset();
-				db.reset();
-				db = make_uniq<DuckDB>(db_path.c_str());
-				con = make_uniq<Connection>(*db);
-				auto r1 = con->Query("PRAGMA threads=16");
-				if (r1->HasError()) {
-					Log("PRAGMA threads error: " + r1->GetError());
-				}
-				auto r2 = con->Query("PRAGMA memory_limit='16GB'");
-				if (r2->HasError()) {
-					Log("PRAGMA memory_limit error: " + r2->GetError());
-				}
-				auto r_temp = con->Query("SET temp_directory='/tmp/duckdb_temp'");
-				if (r_temp->HasError()) {
-					Log("SET temp_directory error: " + r_temp->GetError());
-				}
-				auto r3 = con->Query("INSTALL icu");
-				if (r3->HasError()) {
-					Log("INSTALL icu error: " + r3->GetError());
-				}
-				auto r4 = con->Query("LOAD icu");
-				if (r4->HasError()) {
-					Log("LOAD icu error: " + r4->GetError());
-				}
-				auto ri = con->Query("INSTALL tpch");
-				if (ri->HasError()) {
-					Log("INSTALL tpch error: " + ri->GetError());
-				}
-				auto rl = con->Query("LOAD tpch");
-				if (rl->HasError()) {
-					Log("LOAD tpch error: " + rl->GetError());
-				}
-				auto r = con->Query("LOAD pac");
+			// Setup: generate data and prepare for baseline pass (then close DB so child can open it)
+			{
+				DuckDB setup_db(db_path);
+				Connection setup_con(setup_db);
+				setup_con.Query("PRAGMA threads=16");
+				setup_con.Query("PRAGMA memory_limit='16GB'");
+				setup_con.Query("SET temp_directory='/tmp/duckdb_temp'");
+				setup_con.Query("INSTALL icu");
+				setup_con.Query("LOAD icu");
+				setup_con.Query("INSTALL tpch");
+				setup_con.Query("LOAD tpch");
+				auto r = setup_con.Query("LOAD pac");
 				if (r->HasError()) {
 					throw std::runtime_error("Failed to load PAC extension: " + r->GetError());
 				}
-			};
 
-			reconnect();
-
-			// Generate TPC-H data if database doesn't exist yet
-			if (!db_exists) {
-				Log("Generating TPC-H SF" + sf_str + " data...");
-				auto t0 = std::chrono::steady_clock::now();
-				auto r_dbgen = con->Query("CALL dbgen(sf=" + sf_str + ");");
-				auto t1 = std::chrono::steady_clock::now();
-				double gen_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-				if (r_dbgen && r_dbgen->HasError()) {
-					Log("CALL dbgen error: " + r_dbgen->GetError());
+				if (!db_exists) {
+					Log("Generating TPC-H SF" + sf_str + " data...");
+					auto t0 = std::chrono::steady_clock::now();
+					auto r_dbgen = setup_con.Query("CALL dbgen(sf=" + sf_str + ");");
+					auto t1 = std::chrono::steady_clock::now();
+					double gen_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+					if (r_dbgen && r_dbgen->HasError()) {
+						Log("CALL dbgen error: " + r_dbgen->GetError());
+					}
+					Log("TPC-H data generated in " + FormatNumber(gen_ms) + " ms");
+				} else {
+					Log("Using existing database: " + db_path);
 				}
-				Log("TPC-H data generated in " + FormatNumber(gen_ms) + " ms");
-			} else {
-				Log("Using existing database: " + db_path);
+
+				// Clear PAC metadata for baseline pass
+				auto r_clear = setup_con.Query("PRAGMA clear_pac_metadata;");
+				if (r_clear->HasError()) {
+					Log("clear_pac_metadata error: " + r_clear->GetError());
+				}
+				setup_con.Query("CHECKPOINT");
+				Log("Cleared PAC metadata for baseline pass");
 			}
+			// DB is now closed — child process will open it
 
 			// ===== PASS 1: baseline (no PAC) =====
-			// Clear any existing PAC metadata so queries run without PAC transforms
-			auto r_clear = con->Query("PRAGMA clear_pac_metadata;");
-			if (r_clear->HasError()) {
-				Log("clear_pac_metadata error: " + r_clear->GetError());
-			}
-			Log("Cleared PAC metadata for baseline pass");
-
 			PassStats baseline_stats;
-			auto baseline_summaries = RunPass("baseline", query_files, db, con, db_path, timeout_s, baseline_stats);
+			auto baseline_summaries = RunPass("baseline", query_files, db_path, timeout_s, baseline_stats);
 
-			// ===== Load PAC schema =====
-			LoadPACSchema(*con, "pac_tpch_schema.sql");
+			// Setup for PAC pass: load schema then close DB
+			{
+				DuckDB setup_db(db_path);
+				Connection setup_con(setup_db);
+				setup_con.Query("PRAGMA threads=16");
+				setup_con.Query("PRAGMA memory_limit='16GB'");
+				setup_con.Query("SET temp_directory='/tmp/duckdb_temp'");
+				setup_con.Query("INSTALL icu");
+				setup_con.Query("LOAD icu");
+				setup_con.Query("INSTALL tpch");
+				setup_con.Query("LOAD tpch");
+				auto r = setup_con.Query("LOAD pac");
+				if (r->HasError()) {
+					throw std::runtime_error("Failed to load PAC extension: " + r->GetError());
+				}
+				LoadPACSchema(setup_con, "pac_tpch_schema.sql");
+				setup_con.Query("CHECKPOINT");
+			}
 
 			// ===== PASS 2: PAC =====
 			PassStats pac_stats;
-			auto pac_summaries = RunPass("PAC", query_files, db, con, db_path, timeout_s, pac_stats, true,
+			auto pac_summaries = RunPass("PAC", query_files, db_path, timeout_s, pac_stats, true,
 			                             "pac_tpch_schema.sql");
 
 			// ===== Print statistics =====
@@ -1408,164 +1472,157 @@ int RunSQLStormBenchmark(const string &queries_dir, const string &out_csv, doubl
 			string so_db_path = "stackoverflow_dba_sqlstorm.db";
 			bool so_db_exists = FileExists(so_db_path);
 
-			unique_ptr<DuckDB> so_db;
-			unique_ptr<Connection> so_con;
-
-			auto so_reconnect = [&]() {
-				so_con.reset();
-				so_db.reset();
-				so_db = make_uniq<DuckDB>(so_db_path.c_str());
-				so_con = make_uniq<Connection>(*so_db);
-				auto r1 = so_con->Query("PRAGMA threads=16");
-				if (r1->HasError()) {
-					Log("PRAGMA threads error: " + r1->GetError());
-				}
-				auto r2 = so_con->Query("PRAGMA memory_limit='16GB'");
-				if (r2->HasError()) {
-					Log("PRAGMA memory_limit error: " + r2->GetError());
-				}
-				auto r_temp = so_con->Query("SET temp_directory='/tmp/duckdb_temp'");
-				if (r_temp->HasError()) {
-					Log("SET temp_directory error: " + r_temp->GetError());
-				}
-				auto r3 = so_con->Query("INSTALL icu");
-				if (r3->HasError()) {
-					Log("INSTALL icu error: " + r3->GetError());
-				}
-				auto r4 = so_con->Query("LOAD icu");
-				if (r4->HasError()) {
-					Log("LOAD icu error: " + r4->GetError());
-				}
-				auto r = so_con->Query("LOAD pac");
+			// Setup: create DB and load data if needed, then close DB so child can open it
+			{
+				DuckDB so_db(so_db_path);
+				Connection so_con(so_db);
+				so_con.Query("PRAGMA threads=16");
+				so_con.Query("PRAGMA memory_limit='16GB'");
+				so_con.Query("SET temp_directory='/tmp/duckdb_temp'");
+				so_con.Query("INSTALL icu");
+				so_con.Query("LOAD icu");
+				auto r = so_con.Query("LOAD pac");
 				if (r->HasError()) {
 					throw std::runtime_error("Failed to load PAC extension: " + r->GetError());
 				}
-			};
 
-			so_reconnect();
-
-			// Set up the database if it doesn't exist
-			if (!so_db_exists) {
-				// Look for data in benchmark/sqlstorm/data/stackoverflow_dba/ first,
-				// then fall back to stackoverflow_dba/ in CWD
-				string data_dir;
-				string sqlstorm_data_dir = sqlstorm_dir + "/data/stackoverflow_dba";
-				if (FileExists(sqlstorm_data_dir + "/Users.csv")) {
-					data_dir = sqlstorm_data_dir;
-				} else if (FileExists("stackoverflow_dba/Users.csv")) {
-					data_dir = "stackoverflow_dba";
-				}
-
-				// Download the dataset if CSVs are not present anywhere
-				if (data_dir.empty()) {
-					data_dir = sqlstorm_data_dir;
-					string tarball = sqlstorm_dir + "/data/stackoverflow_dba.tar.gz";
-
-					// Skip download if tarball already exists
-					if (!FileExists(tarball)) {
-						Log("StackOverflow DBA dataset not found, downloading...");
-						string dl_cmd = "wget -q -O '" + tarball +
-						                "' 'https://db.in.tum.de/~schmidt/data/stackoverflow_dba.tar.gz'";
-						int dl_ret = system(dl_cmd.c_str());
-						if (dl_ret != 0) {
-							dl_cmd = "curl -sL -o '" + tarball +
-							         "' 'https://db.in.tum.de/~schmidt/data/stackoverflow_dba.tar.gz'";
-							dl_ret = system(dl_cmd.c_str());
-						}
-						if (dl_ret != 0) {
-							throw std::runtime_error("Failed to download StackOverflow dataset. "
-							                         "Install wget or curl, or manually download "
-							                         "https://db.in.tum.de/~schmidt/data/stackoverflow_dba.tar.gz");
-						}
-						Log("Download complete.");
-					} else {
-						Log("Using existing tarball: " + tarball);
+				if (!so_db_exists) {
+					// Look for data in benchmark/sqlstorm/data/stackoverflow_dba/ first,
+					// then fall back to stackoverflow_dba/ in CWD
+					string data_dir;
+					string sqlstorm_data_dir = sqlstorm_dir + "/data/stackoverflow_dba";
+					if (FileExists(sqlstorm_data_dir + "/Users.csv")) {
+						data_dir = sqlstorm_data_dir;
+					} else if (FileExists("stackoverflow_dba/Users.csv")) {
+						data_dir = "stackoverflow_dba";
 					}
 
-					// Extract if CSVs still not present
-					if (!FileExists(data_dir + "/Users.csv")) {
-						Log("Extracting " + tarball + " ...");
-						string extract_cmd = "tar -xzf '" + tarball + "' -C '" + sqlstorm_dir + "/data/'";
-						int ext_ret = system(extract_cmd.c_str());
-						if (ext_ret != 0) {
-							throw std::runtime_error("Failed to extract StackOverflow dataset tarball");
+					// Download the dataset if CSVs are not present anywhere
+					if (data_dir.empty()) {
+						data_dir = sqlstorm_data_dir;
+						string tarball = sqlstorm_dir + "/data/stackoverflow_dba.tar.gz";
+
+						// Skip download if tarball already exists
+						if (!FileExists(tarball)) {
+							Log("StackOverflow DBA dataset not found, downloading...");
+							string dl_cmd = "wget -q -O '" + tarball +
+							                "' 'https://db.in.tum.de/~schmidt/data/stackoverflow_dba.tar.gz'";
+							int dl_ret = system(dl_cmd.c_str());
+							if (dl_ret != 0) {
+								dl_cmd = "curl -sL -o '" + tarball +
+								         "' 'https://db.in.tum.de/~schmidt/data/stackoverflow_dba.tar.gz'";
+								dl_ret = system(dl_cmd.c_str());
+							}
+							if (dl_ret != 0) {
+								throw std::runtime_error("Failed to download StackOverflow dataset. "
+								                         "Install wget or curl, or manually download "
+								                         "https://db.in.tum.de/~schmidt/data/stackoverflow_dba.tar.gz");
+							}
+							Log("Download complete.");
+						} else {
+							Log("Using existing tarball: " + tarball);
 						}
+
+						// Extract if CSVs still not present
 						if (!FileExists(data_dir + "/Users.csv")) {
-							throw std::runtime_error("StackOverflow CSV files not found after extraction. "
-							                         "Expected at: " + data_dir);
+							Log("Extracting " + tarball + " ...");
+							string extract_cmd = "tar -xzf '" + tarball + "' -C '" + sqlstorm_dir + "/data/'";
+							int ext_ret = system(extract_cmd.c_str());
+							if (ext_ret != 0) {
+								throw std::runtime_error("Failed to extract StackOverflow dataset tarball");
+							}
+							if (!FileExists(data_dir + "/Users.csv")) {
+								throw std::runtime_error("StackOverflow CSV files not found after extraction. "
+								                         "Expected at: " + data_dir);
+							}
+							Log("Dataset extracted to: " + data_dir);
 						}
-						Log("Dataset extracted to: " + data_dir);
+					} else {
+						Log("Using existing StackOverflow data at: " + data_dir);
+					}
+
+					// Create schema and load data; remove the db file on failure
+					try {
+						string schema_file = FindBenchmarkFile("schema_nofk.sql",
+						    {"benchmark/sqlstorm/SQLStorm/v1.0/stackoverflow",
+						     "SQLStorm/v1.0/stackoverflow"});
+						if (schema_file.empty()) {
+							throw std::runtime_error("Cannot find stackoverflow schema_nofk.sql");
+						}
+						Log("Creating StackOverflow schema from: " + schema_file);
+						ExecuteSQLFile(so_con, schema_file);
+						Log("Schema created successfully");
+
+						// Load data from CSVs
+						Log("Loading StackOverflow data from CSVs...");
+						auto t0 = std::chrono::steady_clock::now();
+
+						vector<string> tables = {
+						    "PostHistoryTypes", "LinkTypes", "PostTypes", "CloseReasonTypes",
+						    "VoteTypes", "Users", "Badges", "Posts", "Comments",
+						    "PostHistory", "PostLinks", "Tags", "Votes"
+						};
+						for (auto &tbl : tables) {
+							string csv_path = data_dir + "/" + tbl + ".csv";
+							if (!FileExists(csv_path)) {
+								Log("WARNING: CSV not found for table " + tbl + ": " + csv_path);
+								continue;
+							}
+							string copy_sql = "COPY " + tbl + " FROM '" + csv_path +
+							                  "' WITH (DELIMITER ',', FORMAT csv, NULL '')";
+							auto r2 = so_con.Query(copy_sql);
+							if (r2->HasError()) {
+								Log("WARNING: COPY failed for " + tbl + ": " + r2->GetError());
+							}
+						}
+
+						auto t1 = std::chrono::steady_clock::now();
+						double load_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+						Log("StackOverflow data loaded in " + FormatNumber(load_ms) + " ms");
+					} catch (...) {
+						Log("ERROR: Failed to set up StackOverflow database, removing " + so_db_path);
+						// DB will be closed when scope exits; remove file after
+						throw;
 					}
 				} else {
-					Log("Using existing StackOverflow data at: " + data_dir);
+					Log("Using existing database: " + so_db_path);
 				}
 
-				// Create schema and load data; remove the db file on failure
-				try {
-					string schema_file = FindBenchmarkFile("schema_nofk.sql",
-					    {"benchmark/sqlstorm/SQLStorm/v1.0/stackoverflow",
-					     "SQLStorm/v1.0/stackoverflow"});
-					if (schema_file.empty()) {
-						throw std::runtime_error("Cannot find stackoverflow schema_nofk.sql");
-					}
-					Log("Creating StackOverflow schema from: " + schema_file);
-					ExecuteSQLFile(*so_con, schema_file);
-					Log("Schema created successfully");
-
-					// Load data from CSVs
-					Log("Loading StackOverflow data from CSVs...");
-					auto t0 = std::chrono::steady_clock::now();
-
-					vector<string> tables = {
-					    "PostHistoryTypes", "LinkTypes", "PostTypes", "CloseReasonTypes",
-					    "VoteTypes", "Users", "Badges", "Posts", "Comments",
-					    "PostHistory", "PostLinks", "Tags", "Votes"
-					};
-					for (auto &tbl : tables) {
-						string csv_path = data_dir + "/" + tbl + ".csv";
-						if (!FileExists(csv_path)) {
-							Log("WARNING: CSV not found for table " + tbl + ": " + csv_path);
-							continue;
-						}
-						string copy_sql = "COPY " + tbl + " FROM '" + csv_path +
-						                  "' WITH (DELIMITER ',', FORMAT csv, NULL '')";
-						auto r = so_con->Query(copy_sql);
-						if (r->HasError()) {
-							Log("WARNING: COPY failed for " + tbl + ": " + r->GetError());
-						}
-					}
-
-					auto t1 = std::chrono::steady_clock::now();
-					double load_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-					Log("StackOverflow data loaded in " + FormatNumber(load_ms) + " ms");
-				} catch (...) {
-					Log("ERROR: Failed to set up StackOverflow database, removing " + so_db_path);
-					so_con.reset();
-					so_db.reset();
-					std::remove(so_db_path.c_str());
-					throw;
+				// Clear PAC metadata for baseline pass
+				auto r_clear = so_con.Query("PRAGMA clear_pac_metadata;");
+				if (r_clear->HasError()) {
+					Log("clear_pac_metadata error: " + r_clear->GetError());
 				}
-			} else {
-				Log("Using existing database: " + so_db_path);
+				so_con.Query("CHECKPOINT");
+				Log("Cleared PAC metadata for baseline pass");
 			}
+			// DB is now closed — child process will open it
 
 			// ===== PASS 1: baseline (no PAC) =====
-			auto r_clear = so_con->Query("PRAGMA clear_pac_metadata;");
-			if (r_clear->HasError()) {
-				Log("clear_pac_metadata error: " + r_clear->GetError());
-			}
-			Log("Cleared PAC metadata for baseline pass");
-
 			PassStats so_baseline_stats;
-			auto so_baseline_summaries = RunPass("DuckDB baseline", so_query_files, so_db, so_con,
+			auto so_baseline_summaries = RunPass("DuckDB baseline", so_query_files,
 			                                     so_db_path, timeout_s, so_baseline_stats);
 
-			// ===== Load PAC schema =====
-			LoadPACSchema(*so_con, "pac_stackoverflow_schema.sql");
+			// Setup for PAC pass: load schema then close DB
+			{
+				DuckDB so_db(so_db_path);
+				Connection so_con(so_db);
+				so_con.Query("PRAGMA threads=16");
+				so_con.Query("PRAGMA memory_limit='16GB'");
+				so_con.Query("SET temp_directory='/tmp/duckdb_temp'");
+				so_con.Query("INSTALL icu");
+				so_con.Query("LOAD icu");
+				auto r = so_con.Query("LOAD pac");
+				if (r->HasError()) {
+					throw std::runtime_error("Failed to load PAC extension: " + r->GetError());
+				}
+				LoadPACSchema(so_con, "pac_stackoverflow_schema.sql");
+				so_con.Query("CHECKPOINT");
+			}
 
 			// ===== PASS 2: PAC =====
 			PassStats so_pac_stats;
-			auto so_pac_summaries = RunPass("SO-PAC", so_query_files, so_db, so_con,
+			auto so_pac_summaries = RunPass("SO-PAC", so_query_files,
 			                                so_db_path, timeout_s, so_pac_stats, true,
 			                                "pac_stackoverflow_schema.sql");
 
@@ -1671,6 +1728,9 @@ static void PrintUsage() {
 }
 
 int main(int argc, char **argv) {
+	// Ignore SIGPIPE so writing to a dead child's pipe returns EPIPE instead of killing us
+	signal(SIGPIPE, SIG_IGN);
+
 	std::string queries_dir;
 	std::string out_csv;
 	double timeout_s = 0.1;
