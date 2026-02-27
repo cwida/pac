@@ -610,6 +610,7 @@ static vector<QuerySummary> RunPass(const string &label, vector<string> &query_f
                                     const string &pac_schema = "") {
 	int total = static_cast<int>(query_files.size());
 	int log_interval = std::max(1, total / 10);
+	bool just_reconnected = false;
 	vector<QuerySummary> summaries;
 	summaries.reserve(total);
 	// Track previous query name+state for crash attribution
@@ -722,6 +723,7 @@ static vector<QuerySummary> RunPass(const string &label, vector<string> &query_f
 				}
 				Log("  reconnecting...");
 				reconnect();
+				just_reconnected = true;
 				qr = RunQuery(*worker, *con, name, sql, timeout_s);
 				if (qr.state == "success") {
 					stats.success++;
@@ -748,6 +750,7 @@ static vector<QuerySummary> RunPass(const string &label, vector<string> &query_f
 					Log("Database crash on query " + name + ": " + qr.error);
 					Log("  reconnecting...");
 					reconnect();
+					just_reconnected = true;
 				} else {
 					stats.failed++;
 				}
@@ -756,6 +759,7 @@ static vector<QuerySummary> RunPass(const string &label, vector<string> &query_f
 				Log("Database crash on query " + name + ": " + qr.error);
 				Log("  reconnecting...");
 				reconnect();
+				just_reconnected = true;
 			}
 		} else {
 			stats.failed++;
@@ -785,8 +789,21 @@ static vector<QuerySummary> RunPass(const string &label, vector<string> &query_f
 		if (qr.state == "timeout") {
 			worker.reset();
 			reconnect();
+			just_reconnected = true;
 			worker = make_uniq<QueryWorker>();
 		}
+
+		// Periodically force checkpoint to reclaim DuckDB memory
+		// (skip right after reconnect — PAC schema load leaves an active transaction)
+		if ((i + 1) % 100 == 0 && !just_reconnected) {
+			try {
+				auto r = con->Query("FORCE CHECKPOINT");
+				if (r->HasError()) {
+					Log("FORCE CHECKPOINT error: " + r->GetError());
+				}
+			} catch (...) {}
+		}
+		just_reconnected = false;
 
 	}
 
