@@ -2,7 +2,10 @@
 // Created by ila on 02/12/26.
 //
 
-// Implement the ClickHouse Hits (ClickBench) benchmark runner.
+// ClickBench benchmark runner with fork-based process isolation.
+// The parent never opens DuckDB for benchmarking; a child process handles
+// all DB access. If the child is killed (OOM, crash), the parent survives
+// and spawns a new one.
 
 #include "pac_clickhouse_benchmark.hpp"
 
@@ -21,14 +24,16 @@
 #include <set>
 #include <map>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <stdexcept>
 #include <ctime>
 #include <algorithm>
 #include <iomanip>
-#include <thread>
 #include <unistd.h>
 #include <limits.h>
 #include <regex>
+#include <poll.h>
+#include <signal.h>
 
 namespace duckdb {
 
@@ -40,7 +45,6 @@ static string Timestamp() {
     return string(buf);
 }
 
-// Format a double without trailing zeros
 static string FormatNumber(double v) {
     std::ostringstream oss;
     oss << std::setprecision(5) << std::defaultfloat << v;
@@ -72,18 +76,15 @@ static string ReadFileToString(const string &path) {
     return ss.str();
 }
 
-// Split a string by newlines, returning non-empty lines
 static vector<string> SplitLines(const string &content) {
     vector<string> lines;
     std::istringstream iss(content);
     string line;
     while (std::getline(iss, line)) {
-        // Trim whitespace
         size_t start = line.find_first_not_of(" \t\r\n");
         size_t end = line.find_last_not_of(" \t\r\n");
         if (start != string::npos && end != string::npos) {
             string trimmed = line.substr(start, end - start + 1);
-            // Skip empty lines and comments
             if (!trimmed.empty() && trimmed[0] != '-' && trimmed.substr(0, 2) != "--") {
                 lines.push_back(trimmed);
             }
@@ -92,7 +93,6 @@ static vector<string> SplitLines(const string &content) {
     return lines;
 }
 
-// Execute a shell command and return exit code
 static int ExecuteCommand(const string &cmd) {
     Log(string("Executing: ") + cmd);
     int ret = system(cmd.c_str());
@@ -105,7 +105,6 @@ static int ExecuteCommand(const string &cmd) {
     return ret;
 }
 
-// Find a file in common relative locations
 static string FindFile(const string &filename) {
     vector<string> candidates = {
         filename,
@@ -123,9 +122,8 @@ static string FindFile(const string &filename) {
         }
     }
 
-    // Try relative to executable
     char exe_path[PATH_MAX];
-    ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path)-1);
+    ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
     if (len != -1) {
         exe_path[len] = '\0';
         string dir = string(exe_path);
@@ -152,7 +150,36 @@ static string FindFile(const string &filename) {
     return "";
 }
 
-// Structure to hold query result statistics
+// =====================================================================
+// IPC helpers
+// =====================================================================
+
+static bool WriteAllBytes(int fd, const void *buf, size_t n) {
+    const char *p = static_cast<const char *>(buf);
+    while (n > 0) {
+        ssize_t w = write(fd, p, n);
+        if (w <= 0) return false;
+        p += w;
+        n -= static_cast<size_t>(w);
+    }
+    return true;
+}
+
+static bool ReadAllBytes(int fd, void *buf, size_t n) {
+    char *p = static_cast<char *>(buf);
+    while (n > 0) {
+        ssize_t r = read(fd, p, n);
+        if (r <= 0) return false;
+        p += r;
+        n -= static_cast<size_t>(r);
+    }
+    return true;
+}
+
+// =====================================================================
+// Result structure
+// =====================================================================
+
 struct BenchmarkQueryResult {
     int query_num;
     string mode;  // "baseline" or "PAC"
@@ -162,28 +189,353 @@ struct BenchmarkQueryResult {
     string error_msg;
 };
 
-int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, const string &out_csv, bool micro) {
+// =====================================================================
+// Child worker process
+// =====================================================================
+// Protocol (parent->child):
+//   [uint8_t cmd]
+//     cmd=0: stop
+//     cmd=1: run query — [uint32_t sql_len][sql_bytes]
+//     cmd=2: setup PAC — [uint32_t count][for each: uint32_t len, bytes]
+//     cmd=3: unset PAC
+// Protocol (child->parent) for cmd=1:
+//   [double time_ms][uint8_t ok][uint32_t err_len][err_bytes]
+
+static constexpr uint8_t CMD_STOP = 0;
+static constexpr uint8_t CMD_QUERY = 1;
+static constexpr uint8_t CMD_SETUP_PAC = 2;
+static constexpr uint8_t CMD_UNSET_PAC = 3;
+
+[[noreturn]] static void ChildWorkerMain(int read_fd, int write_fd,
+                                          const string &db_path) {
     try {
-        Log(string("Starting ClickBench benchmark"));
+        DuckDB db(db_path);
+        Connection con(db);
+        auto r = con.Query("LOAD pac");
+        if (r->HasError()) {
+            _exit(2);
+        }
+
+        while (true) {
+            uint8_t cmd = 0;
+            if (!ReadAllBytes(read_fd, &cmd, sizeof(cmd))) break;
+
+            if (cmd == CMD_STOP) {
+                break;
+            } else if (cmd == CMD_UNSET_PAC) {
+                con.Query("ALTER TABLE hits UNSET PU;");
+            } else if (cmd == CMD_SETUP_PAC) {
+                uint32_t count = 0;
+                if (!ReadAllBytes(read_fd, &count, sizeof(count))) break;
+                for (uint32_t i = 0; i < count; i++) {
+                    uint32_t len = 0;
+                    if (!ReadAllBytes(read_fd, &len, sizeof(len))) goto done;
+                    string stmt(len, '\0');
+                    if (!ReadAllBytes(read_fd, &stmt[0], len)) goto done;
+                    con.Query(stmt);
+                }
+            } else if (cmd == CMD_QUERY) {
+                uint32_t sql_len = 0;
+                if (!ReadAllBytes(read_fd, &sql_len, sizeof(sql_len))) break;
+                string sql(sql_len, '\0');
+                if (!ReadAllBytes(read_fd, &sql[0], sql_len)) break;
+
+                auto start = std::chrono::steady_clock::now();
+                unique_ptr<MaterializedQueryResult> result;
+                std::exception_ptr exc;
+                try {
+                    result = con.Query(sql);
+                    if (result && !result->HasError()) {
+                        while (result->Fetch()) {}
+                    }
+                } catch (...) {
+                    exc = std::current_exception();
+                }
+                auto end = std::chrono::steady_clock::now();
+                double time_ms = std::chrono::duration<double, std::milli>(end - start).count();
+
+                string error;
+                if (exc) {
+                    try { std::rethrow_exception(exc); }
+                    catch (std::exception &e) { error = e.what(); }
+                    catch (...) { error = "unknown exception"; }
+                } else if (result && result->HasError()) {
+                    error = result->GetError();
+                }
+
+                if (!error.empty()) {
+                    auto sp = error.find("\n\nStack Trace");
+                    if (sp != string::npos) error = error.substr(0, sp);
+                    if (error.size() > 300) error = error.substr(0, 300);
+                }
+                result.reset();
+
+                uint8_t ok = error.empty() ? 1 : 0;
+                uint32_t err_len = static_cast<uint32_t>(error.size());
+                WriteAllBytes(write_fd, &time_ms, sizeof(time_ms));
+                WriteAllBytes(write_fd, &ok, sizeof(ok));
+                WriteAllBytes(write_fd, &err_len, sizeof(err_len));
+                if (err_len > 0) WriteAllBytes(write_fd, error.data(), err_len);
+
+                // If DB is invalidated, child must exit
+                if (!error.empty() &&
+                    (error.find("FATAL") != string::npos ||
+                     error.find("database has been invalidated") != string::npos)) {
+                    _exit(1);
+                }
+            }
+        }
+    } catch (...) {
+        _exit(2);
+    }
+done:
+    _exit(0);
+}
+
+// =====================================================================
+// Fork-based worker
+// =====================================================================
+
+struct ForkWorker {
+    pid_t child_pid = -1;
+    int to_child_fd = -1;
+    int from_child_fd = -1;
+    string db_path;
+
+    double result_time_ms = 0;
+    bool result_ok = false;
+    string result_error;
+
+    enum SubmitResult { SR_OK, SR_TIMEOUT, SR_CHILD_DIED };
+
+    void Start() {
+        Stop();
+        int to_child[2], from_child[2];
+        if (pipe(to_child) != 0 || pipe(from_child) != 0) {
+            throw std::runtime_error("pipe() failed");
+        }
+
+        child_pid = fork();
+        if (child_pid < 0) {
+            close(to_child[0]); close(to_child[1]);
+            close(from_child[0]); close(from_child[1]);
+            throw std::runtime_error("fork() failed");
+        }
+
+        if (child_pid == 0) {
+            close(to_child[1]);
+            close(from_child[0]);
+            ChildWorkerMain(to_child[0], from_child[1], db_path);
+            _exit(0);
+        }
+
+        close(to_child[0]);
+        close(from_child[1]);
+        to_child_fd = to_child[1];
+        from_child_fd = from_child[0];
+    }
+
+    void Stop() {
+        if (child_pid > 0) {
+            uint8_t cmd = CMD_STOP;
+            WriteAllBytes(to_child_fd, &cmd, sizeof(cmd));
+
+            int status;
+            for (int i = 0; i < 4; i++) {
+                int w = waitpid(child_pid, &status, WNOHANG);
+                if (w != 0) break;
+                usleep(50000);
+            }
+            int w = waitpid(child_pid, &status, WNOHANG);
+            if (w == 0) {
+                kill(child_pid, SIGKILL);
+                waitpid(child_pid, &status, 0);
+            }
+            child_pid = -1;
+        }
+        if (to_child_fd >= 0) { close(to_child_fd); to_child_fd = -1; }
+        if (from_child_fd >= 0) { close(from_child_fd); from_child_fd = -1; }
+    }
+
+    size_t GetChildRSS() {
+        if (child_pid <= 0) return 0;
+        char path[64];
+        snprintf(path, sizeof(path), "/proc/%d/statm", child_pid);
+        FILE *f = fopen(path, "r");
+        if (!f) return 0;
+        long pages = 0, rss = 0;
+        if (fscanf(f, "%ld %ld", &pages, &rss) != 2) { rss = 0; }
+        fclose(f);
+        return static_cast<size_t>(rss) * static_cast<size_t>(sysconf(_SC_PAGESIZE));
+    }
+
+    // Send a "setup PAC" command with the given statements
+    bool SendSetupPAC(const vector<string> &stmts) {
+        if (child_pid <= 0) return false;
+        uint8_t cmd = CMD_SETUP_PAC;
+        if (!WriteAllBytes(to_child_fd, &cmd, sizeof(cmd))) return false;
+        uint32_t count = static_cast<uint32_t>(stmts.size());
+        if (!WriteAllBytes(to_child_fd, &count, sizeof(count))) return false;
+        for (auto &s : stmts) {
+            uint32_t len = static_cast<uint32_t>(s.size());
+            if (!WriteAllBytes(to_child_fd, &len, sizeof(len))) return false;
+            if (!WriteAllBytes(to_child_fd, s.data(), len)) return false;
+        }
+        return true;
+    }
+
+    // Send an "unset PAC" command
+    bool SendUnsetPAC() {
+        if (child_pid <= 0) return false;
+        uint8_t cmd = CMD_UNSET_PAC;
+        return WriteAllBytes(to_child_fd, &cmd, sizeof(cmd));
+    }
+
+    // Submit a query and wait for the result with timeout
+    SubmitResult SubmitQuery(const string &sql, double timeout_s) {
+        result_time_ms = 0;
+        result_ok = false;
+        result_error.clear();
+
+        if (child_pid <= 0) return SR_CHILD_DIED;
+
+        // Send query command
+        uint8_t cmd = CMD_QUERY;
+        uint32_t sql_len = static_cast<uint32_t>(sql.size());
+        if (!WriteAllBytes(to_child_fd, &cmd, sizeof(cmd)) ||
+            !WriteAllBytes(to_child_fd, &sql_len, sizeof(sql_len)) ||
+            !WriteAllBytes(to_child_fd, sql.data(), sql_len)) {
+            int status;
+            waitpid(child_pid, &status, 0);
+            child_pid = -1;
+            result_error = "child process died (write failed)";
+            return SR_CHILD_DIED;
+        }
+
+        // Wait for result with timeout + memory monitoring
+        auto deadline = std::chrono::steady_clock::now() +
+            std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                std::chrono::duration<double>(timeout_s));
+
+        while (true) {
+            auto now = std::chrono::steady_clock::now();
+            if (now >= deadline) {
+                kill(child_pid, SIGKILL);
+                waitpid(child_pid, nullptr, 0);
+                child_pid = -1;
+                result_error = "timeout";
+                return SR_TIMEOUT;
+            }
+
+            int remaining_ms = static_cast<int>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count());
+            int poll_ms = std::min(remaining_ms, 500);
+
+            struct pollfd pfd;
+            pfd.fd = from_child_fd;
+            pfd.events = POLLIN;
+            pfd.revents = 0;
+
+            int ret = poll(&pfd, 1, poll_ms);
+
+            if (ret > 0 && (pfd.revents & POLLIN)) {
+                // Read result
+                uint8_t ok_byte = 0;
+                uint32_t err_len = 0;
+                if (!ReadAllBytes(from_child_fd, &result_time_ms, sizeof(result_time_ms)) ||
+                    !ReadAllBytes(from_child_fd, &ok_byte, sizeof(ok_byte)) ||
+                    !ReadAllBytes(from_child_fd, &err_len, sizeof(err_len))) {
+                    int status;
+                    waitpid(child_pid, &status, 0);
+                    child_pid = -1;
+                    result_error = "child process died (read failed)";
+                    return SR_CHILD_DIED;
+                }
+                result_ok = (ok_byte != 0);
+                if (err_len > 0) {
+                    result_error.resize(err_len);
+                    if (!ReadAllBytes(from_child_fd, &result_error[0], err_len)) {
+                        int status;
+                        waitpid(child_pid, &status, 0);
+                        child_pid = -1;
+                        result_error = "child process died (read failed)";
+                        return SR_CHILD_DIED;
+                    }
+                }
+
+                // If child reported fatal error, it will exit
+                if (!result_error.empty() &&
+                    (result_error.find("FATAL") != string::npos ||
+                     result_error.find("database has been invalidated") != string::npos)) {
+                    int status;
+                    waitpid(child_pid, &status, 0);
+                    child_pid = -1;
+                    return SR_CHILD_DIED;
+                }
+
+                return SR_OK;
+            }
+
+            if (ret > 0 && (pfd.revents & (POLLHUP | POLLERR))) {
+                int status;
+                waitpid(child_pid, &status, 0);
+                child_pid = -1;
+                result_error = "child process died unexpectedly";
+                return SR_CHILD_DIED;
+            }
+
+            // Check if child still alive
+            {
+                int status;
+                int w = waitpid(child_pid, &status, WNOHANG);
+                if (w > 0) {
+                    child_pid = -1;
+                    result_error = "child process died unexpectedly";
+                    return SR_CHILD_DIED;
+                }
+            }
+
+            // Check child memory usage (kill if > 25GB)
+            size_t rss = GetChildRSS();
+            if (rss > 25ULL * 1024 * 1024 * 1024) {
+                kill(child_pid, SIGKILL);
+                waitpid(child_pid, nullptr, 0);
+                child_pid = -1;
+                result_error = "memory limit exceeded (RSS > 25GB)";
+                return SR_TIMEOUT;
+            }
+        }
+    }
+
+    ~ForkWorker() { Stop(); }
+};
+
+// =====================================================================
+// Main benchmark logic
+// =====================================================================
+
+int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, const string &out_csv, bool micro) {
+    // Ignore SIGPIPE so writing to a dead child's pipe returns EPIPE instead of killing us
+    signal(SIGPIPE, SIG_IGN);
+
+    try {
+        Log(string("Starting ClickBench benchmark (fork-based)"));
         Log(string("micro flag: ") + (micro ? string("true") : string("false")));
 
-        // Determine working directory for dataset
         char cwd[PATH_MAX];
         if (!getcwd(cwd, sizeof(cwd))) {
             throw std::runtime_error("Failed to get current working directory");
         }
         string work_dir = string(cwd);
 
-        // Dataset path - use parquet format
+        // Dataset path
         string parquet_path = work_dir + "/hits.parquet";
 
-        // Check if we need to download the dataset
         if (!FileExists(parquet_path)) {
             Log("Downloading ClickHouse hits dataset (parquet format)...");
             string download_cmd = "wget -O \"" + parquet_path + "\" https://datasets.clickhouse.com/hits_compatible/hits.parquet";
             int ret = ExecuteCommand(download_cmd);
             if (ret != 0) {
-                // Try curl as fallback
                 Log("wget failed, trying curl...");
                 download_cmd = "curl -L -o \"" + parquet_path + "\" https://datasets.clickhouse.com/hits_compatible/hits.parquet";
                 ret = ExecuteCommand(download_cmd);
@@ -196,7 +548,7 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
             Log("hits.parquet already exists, skipping download.");
         }
 
-        // Determine database path - use different db for micro mode
+        // Determine database path
         string db_actual;
         if (!db_path.empty()) {
             db_actual = db_path;
@@ -206,71 +558,56 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
             db_actual = "clickbench.db";
         }
 
-        bool db_exists = FileExists(db_actual);
-
-        if (db_exists) {
-            Log(string("Connecting to existing DuckDB database: ") + db_actual);
-        } else {
-            Log(string("Creating new DuckDB database: ") + db_actual);
-        }
-
-        DuckDB db(db_actual.c_str());
-
         // Find query files
         string create_sql_path = queries_dir + "/create.sql";
         string load_sql_path = queries_dir + "/load.sql";
         string queries_sql_path = queries_dir + "/queries.sql";
         string setup_sql_path = queries_dir + "/setup.sql";
 
-        // Try to find the files
         string create_file = FindFile(create_sql_path);
         string load_file = FindFile(load_sql_path);
         string queries_file = FindFile(queries_sql_path);
         string setup_file = FindFile(setup_sql_path);
 
-        if (create_file.empty()) {
-            throw std::runtime_error("Cannot find create.sql in " + queries_dir);
-        }
-        if (load_file.empty()) {
-            throw std::runtime_error("Cannot find load.sql in " + queries_dir);
-        }
-        if (queries_file.empty()) {
-            throw std::runtime_error("Cannot find queries.sql in " + queries_dir);
-        }
-        if (setup_file.empty()) {
-            throw std::runtime_error("Cannot find setup.sql in " + queries_dir);
-        }
+        if (create_file.empty()) throw std::runtime_error("Cannot find create.sql in " + queries_dir);
+        if (load_file.empty()) throw std::runtime_error("Cannot find load.sql in " + queries_dir);
+        if (queries_file.empty()) throw std::runtime_error("Cannot find queries.sql in " + queries_dir);
+        if (setup_file.empty()) throw std::runtime_error("Cannot find setup.sql in " + queries_dir);
 
         Log(string("Using create.sql: ") + create_file);
         Log(string("Using load.sql: ") + load_file);
         Log(string("Using queries.sql: ") + queries_file);
         Log(string("Using setup.sql: ") + setup_file);
 
-        // Read and parse queries
         string create_sql = ReadFileToString(create_file);
         string load_sql = ReadFileToString(load_file);
         string queries_content = ReadFileToString(queries_file);
         vector<string> setup_stmts = SplitLines(ReadFileToString(setup_file));
 
-        if (create_sql.empty()) {
-            throw std::runtime_error("create.sql is empty or unreadable");
-        }
-        if (load_sql.empty()) {
-            throw std::runtime_error("load.sql is empty or unreadable");
-        }
+        if (create_sql.empty()) throw std::runtime_error("create.sql is empty or unreadable");
+        if (load_sql.empty()) throw std::runtime_error("load.sql is empty or unreadable");
 
         vector<string> queries = SplitLines(queries_content);
-        if (queries.empty()) {
-            throw std::runtime_error("No queries found in queries.sql");
-        }
+        if (queries.empty()) throw std::runtime_error("No queries found in queries.sql");
 
         Log(string("Found ") + std::to_string(queries.size()) + " queries to benchmark");
 
-        // Setup phase - ensure table exists
+        // =====================================================================
+        // Setup phase: create table and load data (in a temporary process)
+        // We open the DB briefly to check/load, then close it so the fork
+        // worker can open it exclusively.
+        // =====================================================================
         {
+            bool db_exists = FileExists(db_actual);
+            if (db_exists) {
+                Log(string("Connecting to existing DuckDB database: ") + db_actual);
+            } else {
+                Log(string("Creating new DuckDB database: ") + db_actual);
+            }
+
+            DuckDB db(db_actual.c_str());
             Connection con(db);
 
-            // Check if table already exists and has data
             auto check_result = con.Query("SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'hits'");
             bool table_exists = false;
             if (check_result && !check_result->HasError()) {
@@ -281,7 +618,6 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
                 }
             }
 
-            // If table exists, check if it has any rows
             bool needs_reload = false;
             if (table_exists) {
                 auto row_count_result = con.Query("SELECT COUNT(*) FROM hits");
@@ -330,9 +666,13 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
                 Log("hits table already exists, skipping creation and loading.");
             }
 
-            // Ensure PAC is disabled initially
+            // Ensure PAC is disabled
             con.Query("ALTER TABLE hits UNSET PU;");
+
+            // Checkpoint to flush WAL before child opens DB
+            con.Query("CHECKPOINT;");
         }
+        // DB is now closed — child process will open it
 
         // Prepare output CSV
         string actual_out = out_csv;
@@ -352,105 +692,121 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
         vector<BenchmarkQueryResult> all_results;
 
         // =====================================================================
-        // Main benchmark loop: For each run, iterate through all queries
-        // doing: q1 cold, q1 warm, q1 pac, q2 cold, q2 warm, q2 pac, ...
-        // Each query uses a single connection for cold/warm/pac sequence
+        // Main benchmark loop using fork worker
         // =====================================================================
-        Log("=== Starting per-run benchmark ===");
+        Log("=== Starting per-run benchmark (fork-based) ===");
 
         int num_runs = 3;
+        double timeout_s = 120.0;  // 2 minute timeout per query
+
         for (int run = 1; run <= num_runs; ++run) {
             Log(string("=== Run ") + std::to_string(run) + " of " + std::to_string(num_runs) + " ===");
 
-            // Single connection for all queries in this run
-            Connection con(db);
+            ForkWorker worker;
+            worker.db_path = db_actual;
+            worker.Start();
 
             for (size_t q = 0; q < queries.size(); ++q) {
                 int qnum = static_cast<int>(q + 1);
                 const string &query = queries[q];
 
-                // ------------------------------------------------------------------
+                // Ensure worker is alive
+                if (worker.child_pid <= 0) {
+                    Log("Restarting child worker...");
+                    worker.Start();
+                }
+
+                // ----------------------------------------------------------
                 // Cold run (baseline, not recorded)
-                // ------------------------------------------------------------------
+                // ----------------------------------------------------------
                 {
-                    con.Query("ALTER TABLE hits UNSET PU;");  // Ensure no PAC
+                    worker.SendUnsetPAC();
                     Log(string("Q") + std::to_string(qnum) + " cold run");
-                    auto r = con.Query(query);
-                    if (r && r->HasError()) {
-                        Log(string("Q") + std::to_string(qnum) + " cold run error: " + r->GetError());
-                    } else {
-                        // Consume result
-                        while (r->Fetch()) {}
+                    auto res = worker.SubmitQuery(query, timeout_s);
+                    if (res == ForkWorker::SR_CHILD_DIED) {
+                        Log(string("Q") + std::to_string(qnum) + " cold run: child died, restarting");
+                        worker.Start();
+                    } else if (res == ForkWorker::SR_TIMEOUT) {
+                        Log(string("Q") + std::to_string(qnum) + " cold run: timeout, restarting");
+                        worker.Start();
                     }
                 }
 
-                // ------------------------------------------------------------------
-                // Warm run (baseline, recorded)
-                // ------------------------------------------------------------------
-                {
-                    con.Query("ALTER TABLE hits UNSET PU;");  // Ensure no PAC
+                // Ensure worker is alive for warm run
+                if (worker.child_pid <= 0) {
+                    worker.Start();
+                }
 
-                    auto t0 = std::chrono::steady_clock::now();
-                    auto r = con.Query(query);
-                    // Consume result
-                    if (r && !r->HasError()) {
-                        while (r->Fetch()) {}
-                    }
-                    auto t1 = std::chrono::steady_clock::now();
-                    double time_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+                // ----------------------------------------------------------
+                // Warm run (baseline, recorded)
+                // ----------------------------------------------------------
+                {
+                    worker.SendUnsetPAC();
+
+                    auto res = worker.SubmitQuery(query, timeout_s);
 
                     BenchmarkQueryResult result;
                     result.query_num = qnum;
                     result.mode = "baseline";
                     result.run = run;
-                    result.time_ms = time_ms;
-                    result.success = !(r && r->HasError());
-                    result.error_msg = (r && r->HasError()) ? r->GetError() : "";
+                    result.time_ms = worker.result_time_ms;
+                    result.success = (res == ForkWorker::SR_OK && worker.result_ok);
+                    result.error_msg = worker.result_error;
 
                     all_results.push_back(result);
 
-                    if (result.success) {
+                    if (res == ForkWorker::SR_CHILD_DIED) {
                         Log(string("Q") + std::to_string(qnum) + " baseline run " + std::to_string(run) +
-                            " time: " + FormatNumber(time_ms) + " ms");
+                            " CRASHED: " + worker.result_error);
+                        worker.Start();
+                    } else if (res == ForkWorker::SR_TIMEOUT) {
+                        Log(string("Q") + std::to_string(qnum) + " baseline run " + std::to_string(run) +
+                            " TIMEOUT: " + worker.result_error);
+                        worker.Start();
+                    } else if (result.success) {
+                        Log(string("Q") + std::to_string(qnum) + " baseline run " + std::to_string(run) +
+                            " time: " + FormatNumber(result.time_ms) + " ms");
                     } else {
                         Log(string("Q") + std::to_string(qnum) + " baseline run " + std::to_string(run) +
                             " ERROR: " + result.error_msg);
                     }
                 }
 
-                // ------------------------------------------------------------------
-                // PAC run (recorded)
-                // ------------------------------------------------------------------
-                {
-                    // Enable PAC for this query
-                    for (auto &stmt : setup_stmts) {
-                        con.Query(stmt);
-                    }
+                // Ensure worker is alive for PAC run
+                if (worker.child_pid <= 0) {
+                    worker.Start();
+                }
 
-                    auto t0 = std::chrono::steady_clock::now();
-                    auto r = con.Query(query);
-                    // Consume result
-                    if (r && !r->HasError()) {
-                        while (r->Fetch()) {}
-                    }
-                    auto t1 = std::chrono::steady_clock::now();
-                    double time_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+                // ----------------------------------------------------------
+                // PAC run (recorded)
+                // ----------------------------------------------------------
+                {
+                    worker.SendSetupPAC(setup_stmts);
+
+                    auto res = worker.SubmitQuery(query, timeout_s);
 
                     BenchmarkQueryResult result;
                     result.query_num = qnum;
                     result.mode = "PAC";
                     result.run = run;
-                    result.time_ms = time_ms;
-                    result.success = !(r && r->HasError());
-                    result.error_msg = (r && r->HasError()) ? r->GetError() : "";
+                    result.time_ms = worker.result_time_ms;
+                    result.success = (res == ForkWorker::SR_OK && worker.result_ok);
+                    result.error_msg = worker.result_error;
 
                     all_results.push_back(result);
 
-                    if (result.success) {
+                    if (res == ForkWorker::SR_CHILD_DIED) {
                         Log(string("Q") + std::to_string(qnum) + " PAC run " + std::to_string(run) +
-                            " time: " + FormatNumber(time_ms) + " ms");
+                            " CRASHED: " + worker.result_error);
+                        worker.Start();
+                    } else if (res == ForkWorker::SR_TIMEOUT) {
+                        Log(string("Q") + std::to_string(qnum) + " PAC run " + std::to_string(run) +
+                            " TIMEOUT: " + worker.result_error);
+                        worker.Start();
+                    } else if (result.success) {
+                        Log(string("Q") + std::to_string(qnum) + " PAC run " + std::to_string(run) +
+                            " time: " + FormatNumber(result.time_ms) + " ms");
                     } else {
-                        // Check if it's a PAC rejection or a crash/other error
                         if (result.error_msg.find("PAC") != string::npos ||
                             result.error_msg.find("privacy") != string::npos ||
                             result.error_msg.find("aggregat") != string::npos ||
@@ -464,12 +820,13 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
                     }
 
                     // Disable PAC after the run
-                    con.Query("ALTER TABLE hits UNSET PU;");
+                    if (worker.child_pid > 0) {
+                        worker.SendUnsetPAC();
+                    }
                 }
             }
 
-            // Force checkpoint to release memory after each run
-            con.Query("CHECKPOINT;");
+            // Worker is stopped automatically when it goes out of scope
         }
 
         // =====================================================================
@@ -499,7 +856,7 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
         }
 
         // =====================================================================
-        // Write CSV after all processing (including unstable query fixes)
+        // Write CSV
         // =====================================================================
         csv << "query,mode,run,time_ms,success,error\n";
         for (const auto &r : all_results) {
@@ -518,23 +875,16 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
 
         int total_queries = static_cast<int>(queries.size());
 
-        int baseline_success = 0;
-        int baseline_failed = 0;
+        int baseline_success = 0, baseline_failed = 0;
         double baseline_total_time = 0;
         for (const auto &r : all_results) {
             if (r.mode == "baseline") {
-                if (r.success) {
-                    baseline_success++;
-                    baseline_total_time += r.time_ms;
-                } else {
-                    baseline_failed++;
-                }
+                if (r.success) { baseline_success++; baseline_total_time += r.time_ms; }
+                else { baseline_failed++; }
             }
         }
 
-        int pac_success = 0;
-        int pac_rejected = 0;
-        int pac_crashed = 0;
+        int pac_success = 0, pac_rejected = 0, pac_crashed = 0;
         double pac_total_time = 0;
         std::map<string, int> error_counts;
 
@@ -560,6 +910,13 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
                                r.error_msg.find("aggregat") != string::npos) {
                         error_category = "other PAC rejection";
                         pac_rejected++;
+                    } else if (r.error_msg.find("timeout") != string::npos ||
+                               r.error_msg.find("memory limit") != string::npos) {
+                        error_category = "timeout/OOM";
+                        pac_crashed++;
+                    } else if (r.error_msg.find("child process died") != string::npos) {
+                        error_category = "child crash (OOM/signal)";
+                        pac_crashed++;
                     } else {
                         error_category = "other error";
                         pac_crashed++;
@@ -609,10 +966,9 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
         }
 
         // =====================================================================
-        // Per-query slowdown (PAC vs baseline, only queries where both succeeded)
+        // Per-query slowdown
         // =====================================================================
         {
-            // Compute mean time per query per mode across runs (successful only)
             std::map<int, double> baseline_total_per_q, pac_total_per_q;
             std::map<int, int> baseline_count_per_q, pac_count_per_q;
             for (const auto &r : all_results) {
@@ -681,7 +1037,6 @@ static void PrintUsageMain() {
 }
 
 int main(int argc, char **argv) {
-    // Parse arguments
     bool micro = false;
     std::string db_path;
     std::string queries_dir = "benchmark/clickbench/clickbench_queries";
