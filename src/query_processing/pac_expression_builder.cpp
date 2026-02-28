@@ -547,8 +547,30 @@ void ModifyAggregatesWithPacFunctions(OptimizerExtensionInput &input, LogicalAgg
 			value_child = old_aggr.children[0]->Copy();
 		}
 
+		// Determine if this is a DISTINCT aggregate that needs a _distinct variant.
+		// _distinct variants are NON-DISTINCT aggregates that handle dedup internally,
+		// avoiding the issue where DuckDB's DISTINCT deduplicates on ALL args (including the hash).
+		bool use_distinct_variant = old_aggr.IsDistinct() && !old_aggr.children.empty();
+
 		// Get PAC function name
-		string pac_function_name = GetPacAggregateFunctionName(function_name);
+		string pac_function_name;
+		if (use_distinct_variant) {
+			if (function_name == "count" || function_name == "count_star")
+				pac_function_name = "pac_count_distinct";
+			else if (function_name == "sum" || function_name == "sum_no_overflow")
+				pac_function_name = "pac_sum_distinct";
+			else if (function_name == "avg")
+				pac_function_name = "pac_avg_distinct";
+			else
+				throw NotImplementedException("PAC: DISTINCT not supported for aggregate: " + function_name);
+		} else {
+			pac_function_name = GetPacAggregateFunctionName(function_name);
+		}
+
+		// For DISTINCT count: wrap value in hash() so _distinct function deduplicates on value_hash
+		if (use_distinct_variant && (function_name == "count" || function_name == "count_star")) {
+			value_child = input.optimizer.BindScalarFunction("hash", std::move(value_child));
+		}
 
 		// Bind the PAC aggregate function
 		ErrorData error;
@@ -571,8 +593,11 @@ void ModifyAggregatesWithPacFunctions(OptimizerExtensionInput &input, LogicalAgg
 		aggr_children.push_back(hash_input_expr->Copy());
 		aggr_children.push_back(std::move(value_child));
 
-		// Pass through the DISTINCT flag from the original aggregate
-		AggregateType agg_type = old_aggr.IsDistinct() ? AggregateType::DISTINCT : AggregateType::NON_DISTINCT;
+		// _distinct variants handle dedup internally -> always NON_DISTINCT
+		// For non-_distinct, pass through the original DISTINCT flag
+		AggregateType agg_type = use_distinct_variant
+		                             ? AggregateType::NON_DISTINCT
+		                             : (old_aggr.IsDistinct() ? AggregateType::DISTINCT : AggregateType::NON_DISTINCT);
 
 		auto new_aggr =
 		    function_binder.BindAggregateFunction(bound_aggr_func, std::move(aggr_children), nullptr, agg_type);

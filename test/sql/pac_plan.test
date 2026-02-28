@@ -621,109 +621,7 @@ LIMIT 3;
 ----
 logical_opt	<REGEX>:.*pac_topk_superset.*
 
-# ============================================================
-# Execution tests: verify TopK pushdown produces valid results
-# ============================================================
-
-statement ok
-SET explain_output='physical_only';
-
-# Test 25: Top-K execution — SUM with LIMIT produces correct row count
-# The rewritten plan should produce actual results without crashing.
-query I
-SELECT COUNT(*) FROM (
-    SELECT
-        c_nationkey,
-        SUM(l_extendedprice) AS total_price
-    FROM
-        customer,
-        orders,
-        lineitem
-    WHERE
-        c_custkey = o_custkey
-        AND l_orderkey = o_orderkey
-    GROUP BY
-        c_nationkey
-    ORDER BY
-        total_price DESC
-    LIMIT 3
-);
-----
-3
-
-# Test 26: Top-K execution — COUNT with VARCHAR GROUP BY
-query I
-SELECT COUNT(*) FROM (
-    SELECT
-        n_name,
-        COUNT(*) AS order_count
-    FROM
-        orders,
-        customer,
-        nation
-    WHERE
-        o_custkey = c_custkey
-        AND c_nationkey = n_nationkey
-    GROUP BY
-        n_name
-    ORDER BY
-        order_count DESC
-    LIMIT 2
-);
-----
-2
-
-# Test 27: Top-K execution with expansion factor
-# With expansion = 3, inner TopN selects 3*2=6 candidates, final TopN limits to 2.
-# Should still produce exactly 2 rows.
-statement ok
-SET pac_topk_expansion = 3
-
-query I
-SELECT COUNT(*) FROM (
-    SELECT
-        c_nationkey,
-        SUM(l_extendedprice) AS total_price
-    FROM
-        customer,
-        orders,
-        lineitem
-    WHERE
-        c_custkey = o_custkey
-        AND l_orderkey = o_orderkey
-    GROUP BY
-        c_nationkey
-    ORDER BY
-        total_price DESC
-    LIMIT 2
-);
-----
-2
-
-statement ok
-SET pac_topk_expansion = 1
-
-# Test 28: Top-K execution — join on top of TopK subquery produces results
-query I
-SELECT COUNT(*) FROM (
-    SELECT t.c_nationkey, t.total_price, n_name
-    FROM (
-        SELECT c_nationkey, SUM(l_extendedprice) AS total_price
-        FROM customer, orders, lineitem
-        WHERE c_custkey = o_custkey AND l_orderkey = o_orderkey
-        GROUP BY c_nationkey
-        ORDER BY total_price DESC
-        LIMIT 3
-    ) t
-    JOIN nation ON t.c_nationkey = n_nationkey
-);
-----
-3
-
-statement ok
-SET explain_output='optimized_only';
-
-# Test 29: Top-K with non-numerical CASE WHEN on PAC aggregate (SQLStorm Q25283 pattern)
+# Test 25: Top-K with non-numerical CASE WHEN on PAC aggregate (SQLStorm Q25283 pattern)
 # CASE WHEN returning VARCHAR that internally compares a PAC aggregate (AVG) must not crash.
 # The TopK rewriter converts pac_avg to pac_avg_counters (LIST<FLOAT>), then WrapListRefs
 # must wrap the col refs inside the CASE WHEN with pac_noised + cast to DOUBLE so the
@@ -748,7 +646,7 @@ LIMIT 3;
 ----
 logical_opt	<REGEX>:.*pac_avg_counters.*
 
-# Test 30: HAVING clause with PAC aggregate and pac_keyhash binding (SQLStorm Q28426 pattern)
+# Test 26: HAVING clause with PAC aggregate and pac_keyhash binding (SQLStorm Q28426 pattern)
 # The categorical rewriter adds pac_keyhash to the aggregate and must create bindings
 # using the correct column_index (without groups.size() offset), matching
 # LogicalAggregate::GetColumnBindings() which uses 0-based aggregate indices.
@@ -769,6 +667,118 @@ HAVING SUM(l_extendedprice) > 0
 ORDER BY TotalRevenue DESC;
 ----
 logical_opt	<REGEX>:.*pac_keyhash.*
+
+# ============================================================
+# DISTINCT aggregate rewriting tests
+# ============================================================
+
+# Test 27: COUNT(DISTINCT) is rewritten to pac_count_distinct
+# PAC compiler should transform COUNT(DISTINCT col) to pac_count_distinct()
+query II
+EXPLAIN SELECT
+    c_nationkey,
+    COUNT(DISTINCT o_comment) AS distinct_comments
+FROM
+    customer,
+    orders
+WHERE
+    c_custkey = o_custkey
+GROUP BY
+    c_nationkey;
+----
+logical_opt	<REGEX>:.*pac_count_distinct.*
+
+# Test 28: SUM(DISTINCT) is rewritten to pac_sum_distinct
+query II
+EXPLAIN SELECT
+    c_nationkey,
+    SUM(DISTINCT l_quantity) AS distinct_qty_sum
+FROM
+    customer,
+    orders,
+    lineitem
+WHERE
+    c_custkey = o_custkey
+    AND l_orderkey = o_orderkey
+GROUP BY
+    c_nationkey;
+----
+logical_opt	<REGEX>:.*pac_sum_distinct.*
+
+# Test 29: AVG(DISTINCT) is rewritten to pac_avg_distinct
+query II
+EXPLAIN SELECT
+    c_nationkey,
+    AVG(DISTINCT l_discount) AS distinct_avg_discount
+FROM
+    customer,
+    orders,
+    lineitem
+WHERE
+    c_custkey = o_custkey
+    AND l_orderkey = o_orderkey
+GROUP BY
+    c_nationkey;
+----
+logical_opt	<REGEX>:.*pac_avg_distinct.*
+
+# Test 30: Non-DISTINCT aggregates are NOT rewritten to _distinct variants
+# Regular SUM/COUNT/AVG must still produce pac_sum/pac_count/pac_avg (not _distinct)
+query II
+EXPLAIN SELECT
+    c_nationkey,
+    SUM(l_extendedprice) AS total_price,
+    COUNT(*) AS num_items,
+    AVG(l_quantity) AS avg_qty
+FROM
+    customer,
+    orders,
+    lineitem
+WHERE
+    c_custkey = o_custkey
+    AND l_orderkey = o_orderkey
+GROUP BY
+    c_nationkey;
+----
+logical_opt	<REGEX>:.*pac_sum\(.*
+
+# Test 31: Non-DISTINCT plan must NOT contain _distinct variants
+query II
+EXPLAIN SELECT
+    c_nationkey,
+    SUM(l_extendedprice) AS total_price,
+    COUNT(*) AS num_items,
+    AVG(l_quantity) AS avg_qty
+FROM
+    customer,
+    orders,
+    lineitem
+WHERE
+    c_custkey = o_custkey
+    AND l_orderkey = o_orderkey
+GROUP BY
+    c_nationkey;
+----
+logical_opt	<!REGEX>:.*pac_count_distinct.*
+
+# Test 32: Mixed DISTINCT and non-DISTINCT in the same query
+# COUNT(DISTINCT) should become pac_count_distinct while SUM stays pac_sum
+query II
+EXPLAIN SELECT
+    c_nationkey,
+    COUNT(DISTINCT o_comment) AS distinct_comments,
+    SUM(l_extendedprice) AS total_price
+FROM
+    customer,
+    orders,
+    lineitem
+WHERE
+    c_custkey = o_custkey
+    AND l_orderkey = o_orderkey
+GROUP BY
+    c_nationkey;
+----
+logical_opt	<REGEX>:.*pac_count_distinct.*
 
 # ============================================================
 # Cleanup

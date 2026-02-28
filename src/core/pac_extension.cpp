@@ -20,6 +20,7 @@
 #include "aggregates/pac_sum.hpp"
 #include "aggregates/pac_avg.hpp"
 #include "aggregates/pac_min_max.hpp"
+#include "aggregates/pac_distinct.hpp"
 #include "categorical/pac_categorical.hpp"
 #include "parser/pac_parser.hpp"
 #include "diff/pac_utility_diff.hpp"
@@ -233,6 +234,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RegisterPacAvgCountersFunctions(loader);
 	RegisterPacCountFunctions(loader);
 	RegisterPacCountCountersFunctions(loader);
+	// Register DISTINCT aggregate variants
+	RegisterPacCountDistinctFunctions(loader);
+	RegisterPacSumDistinctFunctions(loader);
+	RegisterPacAvgDistinctFunctions(loader);
 	// Register pac_min/pac_max aggregate functions
 	RegisterPacMinFunctions(loader);
 	RegisterPacMaxFunctions(loader);
