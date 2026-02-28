@@ -91,7 +91,7 @@ p <- ggplot(data, aes(x = num_ratios, y = rel_error, fill = variant)) +
   scale_fill_manual(values = variant_colors, name = NULL) +
   scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
   labs(
-    x = "Number of Ratio Expressions",
+    x = "Number of Ratio Expressions (N)",
     y = "Relative Error (%)"
   ) +
   theme_bw(base_size = 40, base_family = base_font) +
