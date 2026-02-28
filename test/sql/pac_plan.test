@@ -672,8 +672,8 @@ logical_opt	<REGEX>:.*pac_keyhash.*
 # DISTINCT aggregate rewriting tests
 # ============================================================
 
-# Test 27: COUNT(DISTINCT) is rewritten to pac_count_distinct
-# PAC compiler should transform COUNT(DISTINCT col) to pac_count_distinct()
+# Test 27: COUNT(DISTINCT) uses pre-aggregation with bit_or + pac_count
+# PAC compiler inserts inner GROUP BY with bit_or(hash) for deduplication
 query II
 EXPLAIN SELECT
     c_nationkey,
@@ -686,9 +686,9 @@ WHERE
 GROUP BY
     c_nationkey;
 ----
-logical_opt	<REGEX>:.*pac_count_distinct.*
+logical_opt	<REGEX>:.*bit_or.*
 
-# Test 28: SUM(DISTINCT) is rewritten to pac_sum_distinct
+# Test 28: SUM(DISTINCT) uses pre-aggregation with bit_or + pac_sum
 query II
 EXPLAIN SELECT
     c_nationkey,
@@ -703,9 +703,9 @@ WHERE
 GROUP BY
     c_nationkey;
 ----
-logical_opt	<REGEX>:.*pac_sum_distinct.*
+logical_opt	<REGEX>:.*bit_or.*
 
-# Test 29: AVG(DISTINCT) is rewritten to pac_avg_distinct
+# Test 29: AVG(DISTINCT) uses pre-aggregation with bit_or + pac_avg
 query II
 EXPLAIN SELECT
     c_nationkey,
@@ -720,7 +720,7 @@ WHERE
 GROUP BY
     c_nationkey;
 ----
-logical_opt	<REGEX>:.*pac_avg_distinct.*
+logical_opt	<REGEX>:.*bit_or.*
 
 # Test 30: Non-DISTINCT aggregates are NOT rewritten to _distinct variants
 # Regular SUM/COUNT/AVG must still produce pac_sum/pac_count/pac_avg (not _distinct)

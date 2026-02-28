@@ -402,6 +402,114 @@ static string GetPacAggregateFunctionName(const string &function_name) {
 	return pac_function_name;
 }
 
+// Insert a pre-aggregation step for DISTINCT aggregates.
+// Instead of pac_*_distinct (custom hash map), this leverages DuckDB's native GROUP BY
+// to deduplicate values, then feeds bit_or(hash) results into standard pac_count/pac_sum/pac_avg.
+//
+// Plan transformation for COUNT(DISTINCT col) GROUP BY [g1]:
+//   AGGREGATE [pac_count(combined_hash, 1)] GROUP BY [g1]
+//     AGGREGATE [bit_or(hash)] GROUP BY [g1, col]
+//       <original child>
+static void InsertDistinctPreAggregation(OptimizerExtensionInput &input, LogicalAggregate *agg,
+                                         unique_ptr<Expression> &hash_input_expr,
+                                         unique_ptr<Expression> &distinct_value_expr) {
+	FunctionBinder function_binder(input.context);
+	auto &binder = input.optimizer.binder;
+
+	// 1. Create inner aggregate with new table indices
+	idx_t inner_group_index = binder.GenerateTableIndex();
+	idx_t inner_agg_index = binder.GenerateTableIndex();
+
+	// 2. Bind bit_or aggregate on the hash expression
+	ErrorData error;
+	vector<LogicalType> bit_or_types = {hash_input_expr->return_type};
+	auto &bit_or_entry = Catalog::GetSystemCatalog(input.context)
+	                         .GetEntry<AggregateFunctionCatalogEntry>(input.context, DEFAULT_SCHEMA, "bit_or");
+	auto bit_or_best = function_binder.BindFunction(bit_or_entry.name, bit_or_entry.functions, bit_or_types, error);
+	if (!bit_or_best.IsValid()) {
+		throw InternalException("PAC compiler: failed to bind bit_or for DISTINCT pre-aggregation");
+	}
+	auto bit_or_func = bit_or_entry.functions.GetFunctionByOffset(bit_or_best.GetIndex());
+
+	vector<unique_ptr<Expression>> bit_or_children;
+	bit_or_children.push_back(hash_input_expr->Copy());
+	auto bit_or_expr = function_binder.BindAggregateFunction(bit_or_func, std::move(bit_or_children), nullptr,
+	                                                         AggregateType::NON_DISTINCT);
+
+	// 3. Build the inner aggregate node
+	vector<unique_ptr<Expression>> inner_expressions;
+	inner_expressions.push_back(std::move(bit_or_expr));
+	auto inner_agg_node = make_uniq<LogicalAggregate>(inner_group_index, inner_agg_index, std::move(inner_expressions));
+
+	// Copy outer groups into inner aggregate (passthrough group keys)
+	idx_t num_original_groups = agg->groups.size();
+	for (auto &g : agg->groups) {
+		inner_agg_node->groups.push_back(g->Copy());
+	}
+
+	// Add the distinct value as an additional group key
+	inner_agg_node->groups.push_back(distinct_value_expr->Copy());
+
+	// 4. Steal outer's child → inner's child, then inner → outer's child
+	inner_agg_node->children.push_back(std::move(agg->children[0]));
+	inner_agg_node->ResolveOperatorTypes();
+	agg->children[0] = std::move(inner_agg_node);
+
+	// 5. Remap outer aggregate's groups to reference inner aggregate's group output
+	for (idx_t i = 0; i < num_original_groups; i++) {
+		auto gtype = agg->groups[i]->return_type;
+		agg->groups[i] = make_uniq<BoundColumnRefExpression>(gtype, ColumnBinding(inner_group_index, i));
+	}
+
+	// Inner aggregate output layout:
+	//   groups:     [g1, ..., gN, distinct_col]  at inner_group_index
+	//   aggregates: [bit_or(hash)]               at inner_agg_index
+	ColumnBinding combined_hash_binding(inner_agg_index, 0);
+	ColumnBinding distinct_val_binding(inner_group_index, num_original_groups);
+
+	// 6. Replace each aggregate expression with the corresponding PAC function
+	for (idx_t i = 0; i < agg->expressions.size(); i++) {
+		auto &old_aggr = agg->expressions[i]->Cast<BoundAggregateExpression>();
+		string function_name = old_aggr.function.name;
+		string pac_name = GetPacAggregateFunctionName(function_name);
+
+		auto hash_ref = make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT, combined_hash_binding);
+		unique_ptr<Expression> value_ref;
+		if (function_name == "count" || function_name == "count_star") {
+			value_ref = make_uniq_base<Expression, BoundConstantExpression>(Value::BIGINT(1));
+		} else {
+			// SUM/AVG DISTINCT: value comes from the distinct column (now a group key in inner agg)
+			value_ref = make_uniq<BoundColumnRefExpression>(distinct_value_expr->return_type, distinct_val_binding);
+		}
+
+		// Bind the PAC aggregate
+		vector<LogicalType> pac_types = {hash_ref->return_type, value_ref->return_type};
+		auto &pac_entry = Catalog::GetSystemCatalog(input.context)
+		                      .GetEntry<AggregateFunctionCatalogEntry>(input.context, DEFAULT_SCHEMA, pac_name);
+		ErrorData pac_error;
+		auto pac_best = function_binder.BindFunction(pac_entry.name, pac_entry.functions, pac_types, pac_error);
+		if (!pac_best.IsValid()) {
+			throw InternalException("PAC compiler: failed to bind " + pac_name + " for DISTINCT pre-aggregation");
+		}
+		auto pac_func = pac_entry.functions.GetFunctionByOffset(pac_best.GetIndex());
+
+		vector<unique_ptr<Expression>> pac_children;
+		pac_children.push_back(std::move(hash_ref));
+		pac_children.push_back(std::move(value_ref));
+		auto new_aggr = function_binder.BindAggregateFunction(pac_func, std::move(pac_children), nullptr,
+		                                                      AggregateType::NON_DISTINCT);
+		agg->expressions[i] = std::move(new_aggr);
+	}
+
+	agg->ResolveOperatorTypes();
+
+#if PAC_DEBUG
+	PAC_DEBUG_PRINT("InsertDistinctPreAggregation: Inserted inner GROUP BY aggregate (group_index=" +
+	                std::to_string(inner_group_index) + ", agg_index=" + std::to_string(inner_agg_index) + ") with " +
+	                std::to_string(num_original_groups) + " original groups + distinct value");
+#endif
+}
+
 /**
  * ModifyAggregatesWithPacFunctions: Transforms regular aggregate expressions to PAC aggregate expressions
  *
@@ -507,6 +615,36 @@ void ModifyAggregatesWithPacFunctions(OptimizerExtensionInput &input, LogicalAgg
 		}
 		auto &check_aggr = agg->expressions[i]->Cast<BoundAggregateExpression>();
 		GetPacAggregateFunctionName(check_aggr.function.name); // throws if unsupported
+	}
+
+	// === DISTINCT pre-aggregation optimization ===
+	// When ALL aggregates are DISTINCT on the same column, use DuckDB's native GROUP BY
+	// for deduplication instead of the slower PacFlatMap-based pac_*_distinct functions.
+	// This leverages DuckDB's optimized GroupedAggregateHashTable instead of our custom hash map.
+	{
+		bool has_any_distinct = false;
+		bool has_any_non_distinct = false;
+		bool all_same_col = true;
+		unique_ptr<Expression> common_distinct_value;
+
+		for (idx_t i = 0; i < agg->expressions.size(); i++) {
+			auto &check = agg->expressions[i]->Cast<BoundAggregateExpression>();
+			if (check.IsDistinct() && !check.children.empty()) {
+				has_any_distinct = true;
+				if (!common_distinct_value) {
+					common_distinct_value = check.children[0]->Copy();
+				} else if (check.children[0]->ToString() != common_distinct_value->ToString()) {
+					all_same_col = false;
+				}
+			} else {
+				has_any_non_distinct = true;
+			}
+		}
+
+		if (has_any_distinct && !has_any_non_distinct && all_same_col && common_distinct_value) {
+			InsertDistinctPreAggregation(input, agg, hash_input_expr, common_distinct_value);
+			return;
+		}
 	}
 
 	// Process each aggregate expression
