@@ -3,11 +3,20 @@
 # Adds GROUP BY o_orderkey % NGROUPS to existing queries for amplified noise effect
 #
 # Usage:
-#   bash benchmark/utility_listtransform/run_grouped.sh [database] [duckdb_binary] [runs] [ngroups] [skew_alpha]
+#   bash benchmark/utility_listtransform/run_grouped.sh [database] [duckdb] [runs] [ngroups] [skew_alpha]
 #
-# skew_alpha: Zipf skew parameter for l_extendedprice (0 = no skew, 20 = heavy skew)
-#   The database must already have TPC-H tables loaded.
-#   When skew_alpha > 0, the script applies: l_extendedprice = 900 + 104100 * pow(random(), alpha)
+# Arguments:
+#   database    TPC-H database file (default: tpch_sf1.db). Must have TPC-H tables loaded.
+#   duckdb      Path to DuckDB binary (default: ./build/release/duckdb)
+#   runs        Number of experiment runs (default: 1)
+#   ngroups     Number of GROUP BY buckets via o_orderkey % N (default: 100)
+#   skew_alpha  Zipf skew parameter for l_extendedprice (default: 0 = no skew).
+#               When > 0, copies the database and applies:
+#                 l_extendedprice = 900 + 104100 * pow(random(), alpha)
+#               Recommended value: 20 (heavy skew, median ≈ 900, mean ≈ 5864)
+#
+# Example:
+#   bash benchmark/utility_listtransform/run_grouped.sh tpch_sf1.db ./build/release/duckdb 100 100 20
 
 set -euo pipefail
 
