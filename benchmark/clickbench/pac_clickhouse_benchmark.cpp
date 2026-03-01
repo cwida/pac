@@ -215,6 +215,8 @@ static constexpr uint8_t CMD_UNSET_PAC = 3;
         if (r->HasError()) {
             _exit(2);
         }
+        con.Query("SET memory_limit='60GB'");
+        con.Query("SET temp_directory='" + db_path + ".tmp'");
 
         while (true) {
             uint8_t cmd = 0;
