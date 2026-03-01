@@ -496,16 +496,6 @@ struct ForkWorker {
                     return SR_CHILD_DIED;
                 }
             }
-
-            // Check child memory usage (kill if > 25GB)
-            size_t rss = GetChildRSS();
-            if (rss > 25ULL * 1024 * 1024 * 1024) {
-                kill(child_pid, SIGKILL);
-                waitpid(child_pid, nullptr, 0);
-                child_pid = -1;
-                result_error = "memory limit exceeded (RSS > 25GB)";
-                return SR_TIMEOUT;
-            }
         }
     }
 
