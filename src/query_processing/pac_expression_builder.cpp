@@ -26,6 +26,17 @@
 
 namespace duckdb {
 
+// Ensure projection_ids is populated before adding a new column to a LogicalGet.
+// When projection_ids is empty, DuckDB generates bindings from column_ids.size();
+// we must populate it with existing indices to maintain correct binding generation.
+static void EnsureProjectionIdsPopulated(LogicalGet &get) {
+	if (get.projection_ids.empty()) {
+		for (idx_t i = 0; i < get.GetColumnIds().size(); i++) {
+			get.projection_ids.push_back(i);
+		}
+	}
+}
+
 #if PAC_DEBUG
 // Helper function to find a LogicalGet by table_index in the operator tree
 static LogicalGet *FindLogicalGetByTableIndex(LogicalOperator &op, idx_t table_index) {
@@ -95,14 +106,7 @@ idx_t EnsureProjectedColumn(LogicalGet &g, const string &col_name) {
 		return DConstants::INVALID_INDEX;
 	}
 
-	// IMPORTANT: If projection_ids is empty, DuckDB generates bindings from column_ids.size().
-	// Before we add a new column, we need to populate projection_ids with all existing indices
-	// to maintain the correct binding generation.
-	if (g.projection_ids.empty()) {
-		for (idx_t i = 0; i < g.GetColumnIds().size(); i++) {
-			g.projection_ids.push_back(i);
-		}
-	}
+	EnsureProjectionIdsPopulated(g);
 
 	// Add the column to the LogicalGet
 	g.AddColumnId(logical_idx);
@@ -138,14 +142,7 @@ void AddRowIDColumn(LogicalGet &get) {
 		get.virtual_columns[COLUMN_IDENTIFIER_ROW_ID] = TableColumn("rowid", LogicalTypeId::BIGINT);
 	}
 
-	// IMPORTANT: If projection_ids is empty, DuckDB generates bindings from column_ids.size().
-	// Before we add a new column, we need to populate projection_ids with all existing indices
-	// to maintain the correct binding generation.
-	if (get.projection_ids.empty()) {
-		for (idx_t i = 0; i < get.GetColumnIds().size(); i++) {
-			get.projection_ids.push_back(i);
-		}
-	}
+	EnsureProjectionIdsPopulated(get);
 
 	get.AddColumnId(COLUMN_IDENTIFIER_ROW_ID);
 	get.projection_ids.push_back(get.GetColumnIds().size() - 1);
@@ -968,8 +965,6 @@ static void InsertMultiBranchPreAggregation(OptimizerExtensionInput &input, uniq
  */
 void ModifyAggregatesWithPacFunctions(OptimizerExtensionInput &input, LogicalAggregate *agg,
                                       unique_ptr<Expression> &hash_input_expr, unique_ptr<LogicalOperator> &plan) {
-	FunctionBinder function_binder(input.context);
-
 #if PAC_DEBUG
 	PAC_DEBUG_PRINT("ModifyAggregatesWithPacFunctions: Processing aggregate with " +
 	                std::to_string(agg->expressions.size()) + " expressions");
@@ -1122,34 +1117,7 @@ void ModifyAggregatesWithPacFunctions(OptimizerExtensionInput &input, LogicalAgg
 		}
 
 		// Bind the PAC aggregate function
-		ErrorData error;
-		vector<LogicalType> arg_types;
-		arg_types.push_back(hash_input_expr->return_type);
-		arg_types.push_back(value_child->return_type);
-
-		auto &entry = Catalog::GetSystemCatalog(input.context)
-		                  .GetEntry<AggregateFunctionCatalogEntry>(input.context, DEFAULT_SCHEMA, pac_function_name);
-		auto &aggr_catalog = entry.Cast<AggregateFunctionCatalogEntry>();
-
-		auto best = function_binder.BindFunction(aggr_catalog.name, aggr_catalog.functions, arg_types, error);
-		if (!best.IsValid()) {
-			throw InternalException("PAC compiler: failed to bind pac aggregate for given argument types");
-		}
-		auto bound_aggr_func = aggr_catalog.functions.GetFunctionByOffset(best.GetIndex());
-
-		// Build arguments for this aggregate (copy hash expression for each aggregate)
-		vector<unique_ptr<Expression>> aggr_children;
-		aggr_children.push_back(hash_input_expr->Copy());
-		aggr_children.push_back(std::move(value_child));
-
-		// _distinct variants handle dedup internally -> always NON_DISTINCT
-		// For non-_distinct, pass through the original DISTINCT flag
-		AggregateType agg_type = use_distinct_variant
-		                             ? AggregateType::NON_DISTINCT
-		                             : (old_aggr.IsDistinct() ? AggregateType::DISTINCT : AggregateType::NON_DISTINCT);
-
-		auto new_aggr =
-		    function_binder.BindAggregateFunction(bound_aggr_func, std::move(aggr_children), nullptr, agg_type);
+		auto new_aggr = BindPacAggregate(input, pac_function_name, hash_input_expr->Copy(), std::move(value_child));
 
 #if PAC_DEBUG
 		PAC_DEBUG_PRINT("ModifyAggregatesWithPacFunctions: New PAC aggregate expression: " + new_aggr->ToString());
