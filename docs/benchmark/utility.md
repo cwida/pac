@@ -8,7 +8,7 @@ The utility scripts provide a fast way to exercise the PAC query compiler agains
 
 ### What is `pac_diffcols`?
 
-The `pac_diffcols` setting tells DuckDB which columns to use for PAC differential privacy tracking. The format is:
+The `pac_diffcols` setting tells DuckDB which columns to use for PAC privacy tracking. The format is:
 
 ```
 'N:filename.csv'

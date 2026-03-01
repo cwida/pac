@@ -1,6 +1,6 @@
 # PAC — DuckDB Privacy-Aware Aggregation Extension
 
-PAC (Privacy-Aware-Computed) is a DuckDB extension that enforces privacy rules on aggregation queries over designated tables ("PAC tables"). It provides differential privacy guarantees by transforming standard SQL aggregates into privacy-preserving versions.
+PAC (Privacy-Aware-Computed) is a DuckDB extension that enforces privacy rules on aggregation queries over designated tables ("PAC tables"). It provides PAC privacy guarantees by transforming standard SQL aggregates into privacy-preserving versions.
 
 ## What PAC Does
 
