@@ -762,7 +762,8 @@ GROUP BY
 logical_opt	<!REGEX>:.*pac_count_distinct.*
 
 # Test 32: Mixed DISTINCT and non-DISTINCT in the same query
-# COUNT(DISTINCT) should become pac_count_distinct while SUM stays pac_sum
+# Multi-branch pre-aggregation: DISTINCT branch uses bit_or + pac_count,
+# non-DISTINCT branch uses pac_sum, joined via COMPARISON_JOIN
 query II
 EXPLAIN SELECT
     c_nationkey,
@@ -778,7 +779,32 @@ WHERE
 GROUP BY
     c_nationkey;
 ----
-logical_opt	<REGEX>:.*pac_count_distinct.*
+logical_opt	<REGEX>:.*pac_sum.*bit_or.*
+
+# ============================================================
+# Multi-branch DISTINCT pre-aggregation tests
+# ============================================================
+
+# Test 33: Multiple DISTINCT columns use multi-branch pre-aggregation
+# Two separate DISTINCT columns produce two branches, each with bit_or + pac_count,
+# joined via COMPARISON_JOIN on group keys
+query II
+EXPLAIN SELECT
+    c_nationkey,
+    COUNT(DISTINCT o_comment) AS distinct_comments,
+    COUNT(DISTINCT l_suppkey) AS distinct_suppliers
+FROM
+    customer,
+    orders,
+    lineitem
+WHERE
+    c_custkey = o_custkey
+    AND l_orderkey = o_orderkey
+GROUP BY
+    c_nationkey;
+----
+logical_opt	<REGEX>:.*COMPARISON_JOIN.*bit_or.*bit_or.*
+
 
 # ============================================================
 # Cleanup

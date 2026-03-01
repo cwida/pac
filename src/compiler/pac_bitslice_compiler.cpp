@@ -1145,7 +1145,7 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 								// Step 6: Transform outer aggregate with PAC functions
 								unique_ptr<Expression> hash_ref =
 								    make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT, current_binding);
-								ModifyAggregatesWithPacFunctions(input, target_agg, hash_ref);
+								ModifyAggregatesWithPacFunctions(input, target_agg, hash_ref, plan);
 
 #if PAC_DEBUG
 								PAC_DEBUG_PRINT("ModifyPlanWithoutPU: Q13 pattern handled — hash propagated "
@@ -1267,7 +1267,7 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 #endif
 									unique_ptr<Expression> hash_input_expr =
 									    make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT, propagated);
-									ModifyAggregatesWithPacFunctions(input, target_agg, hash_input_expr);
+									ModifyAggregatesWithPacFunctions(input, target_agg, hash_input_expr, plan);
 
 									// Mark as handled so we don't process this aggregate again
 									handled_via_direct_fk = true;
@@ -1381,7 +1381,7 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 
 										unique_ptr<Expression> hash_input_expr =
 										    make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT, propagated);
-										ModifyAggregatesWithPacFunctions(input, target_agg, hash_input_expr);
+										ModifyAggregatesWithPacFunctions(input, target_agg, hash_input_expr, plan);
 
 										// Mark as handled and break
 										handled_via_direct_fk = true;
@@ -1415,7 +1415,7 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 											unique_ptr<Expression> hash_input_expr =
 											    BuildXorHash(input, std::move(fk_col_exprs));
 
-											ModifyAggregatesWithPacFunctions(input, target_agg, hash_input_expr);
+											ModifyAggregatesWithPacFunctions(input, target_agg, hash_input_expr, plan);
 
 											// Mark as handled and break
 											handled_via_direct_fk = true;
@@ -1513,7 +1513,7 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 #endif
 					unique_ptr<Expression> test_result =
 					    make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT, test_propagated);
-					ModifyAggregatesWithPacFunctions(input, target_agg, test_result);
+					ModifyAggregatesWithPacFunctions(input, target_agg, test_result, plan);
 					found_working_table = true;
 					break;
 				}
@@ -1595,7 +1595,7 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 						                                         LogicalType::UBIGINT, target_agg);
 						unique_ptr<Expression> hash_input_expr =
 						    make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT, propagated);
-						ModifyAggregatesWithPacFunctions(input, target_agg, hash_input_expr);
+						ModifyAggregatesWithPacFunctions(input, target_agg, hash_input_expr, plan);
 
 						found_direct_fk = true;
 						break;
@@ -1665,7 +1665,7 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 			}
 			unique_ptr<Expression> hash_input_expr =
 			    make_uniq<BoundColumnRefExpression>(delim_result.type, delim_result.binding);
-			ModifyAggregatesWithPacFunctions(input, target_agg, hash_input_expr);
+			ModifyAggregatesWithPacFunctions(input, target_agg, hash_input_expr, plan);
 			continue; // Move to next aggregate
 		}
 
@@ -1758,7 +1758,7 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 #endif
 
 		// Modify this aggregate with PAC functions
-		ModifyAggregatesWithPacFunctions(input, target_agg, hash_input_expr);
+		ModifyAggregatesWithPacFunctions(input, target_agg, hash_input_expr, plan);
 	}
 }
 
@@ -2284,7 +2284,7 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 		auto combined_hash_expr = BuildAndFromHashes(input, hash_exprs);
 
 		// Modify this aggregate with PAC functions
-		ModifyAggregatesWithPacFunctions(input, target_agg, combined_hash_expr);
+		ModifyAggregatesWithPacFunctions(input, target_agg, combined_hash_expr, plan);
 	}
 }
 
