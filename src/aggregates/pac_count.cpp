@@ -120,13 +120,23 @@ void PacCountCombine(Vector &src, Vector &dst, AggregateInputData &aggr, idx_t c
 		PacCountState *ss = sa[i]->GetState();
 		if (ss) { // we have an allocated state: flush it into dst
 			PacCountState &ds = *da[i]->EnsureState(aggr.allocator);
-			ds.FlushLevel(); // flush dst's SWAR so update_count is safe to add to
 			ds.key_hash |= ss->key_hash;
-			ss->FlushLevel();
-			ds.update_count += ss->update_count;
-			for (int j = 0; j < 64; j++) {
-				ds.probabilistic_total[j] += ss->probabilistic_total[j];
+#ifndef PAC_NOCASCADING
+			bool src_has_totals = (ss->probabilistic_total != nullptr) || (ss->swar_fill > 0);
+#else
+			bool src_has_totals = (ss->probabilistic_total != nullptr);
+#endif
+			if (src_has_totals) {
+				ds.FlushLevel(aggr.allocator); // flush dst SWAR first
+				uint64_t *dst_totals = ds.EnsureTotals(aggr.allocator);
+				ss->FlushSWARInto(dst_totals); // src SWAR → dst totals (no src alloc!)
+				if (ss->probabilistic_total) {
+					for (int j = 0; j < 64; j++) {
+						dst_totals[j] += ss->probabilistic_total[j];
+					}
+				}
 			}
+			ds.update_count += ss->update_count; // safe: FlushSWARInto moved swar_fill into update_count
 		}
 	}
 }
@@ -154,12 +164,11 @@ void PacCountFinalize(Vector &states, AggregateInputData &input, Vector &result,
 			continue;
 		}
 		if (s) {
-			s->FlushLevel(); // flush uint8_t level into uint64_t totals (also finalizes update_count)
-			s->GetTotals(buf);
+			s->GetTotalsWithSWAR(buf);
 		} else {
 			memset(buf, 0, sizeof(buf));
 		}
-		CheckPacSampleDiversity(key_hash, buf, s ? s->update_count : 0, "pac_count",
+		CheckPacSampleDiversity(key_hash, buf, s ? s->GetUpdateCount() : 0, "pac_count",
 		                        input.bind_data->Cast<PacBindData>());
 		// Multiply by 2 to compensate for 50% sampling, then apply correction
 		data[offset + i] = static_cast<int64_t>(
@@ -211,9 +220,8 @@ void PacCountFinalizeCounters(Vector &states, AggregateInputData &input, Vector 
 		}
 
 		uint64_t key_hash = s->key_hash;
-		s->FlushLevel(); // flush uint8_t level into uint64_t totals (also finalizes update_count)
-		s->GetTotals(buf);
-		CheckPacSampleDiversity(key_hash, buf, s->update_count, "pac_count", input.bind_data->Cast<PacBindData>());
+		s->GetTotalsWithSWAR(buf);
+		CheckPacSampleDiversity(key_hash, buf, s->GetUpdateCount(), "pac_count", input.bind_data->Cast<PacBindData>());
 
 		// Copy counters to list: 0 where key_hash bit is 0, value * 2 * correction otherwise
 		// The 2x factor compensates for 50% sampling, correction is user-specified multiplier

@@ -78,25 +78,75 @@ struct PacCountState {
 #endif
 	uint64_t key_hash;                // OR of all key_hashes seen (for PacNoiseInNull)
 	uint64_t update_count;            // exact number of rows processed
-	uint64_t probabilistic_total[64]; // final totals
+	uint64_t *probabilistic_total;    // lazily allocated 64-element array (null until needed)
 
 #ifndef PAC_GODBOLT
-	void FlushLevel() {
+	uint64_t *EnsureTotals(ArenaAllocator &a) {
+		if (!probabilistic_total) {
+			probabilistic_total = reinterpret_cast<uint64_t *>(a.Allocate(64 * sizeof(uint64_t)));
+			memset(probabilistic_total, 0, 64 * sizeof(uint64_t));
+		}
+		return probabilistic_total;
+	}
+	void FlushLevel(ArenaAllocator &a) {
 #ifndef PAC_NOCASCADING
+		if (swar_fill == 0) return;
+		uint64_t *totals = EnsureTotals(a);
 		// Undo SWAR interleaving: src[n] holds count for bit (n/8 + (n%8)*8), not bit n.
 		// Permute so probabilistic_total[bit] gets the count for actual key_hash bit 'bit'.
 		const uint8_t *src = reinterpret_cast<const uint8_t *>(probabilistic_total8);
 		for (int bit = 0; bit < 64; bit++) {
 			int swar_pos = (bit % 8) * 8 + bit / 8;
-			probabilistic_total[bit] += src[swar_pos];
+			totals[bit] += src[swar_pos];
 		}
 		memset(probabilistic_total8, 0, sizeof(probabilistic_total8));
 		update_count += swar_fill; // accumulate exact count (only place update_count grows in SWAR path)
 		swar_fill = 0;
 #endif
 	}
+	// Flush SWAR bytes into an external totals array (avoids allocating src's own totals in Combine)
+	void FlushSWARInto(uint64_t *dst_totals) {
+#ifndef PAC_NOCASCADING
+		if (swar_fill == 0) return;
+		const uint8_t *src = reinterpret_cast<const uint8_t *>(probabilistic_total8);
+		for (int bit = 0; bit < 64; bit++) {
+			int swar_pos = (bit % 8) * 8 + bit / 8;
+			dst_totals[bit] += src[swar_pos];
+		}
+		update_count += swar_fill;
+		swar_fill = 0;
+#endif
+	}
+	// Read allocated totals + unflushed SWAR into dst without allocating (for Finalize)
+	void GetTotalsWithSWAR(PAC_FLOAT *dst) const {
+		if (probabilistic_total) {
+			ToDoubleArray(probabilistic_total, dst);
+		} else {
+			memset(dst, 0, 64 * sizeof(PAC_FLOAT));
+		}
+#ifndef PAC_NOCASCADING
+		if (swar_fill > 0) {
+			const uint8_t *src = reinterpret_cast<const uint8_t *>(probabilistic_total8);
+			for (int bit = 0; bit < 64; bit++) {
+				int swar_pos = (bit % 8) * 8 + bit / 8;
+				dst[bit] += static_cast<PAC_FLOAT>(src[swar_pos]);
+			}
+		}
+#endif
+	}
+	uint64_t GetUpdateCount() const {
+#ifndef PAC_NOCASCADING
+		return update_count + swar_fill;
+#else
+		return update_count;
+#endif
+	}
 	void GetTotals(PAC_FLOAT *dst) const {
-		ToDoubleArray(probabilistic_total, dst);
+		if (probabilistic_total) {
+			ToDoubleArray(probabilistic_total, dst);
+		} else {
+			memset(dst, 0, 64 * sizeof(PAC_FLOAT));
+		}
 	}
 	PacCountState *GetState() {
 		return this;
@@ -111,16 +161,17 @@ struct PacCountState {
 #ifdef PAC_NOCASCADING
 // NOCASCADING: simple direct update to uint64_t[64]
 template <>
-inline void PacCountUpdateOne(PacCountState &agg, uint64_t hash, ArenaAllocator &) {
+inline void PacCountUpdateOne(PacCountState &agg, uint64_t hash, ArenaAllocator &a) {
 	agg.key_hash |= hash;
 	agg.update_count++;
+	uint64_t *totals = agg.EnsureTotals(a);
 	for (int i = 0; i < 64; i++) {
 #ifdef PAC_NOSIMD
 		if ((hash >> i) & 1) { // IF..THEN cannot be simd-ized (and is 50%:has heavy branch misprediction cost)
-			agg.probabilistic_total[i]++;
+			totals[i]++;
 		}
 #else
-		agg.probabilistic_total[i] += (hash >> i) & 1;
+		totals[i] += (hash >> i) & 1;
 #endif
 	}
 }
@@ -141,11 +192,11 @@ void PacCountUpdateSWAR(PacCountState &state, uint64_t key_hash) {
 
 #ifndef PAC_GODBOLT
 template <>
-inline void PacCountUpdateOne(PacCountState &agg, uint64_t hash, ArenaAllocator &) {
+inline void PacCountUpdateOne(PacCountState &agg, uint64_t hash, ArenaAllocator &a) {
 	agg.key_hash |= hash;
 	PacCountUpdateSWAR(agg, hash);
 	if (++agg.swar_fill >= 255) {
-		agg.FlushLevel(); // flushes SWAR and adds swar_fill (255) to update_count
+		agg.FlushLevel(a); // flushes SWAR and adds swar_fill (255) to update_count
 	}
 }
 #endif // PAC_GODBOLT
@@ -180,9 +231,9 @@ struct PacCountStateWrapper {
 	}
 
 	// Flush buffered hashes into dst state
-	AUTOVECTORIZE inline void FlushBufferInternal(PacCountState &dst, uint64_t *PAC_RESTRICT hash_buf, uint64_t cnt) {
+	AUTOVECTORIZE inline void FlushBufferInternal(PacCountState &dst, uint64_t *PAC_RESTRICT hash_buf, uint64_t cnt, ArenaAllocator &a) {
 		if (dst.swar_fill + cnt >= 255) {
-			dst.FlushLevel(); // flushes SWAR, adds swar_fill to update_count, resets swar_fill=0
+			dst.FlushLevel(a); // flushes SWAR, adds swar_fill to update_count, resets swar_fill=0
 		}
 		for (uint64_t i = 0; i < cnt; i++) {
 			dst.key_hash |= hash_buf[i];
@@ -196,7 +247,7 @@ struct PacCountStateWrapper {
 		uint64_t cnt = n_buffered & 7;
 		if (cnt > 0) {
 			auto &dst = *dst_wrapper.EnsureState(a);
-			FlushBufferInternal(dst, hash_buf, cnt);
+			FlushBufferInternal(dst, hash_buf, cnt, a);
 			n_buffered &= ~7ULL;
 		}
 	}
@@ -215,7 +266,7 @@ AUTOVECTORIZE inline void PacCountBufferOrUpdateOne(PacCountStateWrapper &agg, u
 		auto &dst = *agg.EnsureState(a);
 		auto n_buffered = agg.n_buffered & ~7ULL;
 		agg.n_buffered = key_hash;                     // hack: overwrite pointer temporarily
-		agg.FlushBufferInternal(dst, agg.hash_buf, 4); // we now have a buffer of 4
+		agg.FlushBufferInternal(dst, agg.hash_buf, 4, a); // we now have a buffer of 4
 		agg.n_buffered = n_buffered;
 	} else {
 		agg.hash_buf[cnt] = key_hash;
