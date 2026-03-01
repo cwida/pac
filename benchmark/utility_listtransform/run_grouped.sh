@@ -3,18 +3,35 @@
 # Adds GROUP BY o_orderkey % NGROUPS to existing queries for amplified noise effect
 #
 # Usage:
-#   bash benchmark/utility_listtransform/run_grouped.sh [database] [duckdb_binary] [runs] [ngroups]
+#   bash benchmark/utility_listtransform/run_grouped.sh [database] [duckdb_binary] [runs] [ngroups] [skew_alpha]
+#
+# skew_alpha: Zipf skew parameter for l_extendedprice (0 = no skew, 20 = heavy skew)
+#   The database must already have TPC-H tables loaded.
+#   When skew_alpha > 0, the script applies: l_extendedprice = 900 + 104100 * pow(random(), alpha)
 
 set -euo pipefail
 
-DB="${1:-tpch_skew_alpha20.db}"
+DB="${1:-tpch_sf1.db}"
 DUCKDB="${2:-./build/release/duckdb}"
 RUNS="${3:-1}"
 NGROUPS="${4:-100}"
+SKEW_ALPHA="${5:-0}"
 DIR="$(cd "$(dirname "$0")" && pwd)"
 OUT="$DIR/results_grouped.csv"
 
 SETUP=$(cat "$DIR/setup.sql")
+
+# Apply skew if requested — work on a copy to avoid modifying the original
+if [ "$SKEW_ALPHA" != "0" ]; then
+    ORIG_DB="$DB"
+    DB="${DB%.db}_skew${SKEW_ALPHA}.db"
+    echo "Copying $ORIG_DB -> $DB (to preserve original)..."
+    cp "$ORIG_DB" "$DB"
+    echo "Applying Zipf skew (alpha=$SKEW_ALPHA) to l_extendedprice..."
+    echo "$SETUP SELECT setseed(0.42); UPDATE lineitem SET l_extendedprice = 900.0 + 104100.0 * pow(random(), $SKEW_ALPHA);" \
+        | "$DUCKDB" "$DB" 2>/dev/null
+    echo "Done."
+fi
 
 # Transform a query: add GROUP BY o_orderkey % N
 # Input: "SELECT CAST(... AS DOUBLE) AS result FROM ... WHERE ...;"
