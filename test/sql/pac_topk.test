@@ -1,0 +1,237 @@
+# name: test/sql/pac_topk.test
+# description: Test PAC Top-K pushdown execution (verify rewritten plans produce correct results)
+# group: [sql]
+
+require pac
+
+statement ok
+PRAGMA clear_pac_metadata;
+
+statement ok
+SET pac_seed = 42
+
+statement ok
+SET pac_hash_repair = true
+
+statement ok
+SET pac_deterministic_noise = true
+
+statement ok
+SET threads = 1
+
+statement ok
+SET pac_mi = 0
+
+# ============================================================
+# Schema setup (TPC-H-like with customer as privacy unit)
+# ============================================================
+
+# Nation table
+statement ok
+CREATE TABLE nation(
+    n_nationkey INTEGER PRIMARY KEY,
+    n_name VARCHAR,
+    n_regionkey INTEGER
+);
+
+statement ok
+INSERT INTO nation VALUES
+    (0, 'FRANCE', 0),
+    (1, 'GERMANY', 0),
+    (2, 'JAPAN', 1),
+    (3, 'CHINA', 1),
+    (4, 'USA', 2);
+
+# Customer table (Privacy Unit)
+statement ok
+CREATE TABLE customer(
+    c_custkey INTEGER PRIMARY KEY,
+    c_name VARCHAR,
+    c_nationkey INTEGER,
+    FOREIGN KEY (c_nationkey) REFERENCES nation(n_nationkey)
+    PROTECTED (c_name)
+);
+
+statement ok
+INSERT INTO customer VALUES
+    (1, 'Customer#001', 0),
+    (2, 'Customer#002', 1),
+    (3, 'Customer#003', 0),
+    (4, 'Customer#004', 1),
+    (5, 'Customer#005', 2),
+    (6, 'Customer#006', 0),
+    (7, 'Customer#007', 1),
+    (8, 'Customer#008', 2);
+
+# Orders table
+statement ok
+CREATE TABLE orders(
+    o_orderkey INTEGER PRIMARY KEY,
+    o_custkey INTEGER,
+    o_orderdate DATE,
+    o_comment VARCHAR,
+    FOREIGN KEY (o_custkey) REFERENCES customer(c_custkey)
+);
+
+statement ok
+INSERT INTO orders VALUES
+    (1, 1, '1995-03-15', 'regular'),
+    (2, 2, '1995-06-20', 'urgent'),
+    (3, 3, '1995-09-10', 'regular'),
+    (4, 4, '1996-01-05', 'regular'),
+    (5, 5, '1996-04-12', 'urgent'),
+    (6, 1, '1996-07-18', 'regular'),
+    (7, 2, '1995-11-22', 'regular'),
+    (8, 3, '1996-03-30', 'urgent'),
+    (9, 6, '1995-05-14', 'regular'),
+    (10, 7, '1996-08-25', 'regular'),
+    (11, 1, '1995-12-01', 'urgent'),
+    (12, 8, '1996-02-17', 'regular');
+
+# Lineitem table
+statement ok
+CREATE TABLE lineitem(
+    l_orderkey INTEGER,
+    l_linenumber INTEGER,
+    l_suppkey INTEGER,
+    l_quantity DECIMAL(15,2),
+    l_extendedprice DECIMAL(15,2),
+    l_discount DECIMAL(15,2),
+    l_shipdate DATE,
+    PRIMARY KEY (l_orderkey, l_linenumber),
+    FOREIGN KEY (l_orderkey) REFERENCES orders(o_orderkey)
+);
+
+statement ok
+INSERT INTO lineitem VALUES
+    (1, 1, 1, 10.00, 1000.00, 0.05, '1995-03-20'),
+    (1, 2, 2, 15.00, 1500.00, 0.10, '1995-03-22'),
+    (2, 1, 2, 20.00, 2000.00, 0.05, '1995-06-25'),
+    (3, 1, 1, 25.00, 2500.00, 0.00, '1995-09-15'),
+    (4, 1, 3, 30.00, 3000.00, 0.10, '1996-01-10'),
+    (5, 1, 4, 12.00, 1200.00, 0.05, '1996-04-15'),
+    (6, 1, 1, 18.00, 1800.00, 0.00, '1996-07-20'),
+    (7, 1, 2, 22.00, 2200.00, 0.05, '1995-11-25'),
+    (8, 1, 3, 16.00, 1600.00, 0.10, '1996-04-05'),
+    (9, 1, 1, 14.00, 1400.00, 0.05, '1995-05-18'),
+    (10, 1, 4, 20.00, 2000.00, 0.00, '1996-08-28'),
+    (11, 1, 2, 25.00, 2500.00, 0.10, '1995-12-05'),
+    (12, 1, 3, 30.00, 3000.00, 0.05, '1996-02-20');
+
+statement ok
+ALTER TABLE customer SET PU;
+
+# ============================================================
+# Execution tests: verify TopK pushdown produces valid results
+# ============================================================
+
+# Test 1: Top-K execution — SUM with LIMIT produces correct row count
+# The rewritten plan should produce actual results without crashing.
+query I
+SELECT COUNT(*) FROM (
+    SELECT
+        c_nationkey,
+        SUM(l_extendedprice) AS total_price
+    FROM
+        customer,
+        orders,
+        lineitem
+    WHERE
+        c_custkey = o_custkey
+        AND l_orderkey = o_orderkey
+    GROUP BY
+        c_nationkey
+    ORDER BY
+        total_price DESC
+    LIMIT 3
+);
+----
+3
+
+# Test 2: Top-K execution — COUNT with VARCHAR GROUP BY
+query I
+SELECT COUNT(*) FROM (
+    SELECT
+        n_name,
+        COUNT(*) AS order_count
+    FROM
+        orders,
+        customer,
+        nation
+    WHERE
+        o_custkey = c_custkey
+        AND c_nationkey = n_nationkey
+    GROUP BY
+        n_name
+    ORDER BY
+        order_count DESC
+    LIMIT 2
+);
+----
+2
+
+# Test 3: Top-K execution with expansion factor
+# With expansion = 3, inner TopN selects 3*2=6 candidates, final TopN limits to 2.
+# Should still produce exactly 2 rows.
+statement ok
+SET pac_topk_expansion = 3
+
+query I
+SELECT COUNT(*) FROM (
+    SELECT
+        c_nationkey,
+        SUM(l_extendedprice) AS total_price
+    FROM
+        customer,
+        orders,
+        lineitem
+    WHERE
+        c_custkey = o_custkey
+        AND l_orderkey = o_orderkey
+    GROUP BY
+        c_nationkey
+    ORDER BY
+        total_price DESC
+    LIMIT 2
+);
+----
+2
+
+statement ok
+SET pac_topk_expansion = 1
+
+# Test 4: Top-K execution — join on top of TopK subquery produces results
+query I
+SELECT COUNT(*) FROM (
+    SELECT t.c_nationkey, t.total_price, n_name
+    FROM (
+        SELECT c_nationkey, SUM(l_extendedprice) AS total_price
+        FROM customer, orders, lineitem
+        WHERE c_custkey = o_custkey AND l_orderkey = o_orderkey
+        GROUP BY c_nationkey
+        ORDER BY total_price DESC
+        LIMIT 3
+    ) t
+    JOIN nation ON t.c_nationkey = n_nationkey
+);
+----
+3
+
+# ============================================================
+# Cleanup
+# ============================================================
+
+statement ok
+DROP TABLE lineitem;
+
+statement ok
+DROP TABLE orders;
+
+statement ok
+DROP TABLE customer;
+
+statement ok
+DROP TABLE nation;
+
+statement ok
+PRAGMA clear_pac_metadata;

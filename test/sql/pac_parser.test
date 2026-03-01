@@ -11,6 +11,9 @@ statement ok
 SET pac_seed = 42
 
 statement ok
+SET pac_hash_repair = true
+
+statement ok
 SET pac_mi = 0
 
 statement ok

@@ -17,6 +17,9 @@ statement ok
 set pac_seed = 42;
 
 statement ok
+SET pac_hash_repair = true
+
+statement ok
 set pac_mi = 0;
 
 # Set up TPC-H schema with customer as privacy unit
@@ -102,6 +105,9 @@ SET pac_join_elimination = true;
 
 statement ok
 set pac_seed = 42;
+
+statement ok
+SET pac_hash_repair = true
 
 statement ok
 SET pac_deterministic_noise = true;
