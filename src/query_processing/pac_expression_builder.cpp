@@ -1099,14 +1099,15 @@ void ModifyAggregatesWithPacFunctions(OptimizerExtensionInput &input, LogicalAgg
 		// Get PAC function name
 		string pac_function_name;
 		if (use_distinct_variant) {
-			if (function_name == "count" || function_name == "count_star")
+			if (function_name == "count" || function_name == "count_star") {
 				pac_function_name = "pac_count_distinct";
-			else if (function_name == "sum" || function_name == "sum_no_overflow")
+			} else if (function_name == "sum" || function_name == "sum_no_overflow") {
 				pac_function_name = "pac_sum_distinct";
-			else if (function_name == "avg")
+			} else if (function_name == "avg") {
 				pac_function_name = "pac_avg_distinct";
-			else
+			} else {
 				throw NotImplementedException("PAC: DISTINCT not supported for aggregate: " + function_name);
+			}
 		} else {
 			pac_function_name = GetPacAggregateFunctionName(function_name);
 		}

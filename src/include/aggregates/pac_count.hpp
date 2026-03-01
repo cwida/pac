@@ -76,9 +76,9 @@ struct PacCountState {
 	uint64_t probabilistic_total8[8]; // SWAR packed uint8_t counters
 	uint16_t swar_fill;               // entries in SWAR buffer since last flush (0-254)
 #endif
-	uint64_t key_hash;                // OR of all key_hashes seen (for PacNoiseInNull)
-	uint64_t update_count;            // exact number of rows processed
-	uint64_t *probabilistic_total;    // lazily allocated 64-element array (null until needed)
+	uint64_t key_hash;             // OR of all key_hashes seen (for PacNoiseInNull)
+	uint64_t update_count;         // exact number of rows processed
+	uint64_t *probabilistic_total; // lazily allocated 64-element array (null until needed)
 
 #ifndef PAC_GODBOLT
 	uint64_t *EnsureTotals(ArenaAllocator &a) {
@@ -90,7 +90,9 @@ struct PacCountState {
 	}
 	void FlushLevel(ArenaAllocator &a) {
 #ifndef PAC_NOCASCADING
-		if (swar_fill == 0) return;
+		if (swar_fill == 0) {
+			return;
+		}
 		uint64_t *totals = EnsureTotals(a);
 		// Undo SWAR interleaving: src[n] holds count for bit (n/8 + (n%8)*8), not bit n.
 		// Permute so probabilistic_total[bit] gets the count for actual key_hash bit 'bit'.
@@ -107,7 +109,9 @@ struct PacCountState {
 	// Flush SWAR bytes into an external totals array (avoids allocating src's own totals in Combine)
 	void FlushSWARInto(uint64_t *dst_totals) {
 #ifndef PAC_NOCASCADING
-		if (swar_fill == 0) return;
+		if (swar_fill == 0) {
+			return;
+		}
 		const uint8_t *src = reinterpret_cast<const uint8_t *>(probabilistic_total8);
 		for (int bit = 0; bit < 64; bit++) {
 			int swar_pos = (bit % 8) * 8 + bit / 8;
@@ -231,7 +235,8 @@ struct PacCountStateWrapper {
 	}
 
 	// Flush buffered hashes into dst state
-	AUTOVECTORIZE inline void FlushBufferInternal(PacCountState &dst, uint64_t *PAC_RESTRICT hash_buf, uint64_t cnt, ArenaAllocator &a) {
+	AUTOVECTORIZE inline void FlushBufferInternal(PacCountState &dst, uint64_t *PAC_RESTRICT hash_buf, uint64_t cnt,
+	                                              ArenaAllocator &a) {
 		if (dst.swar_fill + cnt >= 255) {
 			dst.FlushLevel(a); // flushes SWAR, adds swar_fill to update_count, resets swar_fill=0
 		}
@@ -265,7 +270,7 @@ AUTOVECTORIZE inline void PacCountBufferOrUpdateOne(PacCountStateWrapper &agg, u
 	if (DUCKDB_UNLIKELY(cnt == 3)) {
 		auto &dst = *agg.EnsureState(a);
 		auto n_buffered = agg.n_buffered & ~7ULL;
-		agg.n_buffered = key_hash;                     // hack: overwrite pointer temporarily
+		agg.n_buffered = key_hash;                        // hack: overwrite pointer temporarily
 		agg.FlushBufferInternal(dst, agg.hash_buf, 4, a); // we now have a buffer of 4
 		agg.n_buffered = n_buffered;
 	} else {

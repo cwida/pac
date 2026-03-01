@@ -315,13 +315,13 @@ static void PacTopKSupersetWindowInit(AggregateInputData &aggr_input_data, const
 		// Partial sort: nth_element places the K-th element at position K-1,
 		// with all elements before it being the top-K (in unspecified order).
 		if (ascending) {
-			std::nth_element(world_values.begin(), world_values.begin() + static_cast<ptrdiff_t>(K),
-			                 world_values.end(),
-			                 [](const pair<idx_t, PAC_FLOAT> &a, const pair<idx_t, PAC_FLOAT> &b) { return a.second < b.second; });
+			std::nth_element(
+			    world_values.begin(), world_values.begin() + static_cast<ptrdiff_t>(K), world_values.end(),
+			    [](const pair<idx_t, PAC_FLOAT> &a, const pair<idx_t, PAC_FLOAT> &b) { return a.second < b.second; });
 		} else {
-			std::nth_element(world_values.begin(), world_values.begin() + static_cast<ptrdiff_t>(K),
-			                 world_values.end(),
-			                 [](const pair<idx_t, PAC_FLOAT> &a, const pair<idx_t, PAC_FLOAT> &b) { return a.second > b.second; });
+			std::nth_element(
+			    world_values.begin(), world_values.begin() + static_cast<ptrdiff_t>(K), world_values.end(),
+			    [](const pair<idx_t, PAC_FLOAT> &a, const pair<idx_t, PAC_FLOAT> &b) { return a.second > b.second; });
 		}
 
 		// Mark the top-K rows for this world in the union
@@ -333,12 +333,11 @@ static void PacTopKSupersetWindowInit(AggregateInputData &aggr_input_data, const
 #if PAC_DEBUG
 	idx_t superset_size = 0;
 	for (idx_t i = 0; i < count; i++) {
-		if (state.in_superset[i]) superset_size++;
+		if (state.in_superset[i])
+			superset_size++;
 	}
-	PAC_DEBUG_PRINT("pac_topk_superset: K=" + std::to_string(K) +
-	                " ascending=" + std::to_string(ascending) +
-	                " total_groups=" + std::to_string(count) +
-	                " superset_size=" + std::to_string(superset_size));
+	PAC_DEBUG_PRINT("pac_topk_superset: K=" + std::to_string(K) + " ascending=" + std::to_string(ascending) +
+	                " total_groups=" + std::to_string(count) + " superset_size=" + std::to_string(superset_size));
 #endif
 }
 
@@ -1125,9 +1124,9 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 	enum class RankColKind { PASSTHROUGH, PAC_MEAN, PAC_COUNTERS, KEYHASH };
 	struct RankColSpec {
 		RankColKind kind;
-		idx_t rank_col;      // column index in RankProj
-		idx_t pac_idx;       // for PAC_MEAN/PAC_COUNTERS: index into pac_aggs
-		LogicalType type;    // for PASSTHROUGH: original type
+		idx_t rank_col;   // column index in RankProj
+		idx_t pac_idx;    // for PAC_MEAN/PAC_COUNTERS: index into pac_aggs
+		LogicalType type; // for PASSTHROUGH: original type
 	};
 	vector<RankColSpec> rank_specs;
 
@@ -1321,8 +1320,8 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 				keyhash_ref = make_uniq<BoundConstantExpression>(Value::UBIGINT(~uint64_t(0)));
 			}
 
-			auto noised = input.optimizer.BindScalarFunction("pac_noised", std::move(counters_ref),
-			                                                 std::move(keyhash_ref));
+			auto noised =
+			    input.optimizer.BindScalarFunction("pac_noised", std::move(counters_ref), std::move(keyhash_ref));
 			auto &orig_type = pac_aggs[spec.pac_idx].original_type;
 			if (orig_type != noised->return_type) {
 				noised = BoundCastExpression::AddCastToType(input.context, std::move(noised), orig_type);
