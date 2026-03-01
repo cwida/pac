@@ -165,8 +165,8 @@ ORDER BY
 ----
 logical_opt	<REGEX>:.*pac_sum.*
 
-# Test 2: Top-K pushdown transforms pac_sum to pac_topk_superset for ORDER BY + LIMIT
-# The optimizer should convert pac_sum to pac_sum_counters and add pac_topk_superset/pac_noised projections
+# Test 2: Top-K pushdown transforms pac_sum to pac_mean/pac_mean for ORDER BY + LIMIT
+# The optimizer should convert pac_sum to pac_sum_counters and add pac_mean/pac_mean projections
 query II
 EXPLAIN SELECT
     n_name,
@@ -186,7 +186,7 @@ ORDER BY
     revenue DESC
 LIMIT 2;
 ----
-logical_opt	<REGEX>:.*pac_topk_superset.*
+logical_opt	<REGEX>:.*pac_mean.*
 
 # Test 3: Correlated subquery with COUNT - both inner and outer should be pac_count
 # Outer COUNT(*) groups customers by nation (multiple PUs per group) -> pac_count
@@ -250,7 +250,7 @@ logical_opt	<REGEX>:.*pac_sum.*
 
 # Test 5: Top-K pushdown with VARCHAR GROUP BY (triggers string decompress projection)
 # DuckDB inserts __internal_decompress_string between TopN and Aggregate for VARCHAR
-# group columns. The rewriter must keep these projections and still produce pac_topk_superset.
+# group columns. The rewriter must keep these projections and still produce pac_mean.
 query II
 EXPLAIN SELECT
     n_name,
@@ -268,10 +268,10 @@ ORDER BY
     order_count DESC
 LIMIT 2;
 ----
-logical_opt	<REGEX>:.*pac_topk_superset.*
+logical_opt	<REGEX>:.*pac_mean.*
 
-# Test 6: Top-K pushdown produces pac_noised in the final projection
-# The noised projection should appear above TopN to apply noise only to selected rows
+# Test 6: Top-K pushdown produces pac_mean in the final projection
+# The mean projection should appear above TopN to extract values for selected rows
 query II
 EXPLAIN SELECT
     c_nationkey,
@@ -289,7 +289,7 @@ ORDER BY
     total_price DESC
 LIMIT 3;
 ----
-logical_opt	<REGEX>:.*pac_noised.*
+logical_opt	<REGEX>:.*pac_mean.*
 
 # Test 7: Join on top of Top-K subquery
 # When a JOIN sits above a TopN (e.g. subquery with ORDER BY + LIMIT joined to
@@ -308,7 +308,7 @@ FROM (
 ) t
 JOIN nation ON t.c_nationkey = n_nationkey;
 ----
-logical_opt	<REGEX>:.*pac_topk_superset.*
+logical_opt	<REGEX>:.*pac_mean.*
 
 # ============================================================
 # CTE plan tests
@@ -518,9 +518,9 @@ ORDER BY s_suppkey;
 ----
 logical_opt	<REGEX>:.*pac_sum.*
 
-# Test 20: Top-K pushdown includes pac_keyhash aggregate (PATH B — no intermediate projections)
-# When pac_noised is called in the NoisedProj, it should receive the actual keyhash
-# from pac_keyhash rather than a hardcoded constant. Verify pac_keyhash appears in the plan.
+# Test 20: Top-K pushdown with PAC aggregates (PATH B — no intermediate projections)
+# pac_keyhash was removed; pac_mean now takes a single argument (counters only).
+# Verify the plan contains pac_sum_counters (aggregates converted to _counters).
 query II
 EXPLAIN SELECT
     c_nationkey,
@@ -538,11 +538,11 @@ ORDER BY
     total_price DESC
 LIMIT 3;
 ----
-logical_opt	<REGEX>:.*pac_keyhash.*
+logical_opt	<REGEX>:.*pac_sum_counters.*
 
-# Test 21: Top-K pushdown includes pac_keyhash with VARCHAR GROUP BY (PATH A — with intermediate projections)
+# Test 21: Top-K pushdown with VARCHAR GROUP BY (PATH A — with intermediate projections)
 # VARCHAR GROUP BY causes DuckDB to insert __internal_decompress_string projections.
-# pac_keyhash must be passed through these intermediate projections to reach pac_noised.
+# Verify the plan contains pac_count_counters (aggregates converted to _counters).
 query II
 EXPLAIN SELECT
     n_name,
@@ -560,10 +560,10 @@ ORDER BY
     order_count DESC
 LIMIT 2;
 ----
-logical_opt	<REGEX>:.*pac_keyhash.*
+logical_opt	<REGEX>:.*pac_count_counters.*
 
-# Test 22: Top-K with pac_noised — superset groups get noised before final ranking
-# The plan should contain pac_noised (applied to superset members after filtering)
+# Test 22: Top-K with pac_mean — superset groups get noised before final ranking
+# The plan should contain pac_mean (applied to superset members after filtering)
 query II
 EXPLAIN SELECT
     c_nationkey,
@@ -581,10 +581,10 @@ ORDER BY
     total_price DESC
 LIMIT 3;
 ----
-logical_opt	<REGEX>:.*pac_noised.*
+logical_opt	<REGEX>:.*pac_mean.*
 
-# Test 23: Top-K with COUNT(*) uses pac_topk_superset for ranking
-# COUNT(*) should also go through the pac_topk_superset path, not just SUM.
+# Test 23: Top-K with COUNT(*) uses pac_mean for ranking
+# COUNT(*) should also go through the pac_mean path, not just SUM.
 query II
 EXPLAIN SELECT
     c_nationkey,
@@ -600,10 +600,10 @@ ORDER BY
     num_orders DESC
 LIMIT 2;
 ----
-logical_opt	<REGEX>:.*pac_topk_superset.*
+logical_opt	<REGEX>:.*pac_mean.*
 
 # Test 24: Top-K with multiple PAC aggregates
-# Both SUM and COUNT should be rewritten to _counters, and pac_topk_superset should appear.
+# Both SUM and COUNT should be rewritten to _counters, and pac_mean should appear.
 query II
 EXPLAIN SELECT
     c_nationkey,
@@ -622,12 +622,12 @@ ORDER BY
     total_price DESC
 LIMIT 3;
 ----
-logical_opt	<REGEX>:.*pac_topk_superset.*
+logical_opt	<REGEX>:.*pac_mean.*
 
 # Test 25: Top-K with non-numerical CASE WHEN on PAC aggregate (SQLStorm Q25283 pattern)
 # CASE WHEN returning VARCHAR that internally compares a PAC aggregate (AVG) must not crash.
 # The TopK rewriter converts pac_avg to pac_avg_counters (LIST<FLOAT>), then WrapListRefs
-# must wrap the col refs inside the CASE WHEN with pac_noised + cast to DOUBLE so the
+# must wrap the col refs inside the CASE WHEN with pac_mean + cast to DOUBLE so the
 # comparison operators get the correct type.
 query II
 EXPLAIN SELECT
@@ -649,12 +649,10 @@ LIMIT 3;
 ----
 logical_opt	<REGEX>:.*pac_avg_counters.*
 
-# Test 26: HAVING clause with PAC aggregate and pac_keyhash binding (SQLStorm Q28426 pattern)
-# The categorical rewriter adds pac_keyhash to the aggregate and must create bindings
-# using the correct column_index (without groups.size() offset), matching
-# LogicalAggregate::GetColumnBindings() which uses 0-based aggregate indices.
+# Test 26: HAVING clause with PAC aggregate (SQLStorm Q28426 pattern)
 # ROUND(AVG(...), 2) triggers a categorical pattern (arithmetic with PAC aggregate)
-# which causes the categorical rewriter to convert to _counters and add pac_keyhash.
+# which causes the categorical rewriter to convert to _counters.
+# pac_keyhash was removed; pac_mean now takes a single argument.
 query II
 EXPLAIN SELECT
     n_name,
@@ -669,7 +667,7 @@ GROUP BY n_name
 HAVING SUM(l_extendedprice) > 0
 ORDER BY TotalRevenue DESC;
 ----
-logical_opt	<REGEX>:.*pac_keyhash.*
+logical_opt	<REGEX>:.*pac_avg_counters.*
 
 # ============================================================
 # DISTINCT aggregate rewriting tests

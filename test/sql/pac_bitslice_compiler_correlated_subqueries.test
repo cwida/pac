@@ -143,7 +143,7 @@ ORDER BY
 
 # Test Top-K pushdown with correlated EXISTS subquery (Q4 + LIMIT)
 # The top-k optimizer should rewrite pac_count to pac_count_counters,
-# insert pac_mean for ordering, and apply pac_noised to the final top-k rows
+# insert pac_mean for ordering, and apply pac_mean to the final top-k rows
 query II
 SELECT
     o_orderpriority,
@@ -204,6 +204,7 @@ INSERT INTO part VALUES
 # - Outer aggregate: SUM(l_extendedprice) on lineitem
 # - Inner aggregate: AVG(l_quantity) on lineitem with correlation on l_partkey
 # Both aggregates operate on FK-linked table, so BOTH get PAC transformation
+# With pac_mi=0, empty groups return 0 (not NULL) since key_hash is hardcoded to all-bits-set.
 query I
 SELECT
     CAST(sum(l_extendedprice) / 7.0 AS INTEGER) AS avg_yearly
@@ -223,7 +224,7 @@ WHERE
             l_partkey = p_partkey
     );
 ----
-NULL
+0
 
 # Test correlated subqueries on FK-linked tables with PU table scanned
 # This tests the fix where aggregates in correlated subqueries that scan FK-linked tables
@@ -287,10 +288,11 @@ WHERE
 # aggregating across ALL customers who have that part, so it needs its own
 # connection to the customer PU via orders.
 #
-# This test returns NULL (no rows match l_quantity < 0.2 * avg)
+# This test returns 0 (no rows match l_quantity < 0.2 * avg, empty group with all-zero counters)
 # The inner AVG for each partkey gives 10, 20, 15, 25, 30, 35
 # 0.2 * avg = 2, 4, 3, 5, 6, 7
 # No l_quantity values (10, 20, 15, 25, 30, 35) are less than these thresholds
+# With pac_mi=0 and key_hash hardcoded to all-bits-set, empty groups return 0 (not NULL).
 query I
 SELECT
     SUM(l_extendedprice) AS total_revenue
@@ -306,7 +308,7 @@ WHERE
             inner_lineitem.l_partkey = lineitem.l_partkey
     );
 ----
-NULL
+0
 
 # Test correlated subquery where outer query scans FK table (orders) directly
 # and inner subquery aggregates on a deeper FK table (lineitem)

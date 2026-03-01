@@ -214,10 +214,12 @@ SELECT SUM(t1a.b + t1b.b) FROM t1 t1a JOIN t1 t1b ON t1a.a = t1b.a;
 # PAC rewrite: self-joins are not supported for PAC compilation
 
 # Test same table in main query and subquery (different scopes): should PASS
+# With pac_mi=0 and no matching rows, pac_noised returns 0 (not NULL) since
+# key_hash is hardcoded to all-bits-set (all 64 worlds assumed populated).
 query I
 SELECT SUM(b) FROM t1 WHERE a > (SELECT AVG(b) FROM t1);
 ----
-NULL
+0
 
 # Test conservative mode OFF: subquery should execute normally (no error)
 statement ok
