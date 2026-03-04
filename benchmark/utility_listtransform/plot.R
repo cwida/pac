@@ -45,13 +45,13 @@ script_dir <- tryCatch(
   }
 )
 
-input_csv <- if (length(args) >= 1) args[1] else file.path(script_dir, "results.csv")
+input_csv <- if (length(args) >= 1) args[1] else file.path(script_dir, "results_grouped.csv")
 if (!file.exists(input_csv)) stop("Results file not found: ", input_csv)
 output_dir <- dirname(input_csv)
 
 # Read data
 raw <- readr::read_csv(input_csv, show_col_types = FALSE)
-# Columns: run, query, num_ratios, variant, value, true_value
+# Columns: run, query, num_ratios, [grp,] variant, value, true_value
 
 # Compute relative error %
 data <- raw %>%
@@ -81,15 +81,15 @@ for (i in seq_len(nrow(summary_tbl))) {
 # Factor levels
 data$num_ratios <- factor(data$num_ratios)
 data$variant <- factor(data$variant, levels = c("naive", "optimized"),
-                       labels = c("Naive (N\u00D7 noise)", "Optimized (1\u00D7 noise)"))
+                       labels = c("Naive (noise multiple times)", "Lambda approach (noise once)"))
 
 # Colors matching the project style
-variant_colors <- c("Naive (N\u00D7 noise)" = "#e74c3c", "Optimized (1\u00D7 noise)" = "#00b300")
+variant_colors <- c("Naive (noise multiple times)" = "#e74c3c", "Lambda approach (noise once)" = "#00b300")
 
 p <- ggplot(data, aes(x = num_ratios, y = rel_error, fill = variant)) +
   geom_boxplot(outlier.size = 2, width = 0.7, position = position_dodge(width = 0.8)) +
   scale_fill_manual(values = variant_colors, name = NULL) +
-  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.05))) +
   labs(
     x = "Number of Ratio Expressions (N)",
     y = "Relative Error (%)"

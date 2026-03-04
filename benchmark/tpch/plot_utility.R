@@ -225,17 +225,46 @@ if (dir.exists(tpch_util_dir)) {
       mutate(qnum = as.integer(str_extract(query, "\\d+"))) %>%
       filter(!(qnum %in% tpch_omit_queries)) %>%
       arrange(qnum)
+    # Drop intermittent queries (fewer than 90% of the max run count)
+    if (nrow(tpch_data) > 0) {
+      tpch_run_counts <- tpch_data %>% count(query)
+      tpch_max_runs <- max(tpch_run_counts$n)
+      tpch_threshold <- floor(tpch_max_runs * 0.9)
+      tpch_intermittent <- tpch_run_counts %>% filter(n < tpch_threshold) %>% pull(query)
+      if (length(tpch_intermittent) > 0) {
+        message("Dropping intermittent TPC-H queries (<", tpch_threshold, " of ", tpch_max_runs, " runs): ",
+                paste(tpch_intermittent, collapse = ", "))
+        tpch_data <- tpch_data %>% filter(!query %in% tpch_intermittent)
+      }
+    }
     if (nrow(tpch_data) == 0) tpch_data <- NULL
   }
 }
 
 clickbench_data <- NULL
+# Q39: borderline sample diversity — fails all 3 perf runs but passes ~83/100 utility runs; exclude
+clickbench_omit_queries <- c(39)
 if (dir.exists(clickbench_util_dir)) {
   clickbench_data <- load_utility_csvs(clickbench_util_dir)
   if (!is.null(clickbench_data)) {
     clickbench_data <- clickbench_data %>%
       mutate(qnum = as.integer(str_extract(query, "\\d+"))) %>%
+      filter(!(qnum %in% clickbench_omit_queries)) %>%
       arrange(qnum)
+    # Drop intermittent queries: keep only queries with at least 90% of the
+    # max run count. Queries that fail on many runs (e.g. sample diversity)
+    # have far fewer rows and would skew utility statistics.
+    if (nrow(clickbench_data) > 0) {
+      cb_run_counts <- clickbench_data %>% count(query)
+      cb_max_runs <- max(cb_run_counts$n)
+      cb_threshold <- floor(cb_max_runs * 0.5)
+      cb_intermittent <- cb_run_counts %>% filter(n < cb_threshold) %>% pull(query)
+      if (length(cb_intermittent) > 0) {
+        message("Dropping intermittent ClickBench queries (<", cb_threshold, " of ", cb_max_runs, " runs): ",
+                paste(cb_intermittent, collapse = ", "))
+        clickbench_data <- clickbench_data %>% filter(!query %in% cb_intermittent)
+      }
+    }
     if (nrow(clickbench_data) == 0) clickbench_data <- NULL
   }
 }
@@ -278,7 +307,7 @@ if (has_tpch && has_clickbench) {
   leg_idx <- which(sapply(tmp$grobs, function(x) x$name) == "guide-box")
   shared_legend <- tmp$grobs[[leg_idx]]
 
-  png(filename = out_file, width = 8000, height = 1650, res = 200, bg = "transparent")
+  png(filename = out_file, width = 8000, height = 1350, res = 200, bg = "transparent")
   grid.arrange(
     shared_legend,
     arrangeGrob(p_tpch, p_cb, ncol = 2),

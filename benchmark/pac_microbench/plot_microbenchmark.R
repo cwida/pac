@@ -540,7 +540,7 @@ plot_minmax_optimizations <- function(platform, platform_name, results_dir, outp
   valid_times <- df %>% filter(!is_timeout, display_time > 0) %>% pull(display_time)
   if (length(valid_times) == 0) return(NULL)
   max_time <- max(valid_times)
-  y_max <- max_time / 0.82
+  y_max <- max_time / 0.9
 
   df <- df %>% mutate(
     plot_time = case_when(
@@ -569,7 +569,7 @@ plot_minmax_optimizations <- function(platform, platform_name, results_dir, outp
 
   # Paper plot settings
   width <- 4000
-  height <- 1450
+  height <- 1350
   res <- 200
   base_size <- 40
   base_family <- base_font
@@ -597,13 +597,13 @@ plot_minmax_optimizations <- function(platform, platform_name, results_dir, outp
       legend.position = 'top',
       legend.margin = margin(0, 0, -5, 0),
       legend.box.margin = margin(0, 0, -15, 0),
-      legend.text = element_text(size = base_size),
+      legend.text = element_text(size = base_size + 3),
       axis.text.x = element_text(angle = 0, hjust = 0.5, size = base_size + 2),
       axis.text.y = element_text(size = base_size + 2),
       axis.title.y = element_text(size = base_size + 4),
       plot.margin = margin(2, 5, 5, 5)
     ) +
-    ylim(0, y_max * 1.1)
+    coord_cartesian(ylim = c(0, y_max), clip = 'off')
 
   output_file <- file.path(output_dir, paste0('minmax_optimizations_', platform, '_paper.png'))
   png(filename = output_file, width = width, height = height, res = res)
