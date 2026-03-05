@@ -23,7 +23,6 @@ Additional documentation is available in the `docs/` folder:
 
 | Document                                             | Description                                            |
 |------------------------------------------------------|--------------------------------------------------------|
-| [docs/build/README.md](docs/build/README.md)         | Build/install/update instructions (Make, CMake, Ninja) |
 | [docs/pac/README.md](docs/pac/README.md)             | PAC algorithm implementation details                   |
 | [docs/test/README.md](docs/test/README.md)           | Running SQL and C++ tests                              |
 | [docs/benchmark/README.md](docs/benchmark/README.md) | Benchmark overview                                     | |
@@ -68,9 +67,8 @@ CREATE PU TABLE users (
 
 `PAC_LINK` establishes a relationship between a regular table and a privacy unit, similar to a foreign key constraint but for privacy purposes. When a table has a `PAC_LINK`:
 
-1. **Privacy propagation**: The linked table inherits privacy constraints from the privacy unit
-2. **Hash derivation**: PAC uses the link columns to derive the privacy hash (instead of requiring direct access to the PU table)
-3. **Query optimization**: PAC can compile queries on the linked table without needing to join with the PU table
+1. **Privacy propagation**: The linked table is considered sensitive and columns in aggregations are noised. Only the mentioned key columns are proteced unless additional columns are listed as such.
+2. **Hash derivation**: PAC uses the link columns to retrieve the PU hash via PK-FK joins.
 
 ```sql
 -- Privacy unit table
@@ -149,11 +147,10 @@ PRAGMA clear_pac_metadata;
 | `pac_noise` | BOOLEAN | true | Whether to add PAC noise |
 | `pac_diffcols` | INTEGER | NULL | Uses the first X columns to compare noised vs exact result (reports error perc) |
 | `pac_deterministic_noise` | BOOLEAN | false | Use deterministic noise (for testing) |
-| `pac_conservative_mode` | BOOLEAN | true | Throw errors on unsupported queries |
-| `pac_compiled_path` | VARCHAR | "." | Output path for compiled PAC SQL |
 
 ### Example Configuration
 
+To eliminate noise and make tghings very deterministic (sometimes used in tests):
 ```sql
 SET pac_seed = 42;
 SET pac_mi = 0;
