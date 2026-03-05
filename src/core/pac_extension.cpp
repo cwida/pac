@@ -20,6 +20,7 @@
 #include "aggregates/pac_sum.hpp"
 #include "aggregates/pac_avg.hpp"
 #include "aggregates/pac_min_max.hpp"
+#include "aggregates/pac_distinct.hpp"
 #include "categorical/pac_categorical.hpp"
 #include "parser/pac_parser.hpp"
 #include "diff/pac_utility_diff.hpp"
@@ -216,7 +217,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                             LogicalType::DOUBLE, Value::DOUBLE(1.0));
 	// Add option to control whether pac_hash() repairs hashes to exactly 32 bits set
 	db.config.AddExtensionOption("pac_hash_repair", "pac_hash() repairs hash to exactly 32 bits set",
-	                             LogicalType::BOOLEAN, Value::BOOLEAN(true));
+	                             LogicalType::BOOLEAN, Value::BOOLEAN(false));
 	// Add option to enable/disable persistent secret p-tracking for correct query-level privacy composition.
 	// When enabled (default), noise calibration tracks a Bayesian posterior over worlds across all cells
 	// in a query, providing query-level MIA protection. When disabled, each cell uses uniform variance
@@ -233,6 +234,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RegisterPacAvgCountersFunctions(loader);
 	RegisterPacCountFunctions(loader);
 	RegisterPacCountCountersFunctions(loader);
+	// Register DISTINCT aggregate variants
+	RegisterPacCountDistinctFunctions(loader);
+	RegisterPacSumDistinctFunctions(loader);
+	RegisterPacAvgDistinctFunctions(loader);
 	// Register pac_min/pac_max aggregate functions
 	RegisterPacMinFunctions(loader);
 	RegisterPacMaxFunctions(loader);
@@ -243,15 +248,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// Register PAC categorical functions (pac_select, pac_filter, pac_filter_<cmp>, etc.)
 	RegisterPacCategoricalFunctions(loader);
 
-	// Register pac_mean scalar function (kept for backward compat / debugging)
+	// Register pac_mean scalar function (used by top-k pushdown for ordering)
 	RegisterPacMeanFunction(loader);
-	// Register pac_unnoised scalar function (kept for backward compat / debugging)
-	RegisterPacUnnoisedFunction(loader);
-	// Register pac_topk_superset window aggregate (per-world local ranking for top-k)
-	RegisterPacTopKSupersetFunction(loader);
-
-	// Register pac_keyhash aggregate function (UBIGINT -> UBIGINT, bitwise OR of key_hashes)
-	RegisterPacKeyHashFunction(loader);
 
 	// Register pac_hash scalar function (UBIGINT -> UBIGINT with exactly 32 bits set)
 	RegisterPacHashFunction(loader);

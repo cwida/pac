@@ -127,6 +127,64 @@ The 43 queries cover a range of aggregate patterns:
 | Wide aggregates (many `SUM` columns) | Q30 |
 | String matching (`LIKE`, `REGEXP_REPLACE`) | Q21--Q27, Q29 |
 
+## List Transform Utility
+
+**Directory:** `benchmark/utility_listtransform/`
+
+Compares two approaches for computing multiple ratio expressions (numerator/denominator pairs) under PAC:
+
+- **Naive**: N independent `pac_sum()` calls — applies noise N times
+- **Optimized**: Single noise application via `pac_sum_counters()` + `list_transform()` + `pac_noised()`
+
+The benchmark runs queries Q1–Q20, where Q_N computes the sum of N ratio expressions of the form `100 * SUM(l_extendedprice * f(l_discount, l_tax)) / SUM(l_extendedprice)`.
+
+### Ungrouped (original)
+
+**Script:** `benchmark/utility_listtransform/run.sh`
+
+```bash
+bash benchmark/utility_listtransform/run.sh [database] [duckdb] [runs]
+
+# Example
+bash benchmark/utility_listtransform/run.sh tpch_sf1.db ./build/release/duckdb 100
+```
+
+### Grouped (with skew support)
+
+**Script:** `benchmark/utility_listtransform/run_grouped.sh`
+
+Adds `GROUP BY o_orderkey % ngroups` to amplify the noise effect (smaller groups = fewer rows per group = more noise relative to signal). Optionally applies Zipf skew to `l_extendedprice` to simulate real-world heavy-tailed value distributions.
+
+```bash
+bash benchmark/utility_listtransform/run_grouped.sh [database] [duckdb] [runs] [ngroups] [skew_alpha]
+```
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| database | `tpch_sf1.db` | TPC-H database file (must have tables loaded) |
+| duckdb | `./build/release/duckdb` | Path to DuckDB binary |
+| runs | `1` | Number of experiment runs |
+| ngroups | `100` | Number of GROUP BY buckets (`o_orderkey % N`) |
+| skew_alpha | `0` | Zipf skew for `l_extendedprice`. `0` = no skew. When > 0, copies the database and applies `l_extendedprice = 900 + 104100 * pow(random(), alpha)`. Recommended: `20` |
+
+```bash
+# 100 runs, 100 groups, Zipf alpha=20 (copies db to tpch_sf1_skew20.db)
+bash benchmark/utility_listtransform/run_grouped.sh tpch_sf1.db ./build/release/duckdb 100 100 20
+
+# No skew, just grouped
+bash benchmark/utility_listtransform/run_grouped.sh tpch_sf1.db ./build/release/duckdb 100 100
+```
+
+### Plotting
+
+**Script:** `benchmark/utility_listtransform/plot.R`
+
+Reads `results.csv` (or `results_grouped.csv`) and produces boxplots of relative error by num_ratios and variant.
+
+```bash
+Rscript benchmark/utility_listtransform/plot.R [results.csv]
+```
+
 ## See Also
 
 - [Benchmark Overview](README.md)

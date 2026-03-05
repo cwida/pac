@@ -36,6 +36,7 @@ set(EXTENSION_SOURCES
     src/aggregates/pac_aggregate.cpp
 
     src/aggregates/pac_count.cpp
+    src/aggregates/pac_distinct.cpp
     src/aggregates/pac_min_max.cpp
     src/aggregates/pac_sum.cpp
     src/aggregates/pac_avg.cpp

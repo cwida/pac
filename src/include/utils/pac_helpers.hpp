@@ -88,4 +88,18 @@ bool GetBooleanSetting(ClientContext &context, const string &setting_name, bool 
 // This resolves bindings via table_index back to the source LogicalGet nodes.
 bool ColumnBelongsToTable(LogicalOperator &plan, const string &table_name, const ColumnBinding &binding);
 
+// Collect all table indices in the subtree rooted at `node` into `out`.
+void CollectTableIndicesRecursive(LogicalOperator *node, std::unordered_set<idx_t> &out);
+
+// Apply an index remapping to all operator-specific table index fields in the subtree.
+void ApplyIndexMapToSubtree(LogicalOperator *node, const std::unordered_map<idx_t, idx_t> &map);
+
+// Walk all expressions in a subtree, updating BoundColumnRefExpression bindings per the map.
+void RemapBindingsInSubtree(LogicalOperator &op, const std::unordered_map<idx_t, idx_t> &map);
+
+// Collect indices from `subtree`, generate fresh indices avoiding `avoid`, apply remapping.
+// Returns the old→new index map that was applied.
+std::unordered_map<idx_t, idx_t> RemapSubtreeIndices(LogicalOperator *subtree, Binder &binder,
+                                                     const std::unordered_set<idx_t> &avoid);
+
 } // namespace duckdb

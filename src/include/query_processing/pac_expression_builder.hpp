@@ -50,9 +50,19 @@ ColumnBinding InsertHashProjectionAboveCTERef(OptimizerExtensionInput &input, un
 // Build AND expression from multiple hash expressions (for multiple PUs)
 unique_ptr<Expression> BuildAndFromHashes(OptimizerExtensionInput &input, vector<unique_ptr<Expression>> &hash_exprs);
 
+// Bind a PAC aggregate function (pac_sum, pac_count, etc.) with hash + value arguments.
+// Returns the bound aggregate expression.
+unique_ptr<Expression> BindPacAggregate(OptimizerExtensionInput &input, const string &pac_func_name,
+                                        unique_ptr<Expression> hash_expr, unique_ptr<Expression> value_expr);
+
+// Bind bit_or(hash_expr) with an IS NOT NULL filter on filter_col_expr.
+// Returns the bound aggregate expression.
+unique_ptr<Expression> BindBitOrAggregate(OptimizerExtensionInput &input, unique_ptr<Expression> hash_expr,
+                                          unique_ptr<Expression> filter_col_expr);
+
 // Modify aggregate expressions to use PAC functions (replaces the aggregate loop logic)
 void ModifyAggregatesWithPacFunctions(OptimizerExtensionInput &input, LogicalAggregate *agg,
-                                      unique_ptr<Expression> &hash_input_expr);
+                                      unique_ptr<Expression> &hash_input_expr, unique_ptr<LogicalOperator> &plan);
 
 } // namespace duckdb
 

@@ -1,15 +1,15 @@
 #!/bin/bash
 # Usage from the main project folder:
-#   bash benchmark/clickbench/run_utility_clickbench_100.sh [database] [duckdb_binary]
+#   bash benchmark/clickbench/run_utility_clickbench_100.sh [database] [duckdb_binary] [runs]
 #
 # Examples:
 #   bash benchmark/clickbench/run_utility_clickbench_100.sh clickbench_micro.db
-#   bash benchmark/clickbench/run_utility_clickbench_100.sh clickbench.db ./build/release/duckdb
+#   bash benchmark/clickbench/run_utility_clickbench_100.sh clickbench.db ./build/release/duckdb 10
 
 DB="${1:-clickbench_micro.db}"
 DUCKDB="${2:-./build/release/duckdb}"
+RUNS="${3:-100}"
 SCRIPT="benchmark/clickbench/clickbench_queries/utility.sql"
-RUNS=100
 
 # PAC setup: read from setup.sql
 SETUP_FILE="benchmark/clickbench/clickbench_queries/setup.sql"

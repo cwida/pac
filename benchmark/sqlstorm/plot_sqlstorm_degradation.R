@@ -1,7 +1,7 @@
 #!/usr/bin/env Rscript
-# SQLStorm degradation line plot
+# SQLStorm degradation plot (percentile-wise speedup distribution)
 # Reads CSV with columns: query_index, query, mode, time_ms, state
-# Plots per-query latency over execution sequence with LOESS smoothing
+# Plots DuckDB/SIMD-PAC speedup across query percentiles (RPT+ Fig 10 style)
 
 # Configure user-local library path for package installation
 user_lib <- Sys.getenv("R_LIBS_USER")
@@ -59,7 +59,6 @@ total_queries <- length(unique(raw$query_index))
 
 # Filter to queries where PAC was applied (if pac_applied column exists)
 if ("pac_applied" %in% colnames(raw)) {
-  # Keep only query indices where the SIMD-PAC row has pac_applied == true
   pac_applied_idx <- raw %>%
     filter(mode == "SIMD-PAC", pac_applied == TRUE) %>%
     pull(query_index)
@@ -70,7 +69,6 @@ if ("pac_applied" %in% colnames(raw)) {
 # Filter to successful queries only, and only keep pairs where both modes succeeded
 success <- raw %>% filter(state == "success")
 
-# Find query indices where both DuckDB and SIMD-PAC succeeded
 duckdb_idx <- success %>% filter(mode == "DuckDB") %>% pull(query_index)
 pac_idx <- success %>% filter(mode == "SIMD-PAC") %>% pull(query_index)
 both_idx <- intersect(duckdb_idx, pac_idx)
@@ -82,13 +80,14 @@ if (length(both_idx) == 0) {
 
 plot_data <- success %>% filter(query_index %in% both_idx)
 
-# --- Speedup/slowdown statistics ---
+# Compute per-query overhead: SIMD-PAC / DuckDB (>1 means PAC is slower)
 paired <- plot_data %>%
   select(query_index, mode, time_ms) %>%
   tidyr::pivot_wider(names_from = mode, values_from = time_ms) %>%
-  mutate(ratio = `SIMD-PAC` / DuckDB)
+  mutate(overhead = `SIMD-PAC` / DuckDB)
 
-message(sprintf("\n=== Speedup/Slowdown Statistics (%d queries where both succeeded) ===",
+# --- Statistics ---
+message(sprintf("\n=== Overhead Statistics (%d queries where both succeeded) ===",
                 nrow(paired)))
 message(sprintf("  DuckDB total:   %.1f ms", sum(paired$DuckDB)))
 message(sprintf("  SIMD-PAC total: %.1f ms", sum(paired$`SIMD-PAC`)))
@@ -98,81 +97,91 @@ if (overhead_pct >= 0) {
 } else {
   message(sprintf("  SIMD-PAC is %.1f%% faster overall", -overhead_pct))
 }
-message(sprintf("  Per-query ratio (SIMD-PAC / DuckDB):"))
+message(sprintf("  Per-query overhead (SIMD-PAC / DuckDB):"))
 message(sprintf("    mean=%.2fx, median=%.2fx, min=%.2fx, max=%.2fx",
-                mean(paired$ratio), median(paired$ratio),
-                min(paired$ratio), max(paired$ratio)))
-slower <- sum(paired$ratio > 1.0)
-faster <- sum(paired$ratio < 1.0)
-equal  <- sum(paired$ratio == 1.0)
+                mean(paired$overhead), median(paired$overhead),
+                min(paired$overhead), max(paired$overhead)))
+slower <- sum(paired$overhead > 1.0)
+faster <- sum(paired$overhead < 1.0)
+equal  <- sum(paired$overhead == 1.0)
 message(sprintf("    slower: %d (%.1f%%), faster: %d (%.1f%%), equal: %d",
                 slower, 100.0 * slower / nrow(paired),
                 faster, 100.0 * faster / nrow(paired), equal))
 message("===================================\n")
 
-# Reassign sequential x-position for plotting (1, 2, 3, ...)
-idx_map <- data.frame(
-  query_index = sort(unique(both_idx)),
-  x = seq_along(sort(unique(both_idx)))
-)
-plot_data <- plot_data %>% left_join(idx_map, by = "query_index")
+# Filter out queries where overhead < 0.9 (PAC more than 10% faster than DuckDB)
+paired <- paired %>% filter(overhead >= 0.9)
+message(sprintf("After filtering overhead >= 0.9x: %d queries remain", nrow(paired)))
 
-# Factor mode for consistent ordering
-plot_data$mode <- factor(plot_data$mode, levels = c("DuckDB", "SIMD-PAC"))
+# Sort by overhead and compute percentile
+paired <- paired %>%
+  arrange(overhead) %>%
+  mutate(percentile = (row_number() - 0.5) / n())
 
-mode_colors <- c("DuckDB" = "#95a5a6", "SIMD-PAC" = "#00b300")
-# Lighter versions for raw lines so grey is visible underneath green
-line_colors <- c("DuckDB" = "#a0b0b0", "SIMD-PAC" = "#5de65d")
+# Annotate key percentile values (like RPT+ Figure 10)
+annotation_pcts <- c(0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99)
+annotations <- data.frame(percentile = annotation_pcts) %>%
+  rowwise() %>%
+  mutate(
+    idx = which.min(abs(paired$percentile - percentile)),
+    overhead = paired$overhead[idx]
+  ) %>%
+  ungroup() %>%
+  mutate(label = sprintf("%.2fx", overhead))
 
-max_x <- max(plot_data$x)
-# Choose tick interval to avoid overlapping labels
-tick_interval <- if (max_x > 10000) 2000 else 1000
-x_breaks <- seq(0, max_x, by = tick_interval)
-if (!1 %in% x_breaks) x_breaks <- c(1, x_breaks[x_breaks > 0])
+# Greedy filter: drop annotations too close to any previously kept one
+keep <- rep(TRUE, nrow(annotations))
+for (i in 2:nrow(annotations)) {
+  for (j in seq_len(i - 1)) {
+    if (!keep[j]) next
+    dy <- abs(log2(annotations$overhead[i]) - log2(annotations$overhead[j]))
+    dx <- abs(annotations$percentile[i] - annotations$percentile[j])
+    if (dy < 0.6 && dx < 0.12) {
+      keep[i] <- FALSE
+      break
+    }
+  }
+}
+annotations <- annotations[keep, ]
 
-# Identify timed-out queries and map to sequential x positions
-timeout_data <- raw %>%
-  filter(state == "timeout") %>%
-  inner_join(idx_map, by = "query_index") %>%
-  distinct(x)
+# Y-axis: log2 scale with 2^k breaks
+overhead_range <- range(paired$overhead)
+y_min_exp <- floor(log2(overhead_range[1]))
+y_max_exp <- ceiling(log2(overhead_range[2]))
+y_breaks <- 2^(y_min_exp:y_max_exp)
 
-# Split data by mode for separate raw line colors
-duckdb_lines <- plot_data %>% filter(mode == "DuckDB")
-pac_lines <- plot_data %>% filter(mode == "SIMD-PAC")
-
-p <- ggplot(plot_data, aes(x = x, y = time_ms)) +
-  { if (nrow(timeout_data) > 0)
-    geom_vline(data = timeout_data, aes(xintercept = x),
-               color = "#e74c3c", linewidth = 0.5, alpha = 0.6, linetype = "dashed")
-  } +
-  geom_line(data = duckdb_lines, color = line_colors["DuckDB"], linewidth = 1.5, alpha = 0.5) +
-  geom_line(data = pac_lines, color = line_colors["SIMD-PAC"], linewidth = 1.5, alpha = 0.5) +
-  geom_smooth(aes(color = mode), method = "loess", se = FALSE, linewidth = 2.5) +
-  scale_color_manual(values = mode_colors, name = NULL) +
-  scale_x_continuous(breaks = x_breaks, labels = scales::comma) +
-  scale_y_log10(
-    labels = function(x) ifelse(x >= 100, paste0(x / 1000, "s"), paste0(x, "ms")),
-    expand = expansion(mult = c(0.05, 0.05))
-  ) +
-  labs(x = "Query Index", y = NULL) +
+p <- ggplot(paired, aes(x = percentile, y = overhead)) +
+  geom_hline(yintercept = 1.0, linetype = "dashed", linewidth = 1.2, color = "#95a5a6") +
+  geom_line(color = "#00b300", linewidth = 2.0) +
+  geom_point(data = annotations, aes(x = percentile, y = overhead),
+             color = "#00b300", size = 4) +
+  geom_text(data = annotations, aes(x = percentile, y = overhead, label = label),
+            vjust = -1.2, hjust = 0.5, size = 9, family = base_font, fontface = "bold") +
+  annotate("text", x = 0.98, y = 1.0, label = "Baseline: DuckDB",
+           hjust = 1, vjust = 1.5, size = 8, family = base_font,
+           color = "#95a5a6", fontface = "italic") +
+  scale_x_continuous(breaks = seq(0, 1, by = 0.1),
+                     expand = expansion(mult = c(0.04, 0.04))) +
+  scale_y_continuous(trans = "log2", breaks = y_breaks,
+                     labels = function(x) paste0(x, "x"),
+                     expand = expansion(mult = c(0.15, 0.15))) +
+  labs(x = "Overhead VS Query Percentile", y = NULL) +
   theme_bw(base_size = 40, base_family = base_font) +
   theme(
     panel.border = element_rect(linewidth = 1.0),
-    panel.grid.major = element_line(linewidth = 1.0),
+    panel.grid.major = element_line(linewidth = 0.5),
     panel.grid.minor = element_blank(),
-    legend.position = "top",
-    legend.title = element_blank(),
-    legend.text = element_text(size = 28),
-    legend.margin = margin(0, 0, -5, 0),
-    legend.box.margin = margin(0, 0, -20, 0),
-    axis.text.x = element_text(size = 24),
-    axis.text.y = element_text(size = 24),
+    axis.ticks.length = unit(0.3, "cm"),
+    axis.ticks = element_line(linewidth = 1.0),
+    axis.text.x = element_text(size = 28),
+    axis.text.y = element_text(size = 28),
     axis.title = element_text(size = 32),
+    axis.title.y = element_blank(),
     plot.title = element_blank(),
-    plot.margin = margin(20, 5, 5, 5)
+    plot.margin = margin(20, 15, 5, 5)
   )
 
-png(filename = out_file, width = 4000, height = 1800, res = 350)
+png(filename = out_file, width = 4000, height = 1350, res = 300)
   print(p)
 dev.off()
 message("Degradation plot saved to: ", out_file)

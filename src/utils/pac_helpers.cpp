@@ -18,6 +18,7 @@
 #include "duckdb/planner/operator/logical_expression_get.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
+#include "duckdb/planner/expression_iterator.hpp"
 #include <unordered_set>
 #include <unordered_map>
 #include <algorithm>
@@ -102,7 +103,7 @@ idx_t GetNextTableIndex(unique_ptr<LogicalOperator> &plan) {
 	return (max_index == DConstants::INVALID_INDEX) ? 0 : (max_index + 1);
 }
 
-static void CollectTableIndicesRecursive(LogicalOperator *node, idx_set &out) {
+void CollectTableIndicesRecursive(LogicalOperator *node, idx_set &out) {
 	if (!node) {
 		return;
 	}
@@ -135,7 +136,7 @@ static void CollectTableIndicesExcluding(LogicalOperator *node, LogicalOperator 
 	}
 }
 
-static void ApplyIndexMapToSubtree(LogicalOperator *node, const std::unordered_map<idx_t, idx_t> &map) {
+void ApplyIndexMapToSubtree(LogicalOperator *node, const std::unordered_map<idx_t, idx_t> &map) {
 	if (!node) {
 		return;
 	}
@@ -949,6 +950,85 @@ bool ColumnBelongsToTable(LogicalOperator &plan, const string &table_name, const
 	}
 
 	return false;
+}
+
+void RemapBindingsInSubtree(LogicalOperator &op, const std::unordered_map<idx_t, idx_t> &map) {
+	// Remap expressions owned by this operator
+	auto remap_expr = [&](unique_ptr<Expression> &expr) {
+		if (!expr) {
+			return;
+		}
+		// Use a recursive lambda to walk expression trees
+		std::function<void(Expression &)> walk = [&](Expression &e) {
+			if (e.type == ExpressionType::BOUND_COLUMN_REF) {
+				auto &col_ref = e.Cast<BoundColumnRefExpression>();
+				auto it = map.find(col_ref.binding.table_index);
+				if (it != map.end()) {
+					col_ref.binding.table_index = it->second;
+				}
+			}
+			ExpressionIterator::EnumerateChildren(e, [&](Expression &child) { walk(child); });
+		};
+		walk(*expr);
+	};
+
+	// Remap all expression vectors in the operator
+	for (auto &expr : op.expressions) {
+		remap_expr(expr);
+	}
+
+	// Operator-specific expressions
+	if (op.type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+		auto &agg = op.Cast<LogicalAggregate>();
+		for (auto &g : agg.groups) {
+			remap_expr(g);
+		}
+	} else if (op.type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
+		auto &join = op.Cast<LogicalComparisonJoin>();
+		for (auto &cond : join.conditions) {
+			remap_expr(cond.left);
+			remap_expr(cond.right);
+		}
+	}
+
+	// Recurse into children
+	for (auto &child : op.children) {
+		if (child) {
+			RemapBindingsInSubtree(*child, map);
+		}
+	}
+}
+
+std::unordered_map<idx_t, idx_t> RemapSubtreeIndices(LogicalOperator *subtree, Binder &binder, const idx_set &avoid) {
+	// 1. Collect all indices in subtree
+	idx_set subtree_indices;
+	CollectTableIndicesRecursive(subtree, subtree_indices);
+
+	// 2. Build mapping: for every index in subtree, generate a fresh one not in avoid or subtree_indices
+	std::unordered_map<idx_t, idx_t> map;
+	idx_set used = avoid;
+	// Also consider existing subtree indices as used to avoid self-collision during remap
+	for (auto idx : subtree_indices) {
+		used.insert(idx);
+	}
+
+	for (auto old_idx : subtree_indices) {
+		if (old_idx == DConstants::INVALID_INDEX) {
+			continue;
+		}
+		idx_t fresh = binder.GenerateTableIndex();
+		while (used.find(fresh) != used.end()) {
+			fresh = binder.GenerateTableIndex();
+		}
+		map[old_idx] = fresh;
+		used.insert(fresh);
+	}
+
+	// 3. Apply both operator-level and expression-level remapping
+	ApplyIndexMapToSubtree(subtree, map);
+	RemapBindingsInSubtree(*subtree, map);
+
+	return map;
 }
 
 } // namespace duckdb

@@ -238,7 +238,7 @@ build_plot <- function(df, out_file, plot_title, width = 4000, height = 1700, re
 }
 
 # Build plot function for paper (matches TPC-H paper style)
-build_plot_paper <- function(df, out_file, plot_title, width = 4000, height = 1600, res = 350, base_size = 40, base_family = base_font) {
+build_plot_paper <- function(df, out_file, plot_title, width = 4000, height = 1400, res = 350, base_size = 40, base_family = base_font) {
   # Only plot queries where all modes succeeded
   failed_queries <- df %>% filter(all_failed) %>% pull(query) %>% unique()
   df_success <- df %>% filter(!query %in% failed_queries)
@@ -276,13 +276,13 @@ build_plot_paper <- function(df, out_file, plot_title, width = 4000, height = 16
       legend.position = "top",
       legend.title = element_blank(),
       legend.text = element_text(size = 28),
-      legend.margin = margin(-5, 0, -5, 0),
-      legend.box.margin = margin(-5, 0, -20, 0),
-      axis.text.x = element_text(angle = 45, hjust = 1, size = 21),
+      legend.margin = margin(0, 0, -5, 0),
+      legend.box.margin = margin(0, 0, -20, 0),
+      axis.text.x = element_text(angle = 45, hjust = 1, size = 24),
       axis.text.y = element_text(size = 24),
       axis.title = element_text(size = 32),
       plot.title = element_blank(),
-      plot.margin = margin(15, 15, 5, 15)
+      plot.margin = margin(2, 5, 5, 5)
     )
 
   png(filename = out_file, width = width, height = height, res = res)
