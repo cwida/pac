@@ -1,12 +1,15 @@
-# PAC — DuckDB Privacy-Aware Aggregation Extension
+# PAC — Automatic Query Privatization
 
-PAC (Privacy-Aware-Computed) is a DuckDB extension that enforces privacy rules on aggregation queries over designated tables ("PAC tables"). It provides differential privacy guarantees by transforming standard SQL aggregates into privacy-preserving versions.
+PAC Privacy is a new and promising framework, which originated in 2025 from MIT, for protecting against Membership Inference Attacks. 
+It can work automatiucally, making it different from Differential Privacy, where queries need to be analyzed/vetted by privacy specialist beforehand.
+
+This  DuckDB extension enforces privacy rules on SQL queries, protecting sensitive entities (e.g. the User table), designated so in advance with SQL DDL statements. Protection is provided by adding noise, or by rejecting queries that would return protected columns as-is.
 
 ## What PAC Does
 
-PAC enables privacy-preserving analytics on sensitive data by automatically transforming SQL queries. When you designate a table as a **privacy unit** (using `CREATE PU TABLE` or `ALTER TABLE SET PAC`), PAC ensures that individual records cannot be directly accessed or leaked through query results.
+PAC enables privacy-preserving analytics on sensitive data by automatically transforming SQL queries. When you designate a table as a **privacy unit** (using `CREATE PU TABLE` or `ALTER TABLE SET PU`), PAC ensures that individual records cannot be directly accessed or leaked through query results.
 
-Instead of returning exact values, PAC transforms aggregates like `SUM`, `COUNT`, `AVG`, `MIN`, and `MAX` into probabilistic versions that provide strong privacy guarantees while maintaining statistical accuracy. The extension uses a bit-level probabilistic counting algorithm that distributes each record's contribution across 64 parallel counters based on a hash of the privacy unit's key, then samples from these counters with appropriate noise to produce privacy-preserving results.
+Instead of returning exact values, PAC transforms aggregates like `SUM`, `COUNT`, `AVG`, `MIN`, and `MAX` into probabilistic versions that provide strong privacy guarantees while maintaining statistical accuracy. The extension uses new bit-level stochastic aggregation algorithms that distributes each record's contribution across 64 parallel counters based on a hash of the privacy unit's key, then analyzes the distribution of these counters to add appropriate noise.
 
 PAC enforces access controls based on the `PROTECTED` clause:
 - **Privacy unit with PROTECTED columns**: Only the protected columns are restricted to aggregate access; non-protected columns can be projected normally
@@ -144,6 +147,7 @@ PRAGMA clear_pac_metadata;
 | `pac_seed` | BIGINT | (random) | Deterministic RNG seed for reproducible results |
 | `pac_mi` | DOUBLE | 0.0 | Privacy parameter (counter index, 0-63) |
 | `pac_noise` | BOOLEAN | true | Whether to add PAC noise |
+| `pac_diffcols` | INTEGER | NULL | Uses the first X columns to compare noised vs exact result (reports error perc) |
 | `pac_deterministic_noise` | BOOLEAN | false | Use deterministic noise (for testing) |
 | `pac_conservative_mode` | BOOLEAN | true | Throw errors on unsupported queries |
 | `pac_compiled_path` | VARCHAR | "." | Output path for compiled PAC SQL |
@@ -153,7 +157,6 @@ PRAGMA clear_pac_metadata;
 ```sql
 SET pac_seed = 42;
 SET pac_mi = 0;
-SET pac_deterministic_noise = true;
 SET threads = 1;
 ```
 
@@ -164,13 +167,10 @@ The PAC compiler has been tested with the TPC-H queries (SQL-92 constructs). In 
 | Feature | Status | Notes                                    |
 |---------|--------|------------------------------------------|
 | SUM, COUNT, AVG, MIN, MAX | ✅ Supported | Transformed to pac_sum, pac_count, etc.  |
-| COUNT(DISTINCT col) | ✅ Supported | Distinct counting within aggregates      |
+| COUNT(DISTINCT col) | ✅ Supported | Distinct within aggregates      |
 | Other aggregates | ❌ Disallowed | Custom aggregates not supported          |
 | Window functions | ❌ Disallowed | OVER clauses not supported               |
-| SELECT DISTINCT | ❌ Disallowed | Use aggregates instead                   |
-| INNER JOIN | ✅ Supported | Standard joins work                      |
-| LEFT/RIGHT OUTER JOIN | ✅ Supported | Outer joins are supported                |
-| CROSS JOIN | ✅ Supported | Cartesian products allowed               |
+| JOIN | ✅ Supported | All joins work                      |
 | Subqueries | ✅ Supported | Both correlated and uncorrelated         |
 | UNION / UNION ALL | ✅ Supported | Set union operations work                |
 | EXCEPT | ❌ Disallowed | Not implemented yet                      |
