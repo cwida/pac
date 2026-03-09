@@ -1676,7 +1676,6 @@ static CTEHashMatch FindCTEHashSource(LogicalOperator *op, const string &pu_tabl
 void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
                       const vector<string> &pu_table_names, const PACCompatibilityResult &check,
                       const CTETableMap &cte_map) {
-
 	// Find ALL aggregate nodes in the plan first
 	vector<LogicalAggregate *> all_aggregates;
 	FindAllAggregates(plan, all_aggregates);

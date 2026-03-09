@@ -6,6 +6,7 @@
 #define PAC_BITSLICE_COMPILER_HPP
 
 #include "duckdb.hpp"
+#include "duckdb/optimizer/optimizer_extension.hpp"
 #include "duckdb/planner/logical_operator.hpp"
 #include "metadata/pac_compatibility_check.hpp"
 

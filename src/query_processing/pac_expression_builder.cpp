@@ -557,7 +557,6 @@ BuildDistinctBranch(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> 
                     unique_ptr<Expression> distinct_value_expr,
                     const vector<std::pair<idx_t, string>> &agg_specs, // (original_agg_idx, original_func_name)
                     idx_t &out_group_index, idx_t &out_agg_index) {
-
 	auto &binder = input.optimizer.binder;
 	idx_t inner_group_index = binder.GenerateTableIndex();
 	idx_t inner_agg_index = binder.GenerateTableIndex();
@@ -616,7 +615,6 @@ static unique_ptr<LogicalOperator> BuildNonDistinctBranch(
     unique_ptr<Expression> hash_expr,
     const vector<std::pair<idx_t, const BoundAggregateExpression *>> &agg_specs, // (original_agg_idx, original_expr)
     idx_t &out_group_index, idx_t &out_agg_index) {
-
 	auto &binder = input.optimizer.binder;
 	idx_t group_index = binder.GenerateTableIndex();
 	idx_t agg_index = binder.GenerateTableIndex();

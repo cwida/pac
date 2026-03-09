@@ -67,6 +67,15 @@ install(
 
 # Test runners and benchmarks - only build for native platforms, not WASM or Windows
 # (Windows lacks unistd.h and other POSIX features used by the benchmark code)
+set(PAC_LINK_LIBS
+    duckdb_static
+    duckdb_generated_extension_loader
+    ${EXTENSION_NAME}
+    core_functions_extension
+    parquet_extension
+    jemalloc_extension
+    duckdb_static)
+
 if(NOT EMSCRIPTEN AND NOT WIN32)
     # Build a single unified test executable that invokes all tests via src/test/test_runner.cpp
     add_executable(pac_test_runner
@@ -75,21 +84,21 @@ if(NOT EMSCRIPTEN AND NOT WIN32)
         src/test/test_schema_metadata.cpp
         src/test/test_compiler_functions.cpp
         src/test/test_pac_parser.cpp)
-    target_link_libraries(pac_test_runner ${EXTENSION_NAME})
+    target_link_libraries(pac_test_runner ${PAC_LINK_LIBS})
 
     # TPCH + PAC benchmark runner
     add_executable(pac_tpch_benchmark benchmark/tpch/pac_tpch_benchmark.cpp)
-    target_link_libraries(pac_tpch_benchmark ${EXTENSION_NAME})
+    target_link_libraries(pac_tpch_benchmark ${PAC_LINK_LIBS})
 
     # TPCH Compiler benchmark runner (compares PAC vs regular TPC-H)
     add_executable(pac_tpch_compiler_benchmark benchmark/tpch/pac_tpch_compiler_benchmark.cpp)
-    target_link_libraries(pac_tpch_compiler_benchmark ${EXTENSION_NAME})
+    target_link_libraries(pac_tpch_compiler_benchmark ${PAC_LINK_LIBS})
 
     # ClickHouse/ClickBench benchmark runner
     add_executable(pac_clickhouse_benchmark benchmark/clickbench/pac_clickhouse_benchmark.cpp)
-    target_link_libraries(pac_clickhouse_benchmark ${EXTENSION_NAME})
+    target_link_libraries(pac_clickhouse_benchmark ${PAC_LINK_LIBS})
 
     # SQLStorm benchmark runner
     add_executable(pac_sqlstorm_benchmark benchmark/sqlstorm/pac_sqlstorm_benchmark.cpp)
-    target_link_libraries(pac_sqlstorm_benchmark ${EXTENSION_NAME})
+    target_link_libraries(pac_sqlstorm_benchmark ${PAC_LINK_LIBS})
 endif()

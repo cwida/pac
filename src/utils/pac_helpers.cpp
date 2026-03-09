@@ -817,7 +817,6 @@ static LogicalGet *TraceBindingToSource(LogicalOperator &plan, const ColumnBindi
 		if (op->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN || op->type == LogicalOperatorType::LOGICAL_JOIN ||
 		    op->type == LogicalOperatorType::LOGICAL_DELIM_JOIN || op->type == LogicalOperatorType::LOGICAL_ANY_JOIN ||
 		    op->type == LogicalOperatorType::LOGICAL_ASOF_JOIN) {
-
 			if (op->children.empty()) {
 				return nullptr;
 			}

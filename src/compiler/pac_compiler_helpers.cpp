@@ -160,7 +160,7 @@ unique_ptr<LogicalOperator> CreateLogicalJoin(const PACCompatibilityResult &chec
 	}
 
 	vector<unique_ptr<Expression>> extra;
-	return LogicalComparisonJoin::CreateJoin(context, JoinType::INNER, JoinRefType::REGULAR, std::move(left_operator),
+	return LogicalComparisonJoin::CreateJoin(JoinType::INNER, JoinRefType::REGULAR, std::move(left_operator),
 	                                         std::move(right), std::move(conditions), std::move(extra));
 }
 

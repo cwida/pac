@@ -159,16 +159,16 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// attach PAC-specific optimizer info so the extension can coordinate replan state
 	auto pac_info = make_shared_ptr<PACOptimizerInfo>();
 	pac_rewrite_rule.optimizer_info = pac_info;
-	db.config.optimizer_extensions.push_back(pac_rewrite_rule);
+	OptimizerExtension::Register(db.config, std::move(pac_rewrite_rule));
 
 	// Register PAC DROP TABLE cleanup rule (separate rule to handle DROP TABLE operations)
 	auto pac_drop_table_rule = PACDropTableRule();
-	db.config.optimizer_extensions.push_back(pac_drop_table_rule);
+	OptimizerExtension::Register(db.config, std::move(pac_drop_table_rule));
 
 	// Register PAC Top-K pushdown rule (post-optimizer: rewrites TopN over PAC aggregates)
 	auto pac_topk_rule = PACTopKRule();
 	pac_topk_rule.optimizer_info = pac_info;
-	db.config.optimizer_extensions.push_back(pac_topk_rule);
+	OptimizerExtension::Register(db.config, std::move(pac_topk_rule));
 
 	// Add option to enable/disable PAC noise application (this is useful for testing, since noise affects result
 	// determinism)
@@ -255,7 +255,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RegisterPacHashFunction(loader);
 
 	// Register PAC parser extension
-	db.config.parser_extensions.push_back(PACParserExtension());
+	ParserExtension::Register(db.config, PACParserExtension());
 
 	// Register PAC metadata management pragmas
 	auto save_pac_metadata_pragma =

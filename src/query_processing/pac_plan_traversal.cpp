@@ -592,7 +592,6 @@ bool AreTableColumnsAccessible(LogicalOperator *from_op, idx_t table_index) {
 			if (join.join_type == JoinType::MARK || join.join_type == JoinType::SEMI ||
 			    join.join_type == JoinType::ANTI || join.join_type == JoinType::RIGHT_SEMI ||
 			    join.join_type == JoinType::RIGHT_ANTI) {
-
 				// Check if table is in the right child (blocked side)
 				if (op->children.size() >= 2 && has_table_in_subtree(op->children[1].get())) {
 					// Table is in the right child of a MARK/SEMI/ANTI join - columns NOT accessible
