@@ -37,7 +37,7 @@ CREATE TABLE nation (
 );
 
 statement ok
-ALTER PU TABLE nation ADD PAC_KEY (n_nationkey);
+ALTER TABLE nation ADD PAC_KEY (n_nationkey);
 
 statement ok
 CREATE TABLE supplier (
@@ -48,7 +48,7 @@ CREATE TABLE supplier (
 );
 
 statement ok
-ALTER PU TABLE supplier ADD PAC_KEY (s_suppkey), ADD PAC_LINK (s_nationkey) REFERENCES nation(n_nationkey);
+ALTER TABLE supplier ADD PAC_KEY (s_suppkey), ADD PAC_LINK (s_nationkey) REFERENCES nation(n_nationkey);
 
 statement ok
 CREATE TABLE part (
@@ -58,7 +58,7 @@ CREATE TABLE part (
 );
 
 statement ok
-ALTER PU TABLE part ADD PAC_KEY (p_partkey);
+ALTER TABLE part ADD PAC_KEY (p_partkey);
 
 statement ok
 CREATE TABLE partsupp (
@@ -69,7 +69,7 @@ CREATE TABLE partsupp (
 );
 
 statement ok
-ALTER PU TABLE partsupp ADD PAC_KEY (ps_partkey, ps_suppkey), ADD PAC_LINK (ps_partkey) REFERENCES part(p_partkey), ADD PAC_LINK (ps_suppkey) REFERENCES supplier(s_suppkey);
+ALTER TABLE partsupp ADD PAC_KEY (ps_partkey, ps_suppkey), ADD PAC_LINK (ps_partkey) REFERENCES part(p_partkey), ADD PAC_LINK (ps_suppkey) REFERENCES supplier(s_suppkey);
 
 statement ok
 CREATE TABLE orders (
@@ -81,7 +81,7 @@ CREATE TABLE orders (
 );
 
 statement ok
-ALTER PU TABLE orders ADD PAC_KEY (o_orderkey), ADD PAC_LINK (o_custkey) REFERENCES customer(c_custkey);
+ALTER TABLE orders ADD PAC_KEY (o_orderkey), ADD PAC_LINK (o_custkey) REFERENCES customer(c_custkey);
 
 statement ok
 CREATE TABLE lineitem (
@@ -96,7 +96,7 @@ CREATE TABLE lineitem (
 );
 
 statement ok
-ALTER PU TABLE lineitem ADD PAC_KEY (l_orderkey, l_linenumber), ADD PAC_LINK (l_orderkey) REFERENCES orders(o_orderkey), ADD PAC_LINK (l_partkey) REFERENCES part(p_partkey), ADD PAC_LINK (l_suppkey) REFERENCES supplier(s_suppkey);
+ALTER TABLE lineitem ADD PAC_KEY (l_orderkey, l_linenumber), ADD PAC_LINK (l_orderkey) REFERENCES orders(o_orderkey), ADD PAC_LINK (l_partkey) REFERENCES part(p_partkey), ADD PAC_LINK (l_suppkey) REFERENCES supplier(s_suppkey);
 
 # ============================================================================
 # Test Data - Insert sample data for testing

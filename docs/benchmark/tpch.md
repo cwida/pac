@@ -17,16 +17,17 @@ The benchmark uses `pac_tpch_schema.sql` to configure the TPC-H schema for PAC:
 
 ```sql
 -- Mark customer as the privacy unit
+ALTER TABLE customer ADD PAC_KEY (c_custkey);
 ALTER TABLE customer SET PU;
 
--- Protected columns in customer table
+-- Protected columns in customer table (PU table -> use ALTER PU TABLE)
 ALTER PU TABLE customer ADD PROTECTED (c_custkey, c_comment, c_acctbal, c_name, c_address);
 
--- Orders -> Customer link (PAC_LINK chain)
-ALTER PU TABLE orders ADD PAC_LINK (o_custkey) REFERENCES customer(c_custkey);
+-- Orders -> Customer link (non-PU tables -> use ALTER TABLE)
+ALTER TABLE orders ADD PAC_LINK (o_custkey) REFERENCES customer(c_custkey);
 
 -- Lineitem -> Orders link
-ALTER PU TABLE lineitem ADD PAC_LINK (l_orderkey) REFERENCES orders(o_orderkey);
+ALTER TABLE lineitem ADD PAC_LINK (l_orderkey) REFERENCES orders(o_orderkey);
 ```
 
 This creates a privacy unit chain: `lineitem → orders → customer`. PAC queries on `lineitem` must join through `orders` to get the customer's privacy key hash.

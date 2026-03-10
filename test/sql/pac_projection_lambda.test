@@ -31,7 +31,7 @@ CREATE TABLE orders (
 );
 
 statement ok
-ALTER PU TABLE orders ADD PAC_KEY (o_orderkey), ADD PAC_LINK (o_custkey) REFERENCES customers(c_custkey);
+ALTER TABLE orders ADD PAC_KEY (o_orderkey), ADD PAC_LINK (o_custkey) REFERENCES customers(c_custkey);
 
 statement ok
 CREATE TABLE lineitem (
@@ -44,7 +44,7 @@ CREATE TABLE lineitem (
 );
 
 statement ok
-ALTER PU TABLE lineitem ADD PAC_KEY (l_orderkey, l_linenumber), ADD PAC_LINK (l_orderkey) REFERENCES orders(o_orderkey);
+ALTER TABLE lineitem ADD PAC_KEY (l_orderkey, l_linenumber), ADD PAC_LINK (l_orderkey) REFERENCES orders(o_orderkey);
 
 statement ok
 CREATE TABLE suppliers (
@@ -54,7 +54,7 @@ CREATE TABLE suppliers (
 );
 
 statement ok
-ALTER PU TABLE suppliers ADD PAC_KEY (s_suppkey);
+ALTER TABLE suppliers ADD PAC_KEY (s_suppkey);
 
 statement ok
 CREATE TABLE nations (
@@ -63,7 +63,7 @@ CREATE TABLE nations (
 );
 
 statement ok
-ALTER PU TABLE nations ADD PAC_KEY (n_nationkey);
+ALTER TABLE nations ADD PAC_KEY (n_nationkey);
 
 # ============================================================================
 # Test Data

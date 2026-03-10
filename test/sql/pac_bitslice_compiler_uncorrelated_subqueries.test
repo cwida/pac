@@ -135,28 +135,28 @@ INSERT INTO lineitem VALUES
 
 # Add PAC metadata for nation (standalone, key only)
 statement ok
-ALTER PU TABLE nation ADD PAC_KEY (n_nationkey);
+ALTER TABLE nation ADD PAC_KEY (n_nationkey);
 
 # Add PAC metadata for supplier (standalone, key only)
 statement ok
-ALTER PU TABLE supplier ADD PAC_KEY (s_suppkey);
+ALTER TABLE supplier ADD PAC_KEY (s_suppkey);
 
 # Add PAC metadata for orders (linked to customer)
 statement ok
-ALTER PU TABLE orders ADD PAC_KEY (o_orderkey);
+ALTER TABLE orders ADD PAC_KEY (o_orderkey);
 
 statement ok
-ALTER PU TABLE orders ADD PAC_LINK (o_custkey) REFERENCES customer(c_custkey);
+ALTER TABLE orders ADD PAC_LINK (o_custkey) REFERENCES customer(c_custkey);
 
 # Add PAC metadata for lineitem (linked to orders and supplier)
 statement ok
-ALTER PU TABLE lineitem ADD PAC_KEY (l_orderkey, l_linenumber);
+ALTER TABLE lineitem ADD PAC_KEY (l_orderkey, l_linenumber);
 
 statement ok
-ALTER PU TABLE lineitem ADD PAC_LINK (l_orderkey) REFERENCES orders(o_orderkey);
+ALTER TABLE lineitem ADD PAC_LINK (l_orderkey) REFERENCES orders(o_orderkey);
 
 statement ok
-ALTER PU TABLE lineitem ADD PAC_LINK (l_suppkey) REFERENCES supplier(s_suppkey);
+ALTER TABLE lineitem ADD PAC_LINK (l_suppkey) REFERENCES supplier(s_suppkey);
 
 # Test 1: TPC-H Q7-style query
 # Tests: Multiple joins, date filtering, projections with date_part, arithmetic expressions, GROUP BY, ORDER BY
@@ -466,14 +466,14 @@ INSERT INTO orders_nopk VALUES
 
 # Add PAC_KEY and set as PU
 statement ok
-ALTER PU TABLE customer_nopk ADD PAC_KEY (c_custkey);
+ALTER TABLE customer_nopk ADD PAC_KEY (c_custkey);
 
 statement ok
 ALTER TABLE customer_nopk SET PU;
 
 # Link orders to customer via PAC_LINK (this is how sf30 metadata works)
 statement ok
-ALTER PU TABLE orders_nopk ADD PAC_LINK (o_custkey) REFERENCES customer_nopk(c_custkey);
+ALTER TABLE orders_nopk ADD PAC_LINK (o_custkey) REFERENCES customer_nopk(c_custkey);
 
 # Q13-style nested aggregate: inner groups by PU key, outer should get noised
 query II

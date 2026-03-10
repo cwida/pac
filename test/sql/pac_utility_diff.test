@@ -48,10 +48,10 @@ FROM range(300) t(i);
 
 # Add PAC metadata for diff_data
 statement ok
-ALTER PU TABLE diff_data ADD PAC_KEY (id);
+ALTER TABLE diff_data ADD PAC_KEY (id);
 
 statement ok
-ALTER PU TABLE diff_data ADD PAC_LINK (pu_id) REFERENCES diff_pu(id);
+ALTER TABLE diff_data ADD PAC_LINK (pu_id) REFERENCES diff_pu(id);
 
 # ========== Test 1: pac_diffcols with key-based matching (perfect utility) ==========
 # pac_noise=true but pac_mi=0 means zero noise → utility should be 100%

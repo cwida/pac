@@ -4,6 +4,7 @@
 -- PAC_LINKs define foreign key relationships for PAC compilation
 
 -- Mark customer as the privacy unit
+ALTER TABLE customer ADD PAC_KEY (c_custkey);
 ALTER TABLE customer SET PU;
 
 -- Protected columns in customer table
@@ -14,7 +15,7 @@ ALTER PU TABLE customer ADD PROTECTED (c_name);
 ALTER PU TABLE customer ADD PROTECTED (c_address);
 
 -- Orders -> Customer link
-ALTER PU TABLE orders ADD PAC_LINK (o_custkey) REFERENCES customer(c_custkey);
+ALTER TABLE orders ADD PAC_LINK (o_custkey) REFERENCES customer(c_custkey);
 
 -- Lineitem -> Orders link
-ALTER PU TABLE lineitem ADD PAC_LINK (l_orderkey) REFERENCES orders(o_orderkey);
+ALTER TABLE lineitem ADD PAC_LINK (l_orderkey) REFERENCES orders(o_orderkey);

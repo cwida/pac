@@ -101,7 +101,7 @@ CREATE TABLE departments (
 );
 
 statement ok
-ALTER PU TABLE departments ADD PAC_KEY (dept_id);
+ALTER TABLE departments ADD PAC_KEY (dept_id);
 
 query I
 SELECT COUNT(*) FROM departments;
@@ -117,9 +117,9 @@ CREATE TABLE products (
 );
 
 statement ok
-ALTER PU TABLE products ADD PAC_KEY (product_id);
+ALTER TABLE products ADD PAC_KEY (product_id);
 
-# Test 7: ALTER PU TABLE with PAC_LINK
+# Test 7: ALTER TABLE with PAC_LINK
 statement ok
 CREATE TABLE reviews (
     review_id INTEGER,
@@ -128,11 +128,11 @@ CREATE TABLE reviews (
 );
 
 statement ok
-ALTER PU TABLE reviews ADD PAC_LINK (product_id) REFERENCES products(product_id);
+ALTER TABLE reviews ADD PAC_LINK (product_id) REFERENCES products(product_id);
 
-# Test 8: ALTER PU TABLE with PROTECTED columns
+# Test 8: ALTER TABLE with PROTECTED columns
 statement ok
-ALTER PU TABLE reviews ADD PROTECTED (rating);
+ALTER TABLE reviews ADD PROTECTED (rating);
 
 # Test 9: Save and load PAC metadata
 statement ok
@@ -228,51 +228,51 @@ PRAGMA clear_pac_metadata;
 # Edge Case Tests: Validation and Error Handling
 # ============================================================================
 
-# Test 13: ALTER PU TABLE on non-existent table should fail
+# Test 13: ALTER TABLE on non-existent table should fail
 statement ok
 CREATE TABLE test_table (id INTEGER, name VARCHAR);
 
 statement error
-ALTER PU TABLE nonexistent_table ADD PAC_LINK (id) REFERENCES test_table(id);
+ALTER TABLE nonexistent_table ADD PAC_LINK (id) REFERENCES test_table(id);
 ----
 Table 'nonexistent_table' does not exist
 
-# Test 14: ALTER PU TABLE with non-existent column should fail
+# Test 14: ALTER TABLE with non-existent column should fail
 statement error
-ALTER PU TABLE test_table ADD PROTECTED (nonexistent_column);
+ALTER TABLE test_table ADD PROTECTED (nonexistent_column);
 ----
 Column 'nonexistent_column' does not exist in table 'test_table'
 
-# Test 15: ALTER PU TABLE with PAC_LINK to non-existent local column should fail
+# Test 15: ALTER TABLE with PAC_LINK to non-existent local column should fail
 statement error
-ALTER PU TABLE test_table ADD PAC_LINK (nonexistent_col) REFERENCES test_table(id);
+ALTER TABLE test_table ADD PAC_LINK (nonexistent_col) REFERENCES test_table(id);
 ----
 Column 'nonexistent_col' does not exist in table 'test_table'
 
-# Test 16: ALTER PU TABLE with PAC_LINK to non-existent referenced table should fail
+# Test 16: ALTER TABLE with PAC_LINK to non-existent referenced table should fail
 statement error
-ALTER PU TABLE test_table ADD PAC_LINK (id) REFERENCES nonexistent_ref_table(id);
+ALTER TABLE test_table ADD PAC_LINK (id) REFERENCES nonexistent_ref_table(id);
 ----
 Referenced table 'nonexistent_ref_table' does not exist
 
-# Test 17: ALTER PU TABLE with PAC_LINK to non-existent referenced column should fail
+# Test 17: ALTER TABLE with PAC_LINK to non-existent referenced column should fail
 statement ok
 CREATE TABLE ref_table (ref_id INTEGER, value VARCHAR);
 
 statement error
-ALTER PU TABLE test_table ADD PAC_LINK (id) REFERENCES ref_table(nonexistent_ref_col);
+ALTER TABLE test_table ADD PAC_LINK (id) REFERENCES ref_table(nonexistent_ref_col);
 ----
 Column 'nonexistent_ref_col' does not exist in referenced table 'ref_table'
 
 # Test 18: Multiple non-existent protected columns should fail
 statement error
-ALTER PU TABLE test_table ADD PROTECTED (col1, col2, col3);
+ALTER TABLE test_table ADD PROTECTED (col1, col2, col3);
 ----
 Columns 'col1', 'col2', 'col3' do not exist in table 'test_table'. No protected columns were added.
 
 # Test 19: Mix of existing and non-existing protected columns should fail atomically
 statement error
-ALTER PU TABLE test_table ADD PROTECTED (name, nonexistent_col);
+ALTER TABLE test_table ADD PROTECTED (name, nonexistent_col);
 ----
 Column 'nonexistent_col' does not exist in table 'test_table'
 
@@ -284,59 +284,59 @@ statement ok
 CREATE TABLE composite_ref (ref1 INTEGER, ref2 INTEGER);
 
 statement error
-ALTER PU TABLE composite_test ADD PAC_LINK (id1, nonexistent_id) REFERENCES composite_ref(ref1, ref2);
+ALTER TABLE composite_test ADD PAC_LINK (id1, nonexistent_id) REFERENCES composite_ref(ref1, ref2);
 ----
 Column 'nonexistent_id' does not exist in table 'composite_test'
 
 # Test 21: Composite PAC_LINK with non-existent referenced column should fail
 statement error
-ALTER PU TABLE composite_test ADD PAC_LINK (id1, id2) REFERENCES composite_ref(ref1, nonexistent_ref);
+ALTER TABLE composite_test ADD PAC_LINK (id1, id2) REFERENCES composite_ref(ref1, nonexistent_ref);
 ----
 Column 'nonexistent_ref' does not exist in referenced table 'composite_ref'
 
-# Test 22: Valid ALTER PU TABLE operations should succeed
+# Test 22: Valid ALTER TABLE operations should succeed
 statement ok
-ALTER PU TABLE test_table ADD PROTECTED (name);
+ALTER TABLE test_table ADD PROTECTED (name);
 
 statement ok
-ALTER PU TABLE test_table ADD PAC_LINK (id) REFERENCES ref_table(ref_id);
+ALTER TABLE test_table ADD PAC_LINK (id) REFERENCES ref_table(ref_id);
 
 # Test 23: Adding duplicate protected column should fail
 statement error
-ALTER PU TABLE test_table ADD PROTECTED (name);
+ALTER TABLE test_table ADD PROTECTED (name);
 ----
 Column 'name' is already marked as protected
 
 # Test 24: Adding duplicate PAC_LINK should be idempotent (no error)
 statement ok
-ALTER PU TABLE test_table ADD PAC_LINK (id) REFERENCES ref_table(ref_id);
+ALTER TABLE test_table ADD PAC_LINK (id) REFERENCES ref_table(ref_id);
 
 # Test 25: Case insensitivity - duplicate protected columns should fail
 statement error
-ALTER PU TABLE test_table ADD PROTECTED (NAME);
+ALTER TABLE test_table ADD PROTECTED (NAME);
 ----
 Column 'name' is already marked as protected
 
 # Test 26: Case insensitivity - table and column names in PAC_LINK
 statement ok
-ALTER PU TABLE TEST_TABLE ADD PAC_LINK (ID) REFERENCES REF_TABLE(REF_ID);
+ALTER TABLE TEST_TABLE ADD PAC_LINK (ID) REFERENCES REF_TABLE(REF_ID);
 
 # Test 27: Valid composite PAC_LINK should succeed
 statement ok
-ALTER PU TABLE composite_test ADD PAC_LINK (id1, id2) REFERENCES composite_ref(ref1, ref2);
+ALTER TABLE composite_test ADD PAC_LINK (id1, id2) REFERENCES composite_ref(ref1, ref2);
 
 # Test 28: Whitespace handling in column lists
 statement ok
 CREATE TABLE whitespace_test (col_a INTEGER, col_b INTEGER, col_c VARCHAR);
 
 statement ok
-ALTER PU TABLE whitespace_test ADD PROTECTED ( col_a , col_b , col_c );
+ALTER TABLE whitespace_test ADD PROTECTED ( col_a , col_b , col_c );
 
 statement ok
 CREATE TABLE whitespace_ref (ref_a INTEGER, ref_b INTEGER);
 
 statement ok
-ALTER PU TABLE whitespace_test ADD PAC_LINK ( col_a , col_b ) REFERENCES whitespace_ref ( ref_a , ref_b );
+ALTER TABLE whitespace_test ADD PAC_LINK ( col_a , col_b ) REFERENCES whitespace_ref ( ref_a , ref_b );
 
 # Test 29: Empty or malformed syntax should fail gracefully
 # (These will fail at the SQL parser level before reaching PAC parser)
@@ -346,16 +346,16 @@ statement ok
 CREATE TABLE accumulate_test (id INTEGER, col1 VARCHAR, col2 VARCHAR, col3 INTEGER, ref_id INTEGER);
 
 statement ok
-ALTER PU TABLE accumulate_test ADD PROTECTED (col1);
+ALTER TABLE accumulate_test ADD PROTECTED (col1);
 
 statement ok
-ALTER PU TABLE accumulate_test ADD PROTECTED (col2);
+ALTER TABLE accumulate_test ADD PROTECTED (col2);
 
 statement ok
-ALTER PU TABLE accumulate_test ADD PAC_LINK (ref_id) REFERENCES ref_table(ref_id);
+ALTER TABLE accumulate_test ADD PAC_LINK (ref_id) REFERENCES ref_table(ref_id);
 
 statement ok
-ALTER PU TABLE accumulate_test ADD PROTECTED (col3);
+ALTER TABLE accumulate_test ADD PROTECTED (col3);
 
 # Test 31: Verify metadata persistence and reload
 statement ok
@@ -407,16 +407,16 @@ statement ok
 CREATE TABLE target_b (id INTEGER);
 
 statement ok
-ALTER PU TABLE link_test ADD PAC_LINK (ref_id) REFERENCES target_a(id);
+ALTER TABLE link_test ADD PAC_LINK (ref_id) REFERENCES target_a(id);
 
 statement error
-ALTER PU TABLE link_test ADD PAC_LINK (ref_id) REFERENCES target_b(id);
+ALTER TABLE link_test ADD PAC_LINK (ref_id) REFERENCES target_b(id);
 ----
 Column(s) already have a PAC_LINK defined
 
 # Test 33: Same PAC_LINK twice should be idempotent (no error)
 statement ok
-ALTER PU TABLE link_test ADD PAC_LINK (ref_id) REFERENCES target_a(id);
+ALTER TABLE link_test ADD PAC_LINK (ref_id) REFERENCES target_a(id);
 
 # Test 34: Composite key duplicate link to different target should fail
 statement ok
@@ -429,10 +429,10 @@ statement ok
 CREATE TABLE comp_target_b (key1 INTEGER, key2 INTEGER);
 
 statement ok
-ALTER PU TABLE comp_link_test ADD PAC_LINK (id1, id2) REFERENCES comp_target_a(key1, key2);
+ALTER TABLE comp_link_test ADD PAC_LINK (id1, id2) REFERENCES comp_target_a(key1, key2);
 
 statement error
-ALTER PU TABLE comp_link_test ADD PAC_LINK (id1, id2) REFERENCES comp_target_b(key1, key2);
+ALTER TABLE comp_link_test ADD PAC_LINK (id1, id2) REFERENCES comp_target_b(key1, key2);
 ----
 Column(s) already have a PAC_LINK defined
 
@@ -526,14 +526,14 @@ statement ok
 CREATE TABLE comp_drop_ref (ref1 INTEGER, ref2 INTEGER);
 
 statement ok
-ALTER PU TABLE comp_drop_test ADD PAC_LINK (id1, id2) REFERENCES comp_drop_ref(ref1, ref2);
+ALTER TABLE comp_drop_test ADD PAC_LINK (id1, id2) REFERENCES comp_drop_ref(ref1, ref2);
 
 statement ok
-ALTER PU TABLE comp_drop_test DROP PAC_LINK (id1, id2);
+ALTER TABLE comp_drop_test DROP PAC_LINK (id1, id2);
 
 # Test 43: DROP composite PAC_LINK that doesn't exist should fail
 statement error
-ALTER PU TABLE comp_drop_test DROP PAC_LINK (id1, id2);
+ALTER TABLE comp_drop_test DROP PAC_LINK (id1, id2);
 ----
 No PAC LINK found on columns ('id1', 'id2')
 
@@ -542,7 +542,7 @@ statement ok
 CREATE TABLE no_pac_table (id INTEGER, name VARCHAR);
 
 statement error
-ALTER PU TABLE no_pac_table DROP PROTECTED (name);
+ALTER TABLE no_pac_table DROP PROTECTED (name);
 ----
 Table 'no_pac_table' does not have any PAC metadata to drop
 
@@ -715,7 +715,7 @@ CREATE TABLE set_pu_test (
 );
 
 statement ok
-ALTER PU TABLE set_pu_test ADD PAC_KEY (id);
+ALTER TABLE set_pu_test ADD PAC_KEY (id);
 
 statement ok
 INSERT INTO set_pu_test VALUES (1, 'Alice', 100), (2, 'Bob', 200);
@@ -781,7 +781,7 @@ PAC rewrite: protected column 'set_pu_with_protected.secret_col' can only be acc
 
 # Add PAC_KEY and SET PU to make it a privacy unit
 statement ok
-ALTER PU TABLE set_pu_with_protected ADD PAC_KEY (id);
+ALTER TABLE set_pu_with_protected ADD PAC_KEY (id);
 
 statement ok
 ALTER TABLE set_pu_with_protected SET PU;
@@ -889,7 +889,7 @@ CREATE TABLE regular_orders (
 );
 
 statement ok
-ALTER PU TABLE regular_orders ADD PAC_LINK (user_id) REFERENCES pu_users(id);
+ALTER TABLE regular_orders ADD PAC_LINK (user_id) REFERENCES pu_users(id);
 
 # Test 59: ALTER PU TABLE ADD PAC_LINK from PU table to PU table should fail
 statement ok
@@ -914,10 +914,10 @@ CREATE TABLE will_become_pu (
 
 # First add a PAC_KEY and a link to the PU table
 statement ok
-ALTER PU TABLE will_become_pu ADD PAC_KEY (id);
+ALTER TABLE will_become_pu ADD PAC_KEY (id);
 
 statement ok
-ALTER PU TABLE will_become_pu ADD PAC_LINK (user_id) REFERENCES pu_users(id);
+ALTER TABLE will_become_pu ADD PAC_LINK (user_id) REFERENCES pu_users(id);
 
 # Now trying to SET PU should fail because it would create a PU->PU link
 statement error
@@ -940,10 +940,10 @@ CREATE TABLE source_table (
 );
 
 statement ok
-ALTER PU TABLE source_table ADD PAC_KEY (id);
+ALTER TABLE source_table ADD PAC_KEY (id);
 
 statement ok
-ALTER PU TABLE source_table ADD PAC_LINK (target_id) REFERENCES target_non_pu(id);
+ALTER TABLE source_table ADD PAC_LINK (target_id) REFERENCES target_non_pu(id);
 
 # This should succeed because target_non_pu is not a PU table
 statement ok
@@ -963,15 +963,15 @@ CREATE TABLE multi_link_test (
 
 # Add PAC_KEY first
 statement ok
-ALTER PU TABLE multi_link_test ADD PAC_KEY (id);
+ALTER TABLE multi_link_test ADD PAC_KEY (id);
 
 # Link to non-PU table should work
 statement ok
-ALTER PU TABLE multi_link_test ADD PAC_LINK (non_pu_ref) REFERENCES target_non_pu(id);
+ALTER TABLE multi_link_test ADD PAC_LINK (non_pu_ref) REFERENCES target_non_pu(id);
 
 # Link to PU table should also work (table is not a PU table yet)
 statement ok
-ALTER PU TABLE multi_link_test ADD PAC_LINK (pu_ref) REFERENCES pu_users(id);
+ALTER TABLE multi_link_test ADD PAC_LINK (pu_ref) REFERENCES pu_users(id);
 
 # But now SET PU should fail because of the link to pu_users
 statement error

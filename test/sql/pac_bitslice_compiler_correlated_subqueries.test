@@ -96,16 +96,16 @@ INSERT INTO lineitem VALUES
 
 # Configure PAC metadata for orders and lineitem
 statement ok
-ALTER PU TABLE orders ADD PAC_KEY (o_orderkey);
+ALTER TABLE orders ADD PAC_KEY (o_orderkey);
 
 statement ok
-ALTER PU TABLE orders ADD PAC_LINK (o_custkey) REFERENCES customer(c_custkey);
+ALTER TABLE orders ADD PAC_LINK (o_custkey) REFERENCES customer(c_custkey);
 
 statement ok
-ALTER PU TABLE lineitem ADD PAC_KEY (l_orderkey, l_linenumber);
+ALTER TABLE lineitem ADD PAC_KEY (l_orderkey, l_linenumber);
 
 statement ok
-ALTER PU TABLE lineitem ADD PAC_LINK (l_orderkey) REFERENCES orders(o_orderkey);
+ALTER TABLE lineitem ADD PAC_LINK (l_orderkey) REFERENCES orders(o_orderkey);
 
 statement ok
 SET pac_join_elimination = true;
@@ -206,7 +206,7 @@ INSERT INTO part VALUES
     (6, 'Part#6', 'Manufacturer#1', 'Brand#23', 'PROMO BURNISHED TIN', 3, 'MED BOX', 12.00, 'comment6');
 
 statement ok
-ALTER PU TABLE part ADD PAC_KEY (p_partkey);
+ALTER TABLE part ADD PAC_KEY (p_partkey);
 
 # TPC-H Q17-style query: Calculate average yearly revenue for a specific brand/container
 # where quantity is less than 20% of the average quantity for that part
@@ -390,10 +390,10 @@ INSERT INTO supplier VALUES
     (6, 'Supplier#006', 'Address6', 1, '666-666-6666', 6000.00, 'comment6');
 
 statement ok
-ALTER PU TABLE supplier ADD PAC_KEY (s_suppkey);
+ALTER TABLE supplier ADD PAC_KEY (s_suppkey);
 
 statement ok
-ALTER PU TABLE nation ADD PAC_KEY (n_nationkey);
+ALTER TABLE nation ADD PAC_KEY (n_nationkey);
 
 # Update orders to have 'F' status for Q21 (which filters on o_orderstatus = 'F')
 statement ok

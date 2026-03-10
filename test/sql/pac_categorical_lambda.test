@@ -25,7 +25,7 @@ CREATE TABLE products (
 );
 
 statement ok
-ALTER PU TABLE products ADD PAC_KEY (product_id);
+ALTER TABLE products ADD PAC_KEY (product_id);
 
 statement ok
 CREATE PU TABLE customers (
@@ -46,7 +46,7 @@ CREATE TABLE sales (
 );
 
 statement ok
-ALTER PU TABLE sales ADD PAC_KEY (sale_id), ADD PAC_LINK (customer_id) REFERENCES customers(customer_id), ADD PAC_LINK (product_id) REFERENCES products(product_id);
+ALTER TABLE sales ADD PAC_KEY (sale_id), ADD PAC_LINK (customer_id) REFERENCES customers(customer_id), ADD PAC_LINK (product_id) REFERENCES products(product_id);
 
 # ============================================================================
 # Test Data

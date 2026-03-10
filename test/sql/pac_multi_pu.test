@@ -38,7 +38,7 @@ statement ok
 CREATE TABLE pu_no_pk (id INTEGER, grp INTEGER, val INTEGER);
 
 statement ok
-ALTER PU TABLE pu_no_pk ADD PAC_KEY (id);
+ALTER TABLE pu_no_pk ADD PAC_KEY (id);
 
 statement ok
 ALTER TABLE pu_no_pk SET PU;
@@ -93,25 +93,25 @@ INSERT INTO mid_no_pk SELECT i, i % 5, i * 4 FROM range(30) t(i);
 
 # Add PAC metadata for intermediate tables
 statement ok
-ALTER PU TABLE mid_ab ADD PAC_KEY (mid_id);
+ALTER TABLE mid_ab ADD PAC_KEY (mid_id);
 
 statement ok
-ALTER PU TABLE mid_ab ADD PAC_LINK (a_fk) REFERENCES pu_a(id);
+ALTER TABLE mid_ab ADD PAC_LINK (a_fk) REFERENCES pu_a(id);
 
 statement ok
-ALTER PU TABLE mid_ab ADD PAC_LINK (b_fk) REFERENCES pu_b(id);
+ALTER TABLE mid_ab ADD PAC_LINK (b_fk) REFERENCES pu_b(id);
 
 statement ok
-ALTER PU TABLE mid_ac ADD PAC_KEY (mid_id);
+ALTER TABLE mid_ac ADD PAC_KEY (mid_id);
 
 statement ok
-ALTER PU TABLE mid_ac ADD PAC_LINK (a_fk) REFERENCES pu_a(id);
+ALTER TABLE mid_ac ADD PAC_LINK (a_fk) REFERENCES pu_a(id);
 
 statement ok
-ALTER PU TABLE mid_ac ADD PAC_LINK (c_fk_a, c_fk_b) REFERENCES pu_c(a_id, b_id);
+ALTER TABLE mid_ac ADD PAC_LINK (c_fk_a, c_fk_b) REFERENCES pu_c(a_id, b_id);
 
 statement ok
-ALTER PU TABLE mid_no_pk ADD PAC_KEY (mid_id);
+ALTER TABLE mid_no_pk ADD PAC_KEY (mid_id);
 
 # Basic aggregate on intermediate table joining single PU
 query I
@@ -208,16 +208,16 @@ statement ok
 INSERT INTO mid_all SELECT i, i % 10, i % 11, i % 5, i % 6, i % 5, i * 5 FROM range(30) t(i);
 
 statement ok
-ALTER PU TABLE mid_all ADD PAC_KEY (mid_id);
+ALTER TABLE mid_all ADD PAC_KEY (mid_id);
 
 statement ok
-ALTER PU TABLE mid_all ADD PAC_LINK (a_fk) REFERENCES pu_a(id);
+ALTER TABLE mid_all ADD PAC_LINK (a_fk) REFERENCES pu_a(id);
 
 statement ok
-ALTER PU TABLE mid_all ADD PAC_LINK (b_fk) REFERENCES pu_b(id);
+ALTER TABLE mid_all ADD PAC_LINK (b_fk) REFERENCES pu_b(id);
 
 statement ok
-ALTER PU TABLE mid_all ADD PAC_LINK (c_fk_a, c_fk_b) REFERENCES pu_c(a_id, b_id);
+ALTER TABLE mid_all ADD PAC_LINK (c_fk_a, c_fk_b) REFERENCES pu_c(a_id, b_id);
 
 # Four-way PU join: pu_a (single PK), pu_b (single PK), pu_c (composite PK), pu_no_pk (no PK/rowid)
 # This is the ultimate stress test - all PU types in one query

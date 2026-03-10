@@ -293,12 +293,12 @@ bool PACParserExtension::ParseCreatePACTable(const string &query, string &stripp
 }
 
 /**
- * ParseAlterTableAddPAC: Parses ALTER PU TABLE ... ADD ... statement
+ * ParseAlterTableAddPAC: Parses ALTER [PU] TABLE ... ADD ... statement
  *
  * Syntax:
- *   ALTER PU TABLE table_name ADD PAC_KEY (col1);
- *   ALTER PU TABLE table_name ADD PAC_LINK (col1) REFERENCES other(col2);
- *   ALTER PU TABLE table_name ADD PROTECTED (col1, col2);
+ *   ALTER [PU] TABLE table_name ADD PAC_KEY (col1);
+ *   ALTER [PU] TABLE table_name ADD PAC_LINK (col1) REFERENCES other(col2);
+ *   ALTER [PU] TABLE table_name ADD PROTECTED (col1, col2);
  *
  * This operation is metadata-only (no actual DDL executed). It merges new
  * metadata with existing metadata for the table.
@@ -311,14 +311,21 @@ bool PACParserExtension::ParseCreatePACTable(const string &query, string &stripp
 bool PACParserExtension::ParseAlterTableAddPAC(const string &query, string &stripped_sql, PACTableMetadata &metadata) {
 	string query_lower = StringUtil::Lower(query);
 
-	// Check if this is an ALTER PU TABLE statement
-	// This is a PAC-specific syntax: ALTER PU TABLE table_name ADD PAC KEY/LINK/PROTECTED
-	if (query_lower.find("alter pu table") == string::npos) {
+	// Check if this is an ALTER [PU] TABLE ... ADD PAC_KEY/PAC_LINK/PROTECTED statement
+	// Both "ALTER PU TABLE t ADD ..." and "ALTER TABLE t ADD ..." are supported,
+	// but the PU keyword must match the table's actual PU status.
+	bool has_pac_add =
+	    (query_lower.find("add pac_key") != string::npos || query_lower.find("add pac_link") != string::npos ||
+	     query_lower.find("add protected") != string::npos);
+	if (!has_pac_add) {
 		return false;
 	}
 
-	// Extract table name - for ALTER PU TABLE, the table name comes after "alter pu table"
-	std::regex alter_pu_regex(R"(alter\s+pu\s+table\s+([a-zA-Z_][a-zA-Z0-9_]*))");
+	// Detect whether the user wrote ALTER PU TABLE or ALTER TABLE
+	bool used_pu_keyword = (query_lower.find("alter pu table") != string::npos);
+
+	// Extract table name - supports both "ALTER PU TABLE t" and "ALTER TABLE t"
+	std::regex alter_pu_regex(R"(alter\s+(?:pu\s+)?table\s+([a-zA-Z_][a-zA-Z0-9_]*))");
 	std::smatch match;
 	if (!std::regex_search(query_lower, match, alter_pu_regex)) {
 		return false;
@@ -340,6 +347,17 @@ bool PACParserExtension::ParseAlterTableAddPAC(const string &query, string &stri
 #endif
 	}
 
+	// Validate PU keyword matches table status
+	bool is_pu = existing && existing->is_privacy_unit;
+	if (used_pu_keyword && !is_pu) {
+		throw ParserException("Table '" + metadata.table_name +
+		                      "' is not a privacy unit. Use ALTER TABLE (without PU) for non-PU tables.");
+	}
+	if (!used_pu_keyword && is_pu) {
+		throw ParserException("Table '" + metadata.table_name +
+		                      "' is a privacy unit. Use ALTER PU TABLE for PU tables.");
+	}
+
 	// Check for PAC-related keywords
 	bool has_pac_key = query_lower.find("pac_key") != string::npos;
 	bool has_pac_link = query_lower.find("pac_link") != string::npos;
@@ -356,6 +374,11 @@ bool PACParserExtension::ParseAlterTableAddPAC(const string &query, string &stri
 					metadata.primary_key_columns.push_back(col);
 				}
 			}
+		}
+		if (!is_pu) {
+			Printer::Print("Note: PAC_KEY added to non-PU table '" + metadata.table_name +
+			               "'. This does not trigger PAC compilation until you run: ALTER TABLE " +
+			               metadata.table_name + " SET PU");
 		}
 	}
 
@@ -439,11 +462,11 @@ bool PACParserExtension::ParseAlterTableAddPAC(const string &query, string &stri
 }
 
 /**
- * ParseAlterTableDropPAC: Parses ALTER PU TABLE ... DROP ... statement
+ * ParseAlterTableDropPAC: Parses ALTER [PU] TABLE ... DROP ... statement
  *
  * Syntax:
- *   ALTER PU TABLE table_name DROP PAC_LINK (col1);
- *   ALTER PU TABLE table_name DROP PROTECTED (col1, col2);
+ *   ALTER [PU] TABLE table_name DROP PAC_LINK (col1);
+ *   ALTER [PU] TABLE table_name DROP PROTECTED (col1, col2);
  *   ALTER TABLE table_name SET PU;
  *   ALTER TABLE table_name UNSET PU;
  *
@@ -502,13 +525,9 @@ bool PACParserExtension::ParseAlterTableDropPAC(const string &query, string &str
 		return true;
 	}
 
-	// Check if this is an ALTER PU TABLE ... DROP statement
-	// Must check for specific DROP patterns (drop pac link, drop protected), not just "drop" anywhere
-	if (query_lower.find("alter pu table") == string::npos) {
-		return false;
-	}
-
-	// Check for DROP PAC_LINK or DROP PROTECTED (not just "drop" which could be part of table name)
+	// Check if this is an ALTER [PU] TABLE ... DROP PAC_LINK/PROTECTED statement
+	// Both "ALTER PU TABLE t DROP ..." and "ALTER TABLE t DROP ..." are supported,
+	// but the PU keyword must match the table's actual PU status.
 	bool has_drop_link = query_lower.find("drop pac_link") != string::npos;
 	bool has_drop_protected = query_lower.find("drop protected") != string::npos;
 
@@ -516,10 +535,13 @@ bool PACParserExtension::ParseAlterTableDropPAC(const string &query, string &str
 		return false;
 	}
 
-	// Extract table name - for ALTER PU TABLE, the table name comes after "alter pu table"
-	std::regex alter_pu_regex(R"(alter\s+pu\s+table\s+([a-zA-Z_][a-zA-Z0-9_]*))");
+	// Detect whether the user wrote ALTER PU TABLE or ALTER TABLE
+	bool used_pu_keyword = (query_lower.find("alter pu table") != string::npos);
+
+	// Extract table name - supports both "ALTER PU TABLE t" and "ALTER TABLE t"
+	std::regex alter_drop_regex(R"(alter\s+(?:pu\s+)?table\s+([a-zA-Z_][a-zA-Z0-9_]*))");
 	// Reuse 'match' variable declared earlier
-	if (!std::regex_search(query_lower, match, alter_pu_regex)) {
+	if (!std::regex_search(query_lower, match, alter_drop_regex)) {
 		return false;
 	}
 	metadata.table_name = match[1].str();
@@ -530,6 +552,16 @@ bool PACParserExtension::ParseAlterTableDropPAC(const string &query, string &str
 		throw ParserException("Table '" + metadata.table_name + "' does not have any PAC metadata to drop");
 	}
 	metadata = *existing;
+
+	// Validate PU keyword matches table status
+	if (used_pu_keyword && !metadata.is_privacy_unit) {
+		throw ParserException("Table '" + metadata.table_name +
+		                      "' is not a privacy unit. Use ALTER TABLE (without PU) for non-PU tables.");
+	}
+	if (!used_pu_keyword && metadata.is_privacy_unit) {
+		throw ParserException("Table '" + metadata.table_name +
+		                      "' is a privacy unit. Use ALTER PU TABLE for PU tables.");
+	}
 
 	// Handle DROP PAC LINK (col1, col2, ...)
 	if (has_drop_link) {

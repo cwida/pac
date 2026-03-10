@@ -79,7 +79,7 @@ INSERT INTO shipments SELECT i AS id, (i % 100) AS item_id, (i % 5) AS grp, (i %
 
 # Mark users as a privacy unit (required for PAC compilation)
 statement ok
-ALTER PU TABLE users ADD PAC_KEY (id);
+ALTER TABLE users ADD PAC_KEY (id);
 
 statement ok
 ALTER TABLE users SET PU;
@@ -88,22 +88,22 @@ statement ok
 ALTER PU TABLE users ADD PROTECTED (name);
 
 statement ok
-ALTER PU TABLE orders ADD PAC_KEY (id);
+ALTER TABLE orders ADD PAC_KEY (id);
 
 statement ok
-ALTER PU TABLE orders ADD PAC_LINK (user_id) REFERENCES users(id);
+ALTER TABLE orders ADD PAC_LINK (user_id) REFERENCES users(id);
 
 statement ok
-ALTER PU TABLE order_items ADD PAC_KEY (id);
+ALTER TABLE order_items ADD PAC_KEY (id);
 
 statement ok
-ALTER PU TABLE order_items ADD PAC_LINK (order_id) REFERENCES orders(id);
+ALTER TABLE order_items ADD PAC_LINK (order_id) REFERENCES orders(id);
 
 statement ok
-ALTER PU TABLE shipments ADD PAC_KEY (id);
+ALTER TABLE shipments ADD PAC_KEY (id);
 
 statement ok
-ALTER PU TABLE shipments ADD PAC_LINK (item_id) REFERENCES order_items(id);
+ALTER TABLE shipments ADD PAC_LINK (item_id) REFERENCES order_items(id);
 
 # ==============================================================================
 # Test 1: Basic aggregation on child table connected via PAC_LINK
@@ -387,10 +387,10 @@ CREATE TABLE side_orders (
 );
 
 statement ok
-ALTER PU TABLE side_orders ADD PAC_KEY (id);
+ALTER TABLE side_orders ADD PAC_KEY (id);
 
 statement ok
-ALTER PU TABLE side_orders ADD PAC_LINK (user_id) REFERENCES users(id);
+ALTER TABLE side_orders ADD PAC_LINK (user_id) REFERENCES users(id);
 
 statement ok
 INSERT INTO side_orders

@@ -32,7 +32,7 @@ INSERT INTO t1 VALUES (1, 10), (2, 20), (3, 30), (3 , 40);
 
 # Mark table as PAC privacy unit
 statement ok
-ALTER PU TABLE t1 ADD PAC_KEY (a);
+ALTER TABLE t1 ADD PAC_KEY (a);
 
 statement ok
 ALTER TABLE t1 SET PU;
@@ -182,10 +182,10 @@ statement ok
 INSERT INTO sales VALUES (1, 100, 50.00, 2), (1, 101, 30.00, 1), (2, 100, 75.00, 3), (2, 102, 25.00, 1);
 
 statement ok
-ALTER PU TABLE sales ADD PROTECTED (amount, quantity);
+ALTER TABLE sales ADD PROTECTED (amount, quantity);
 
 statement ok
-ALTER PU TABLE sales ADD PAC_LINK (customer_id) REFERENCES customers(id);
+ALTER TABLE sales ADD PAC_LINK (customer_id) REFERENCES customers(id);
 
 # PAC-compatible: protected column inside SUM aggregate
 query I
@@ -392,7 +392,7 @@ SELECT id, value FROM convertible_table ORDER BY id;
 
 # Add PAC_KEY and mark as privacy unit
 statement ok
-ALTER PU TABLE convertible_table ADD PAC_KEY (id);
+ALTER TABLE convertible_table ADD PAC_KEY (id);
 
 statement ok
 ALTER TABLE convertible_table SET PU;

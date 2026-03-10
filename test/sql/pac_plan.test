@@ -43,7 +43,7 @@ INSERT INTO nation VALUES
     (4, 'USA', 2);
 
 statement ok
-ALTER PU TABLE nation ADD PAC_KEY (n_nationkey);
+ALTER TABLE nation ADD PAC_KEY (n_nationkey);
 
 # Customer table (Privacy Unit)
 statement ok
@@ -83,10 +83,10 @@ INSERT INTO supplier VALUES
     (4, 'Supplier#004', 1);
 
 statement ok
-ALTER PU TABLE supplier ADD PAC_KEY (s_suppkey);
+ALTER TABLE supplier ADD PAC_KEY (s_suppkey);
 
 statement ok
-ALTER PU TABLE supplier ADD PAC_LINK (s_nationkey) REFERENCES nation(n_nationkey);
+ALTER TABLE supplier ADD PAC_LINK (s_nationkey) REFERENCES nation(n_nationkey);
 
 # Orders table
 statement ok
@@ -98,10 +98,10 @@ CREATE TABLE orders(
 );
 
 statement ok
-ALTER PU TABLE orders ADD PAC_KEY (o_orderkey);
+ALTER TABLE orders ADD PAC_KEY (o_orderkey);
 
 statement ok
-ALTER PU TABLE orders ADD PAC_LINK (o_custkey) REFERENCES customer(c_custkey);
+ALTER TABLE orders ADD PAC_LINK (o_custkey) REFERENCES customer(c_custkey);
 
 statement ok
 INSERT INTO orders VALUES
@@ -131,13 +131,13 @@ CREATE TABLE lineitem(
 );
 
 statement ok
-ALTER PU TABLE lineitem ADD PAC_KEY (l_orderkey, l_linenumber);
+ALTER TABLE lineitem ADD PAC_KEY (l_orderkey, l_linenumber);
 
 statement ok
-ALTER PU TABLE lineitem ADD PAC_LINK (l_orderkey) REFERENCES orders(o_orderkey);
+ALTER TABLE lineitem ADD PAC_LINK (l_orderkey) REFERENCES orders(o_orderkey);
 
 statement ok
-ALTER PU TABLE lineitem ADD PAC_LINK (l_suppkey) REFERENCES supplier(s_suppkey);
+ALTER TABLE lineitem ADD PAC_LINK (l_suppkey) REFERENCES supplier(s_suppkey);
 
 statement ok
 INSERT INTO lineitem VALUES
