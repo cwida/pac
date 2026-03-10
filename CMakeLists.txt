@@ -75,8 +75,9 @@ set(PAC_LINK_LIBS
     parquet_extension
     duckdb_static)
 
-# jemalloc is only built on Linux 64-bit; conditionally link it when available
-if(TARGET jemalloc_extension)
+# jemalloc is only built on Linux 64-bit; link it when the extension was loaded
+# (can't use if(TARGET ...) here because the target isn't defined yet at this point)
+if(DUCKDB_EXTENSION_JEMALLOC_SHOULD_LINK)
     list(APPEND PAC_LINK_LIBS jemalloc_extension)
 endif()
 
