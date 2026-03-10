@@ -866,8 +866,7 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 	}
 
 	// Also check tables reachable via PAC_LINKs for protected columns
-	// (FindForeignKeys already includes PAC_LINKs, but we need to find protected columns
-	// in tables that may not be directly scanned)
+	// (need to find protected columns in tables that may not be directly scanned)
 	{
 		std::unordered_set<string> visited;
 		std::queue<string> to_check;
@@ -879,7 +878,7 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 			string current = to_check.front();
 			to_check.pop();
 
-			// Get outgoing links (both FK and PAC_LINK)
+			// Get outgoing PAC_LINKs
 			auto fks = FindForeignKeys(context, current);
 			for (auto &fk : fks) {
 				string ref_table = fk.first;
@@ -919,7 +918,7 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 		}
 	}
 
-	// --- Populate per-table metadata (PKs and FKs) for scanned tables ---
+	// --- Populate per-table metadata (PAC_KEYs and PAC_LINKs) for scanned tables ---
 	for (auto &name : scanned_tables) {
 		ColumnMetadata md;
 		md.table_name = name;
@@ -928,8 +927,7 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 		result.table_metadata[name] = std::move(md);
 	}
 
-	// Compute FK/LINK paths from scanned tables to any privacy unit (transitive)
-	// FindForeignKeyBetween uses FindForeignKeys which already includes PAC_LINKs
+	// Compute PAC_LINK paths from scanned tables to any privacy unit (transitive)
 	auto fk_paths = FindForeignKeyBetween(context, all_privacy_units, scanned_tables);
 
 	// Populate metadata for tables in FK paths that aren't scanned
@@ -1033,25 +1031,11 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 				PAC_DEBUG_PRINT("Source2: table=" + table_name + " FK to " + ref_table +
 				                " reaches PU. Protected FK cols on " + table_lower);
 #endif
-				// Also protect the referenced (PK) columns on the parent table.
-				// E.g., lineitem(l_orderkey) REFERENCES orders(o_orderkey):
+				// Also protect the referenced columns on the parent table.
+				// E.g., PAC_LINK (l_orderkey) REFERENCES orders(o_orderkey):
 				// l_orderkey is protected above; o_orderkey must also be protected
 				// because it's a key along the PAC link chain.
-				// Try real FK constraints first, then PAC_LINK metadata.
 				auto ref_pk_cols = FindReferencedPKColumns(context, table_name, ref_table);
-				if (ref_pk_cols.empty()) {
-					// Fall back to PAC_LINK metadata
-					auto *table_pac_meta = metadata_mgr.GetTableMetadata(table_name);
-					if (table_pac_meta) {
-						for (auto &link : table_pac_meta->links) {
-							if (StringUtil::Lower(link.referenced_table) == ref_lower) {
-								for (auto &ref_col : link.referenced_columns) {
-									ref_pk_cols.push_back(ref_col);
-								}
-							}
-						}
-					}
-				}
 				for (auto &pk_col : ref_pk_cols) {
 					result.protected_columns[ref_lower].insert(StringUtil::Lower(pk_col));
 #if PAC_DEBUG

@@ -22,55 +22,66 @@ PRAGMA clear_pac_metadata;
 # ============================================================================
 
 statement ok
-CREATE TABLE customer (
-    c_custkey INTEGER PRIMARY KEY,
+CREATE PU TABLE customer (
+    c_custkey INTEGER,
     c_name VARCHAR,
     c_nationkey INTEGER,
-    c_acctbal DECIMAL(15,2)
+    c_acctbal DECIMAL(15,2),
+    PAC_KEY (c_custkey)
 );
 
 statement ok
 CREATE TABLE nation (
-    n_nationkey INTEGER PRIMARY KEY,
+    n_nationkey INTEGER,
     n_name VARCHAR
 );
 
 statement ok
+ALTER PU TABLE nation ADD PAC_KEY (n_nationkey);
+
+statement ok
 CREATE TABLE supplier (
-    s_suppkey INTEGER PRIMARY KEY,
+    s_suppkey INTEGER,
     s_name VARCHAR,
     s_address VARCHAR,
-    s_nationkey INTEGER,
-    FOREIGN KEY (s_nationkey) REFERENCES nation(n_nationkey)
+    s_nationkey INTEGER
 );
 
 statement ok
+ALTER PU TABLE supplier ADD PAC_KEY (s_suppkey), ADD PAC_LINK (s_nationkey) REFERENCES nation(n_nationkey);
+
+statement ok
 CREATE TABLE part (
-    p_partkey INTEGER PRIMARY KEY,
+    p_partkey INTEGER,
     p_name VARCHAR,
     p_type VARCHAR
 );
+
+statement ok
+ALTER PU TABLE part ADD PAC_KEY (p_partkey);
 
 statement ok
 CREATE TABLE partsupp (
     ps_partkey INTEGER,
     ps_suppkey INTEGER,
     ps_availqty INTEGER,
-    ps_supplycost DECIMAL(15,2),
-    PRIMARY KEY (ps_partkey, ps_suppkey),
-    FOREIGN KEY (ps_partkey) REFERENCES part(p_partkey),
-    FOREIGN KEY (ps_suppkey) REFERENCES supplier(s_suppkey)
+    ps_supplycost DECIMAL(15,2)
 );
 
 statement ok
+ALTER PU TABLE partsupp ADD PAC_KEY (ps_partkey, ps_suppkey), ADD PAC_LINK (ps_partkey) REFERENCES part(p_partkey), ADD PAC_LINK (ps_suppkey) REFERENCES supplier(s_suppkey);
+
+statement ok
 CREATE TABLE orders (
-    o_orderkey INTEGER PRIMARY KEY,
+    o_orderkey INTEGER,
     o_custkey INTEGER,
     o_orderstatus VARCHAR,
     o_totalprice DECIMAL(15,2),
-    o_orderdate DATE,
-    FOREIGN KEY (o_custkey) REFERENCES customer(c_custkey)
+    o_orderdate DATE
 );
+
+statement ok
+ALTER PU TABLE orders ADD PAC_KEY (o_orderkey), ADD PAC_LINK (o_custkey) REFERENCES customer(c_custkey);
 
 statement ok
 CREATE TABLE lineitem (
@@ -81,12 +92,11 @@ CREATE TABLE lineitem (
     l_quantity DECIMAL(15,2),
     l_extendedprice DECIMAL(15,2),
     l_discount DECIMAL(15,2),
-    l_shipdate DATE,
-    PRIMARY KEY (l_orderkey, l_linenumber),
-    FOREIGN KEY (l_orderkey) REFERENCES orders(o_orderkey),
-    FOREIGN KEY (l_partkey) REFERENCES part(p_partkey),
-    FOREIGN KEY (l_suppkey) REFERENCES supplier(s_suppkey)
+    l_shipdate DATE
 );
+
+statement ok
+ALTER PU TABLE lineitem ADD PAC_KEY (l_orderkey, l_linenumber), ADD PAC_LINK (l_orderkey) REFERENCES orders(o_orderkey), ADD PAC_LINK (l_partkey) REFERENCES part(p_partkey), ADD PAC_LINK (l_suppkey) REFERENCES supplier(s_suppkey);
 
 # ============================================================================
 # Test Data - Insert sample data for testing
@@ -172,9 +182,6 @@ INSERT INTO lineitem VALUES
 # ============================================================================
 # PAC Configuration
 # ============================================================================
-
-statement ok
-ALTER TABLE customer SET PU;
 
 statement ok
 SET pac_seed = 42;

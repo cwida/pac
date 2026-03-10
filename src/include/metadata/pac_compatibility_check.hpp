@@ -10,9 +10,8 @@ namespace duckdb {
 
 // Lightweight metadata about a table discovered during compatibility checking.
 // - table_name: unqualified table name
-// - pks: primary key column names in order
-// - fks: list of foreign-key relationships declared on the table; each pair is
-//        (referenced_table_name, vector<fk_column_names_on_this_table>)
+// - pks: PAC_KEY column names (identifying the privacy unit)
+// - fks: PAC_LINK relationships: (referenced_table_name, local_column_names)
 struct ColumnMetadata {
 	string table_name;
 	vector<string> pks;
@@ -20,12 +19,11 @@ struct ColumnMetadata {
 };
 
 struct PACCompatibilityResult {
-	// Map from scanned table name (start) to FK/LINK path vector of table names from start to privacy unit
-	// This includes paths via both actual FK constraints AND PAC LINK metadata
+	// Map from scanned table name (start) to PAC_LINK path vector of table names from start to privacy unit
 	std::unordered_map<string, vector<string>> fk_paths;
 	// List of tables that have protected columns (these are treated as implicit privacy units)
 	vector<string> tables_with_protected_columns;
-	// Lightweight per-table metadata (pk/fk) for scanned tables
+	// Lightweight per-table metadata (PAC_KEY/PAC_LINK) for scanned tables
 	std::unordered_map<string, ColumnMetadata> table_metadata;
 	// Whether plan passed basic PAC-eligibility checks (aggregation/join/window/distinct checks)
 	bool eligible_for_rewrite = false;
@@ -34,7 +32,7 @@ struct PACCompatibilityResult {
 	// List of scanned tables that are NOT configured PAC tables
 	vector<string> scanned_non_pu_tables;
 	// Per-table set of protected column names (lowercased).
-	// Union of: PU PKs, LINK FK columns reaching a PU, metadata PROTECTED columns.
+	// Union of: PAC_KEY columns, PAC_LINK columns reaching a PU, metadata PROTECTED columns.
 	std::unordered_map<string, std::unordered_set<string>> protected_columns;
 };
 

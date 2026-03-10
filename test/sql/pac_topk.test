@@ -29,7 +29,7 @@ SET pac_mi = 0
 # Nation table
 statement ok
 CREATE TABLE nation(
-    n_nationkey INTEGER PRIMARY KEY,
+    n_nationkey INTEGER,
     n_name VARCHAR,
     n_regionkey INTEGER
 );
@@ -42,13 +42,17 @@ INSERT INTO nation VALUES
     (3, 'CHINA', 1),
     (4, 'USA', 2);
 
+statement ok
+ALTER PU TABLE nation ADD PAC_KEY (n_nationkey);
+
 # Customer table (Privacy Unit)
 statement ok
-CREATE TABLE customer(
-    c_custkey INTEGER PRIMARY KEY,
+CREATE PU TABLE customer(
+    c_custkey INTEGER,
     c_name VARCHAR,
     c_nationkey INTEGER,
-    FOREIGN KEY (c_nationkey) REFERENCES nation(n_nationkey)
+    PAC_KEY (c_custkey),
+    PAC_LINK (c_nationkey) REFERENCES nation(n_nationkey)
     PROTECTED (c_name)
 );
 
@@ -66,12 +70,17 @@ INSERT INTO customer VALUES
 # Orders table
 statement ok
 CREATE TABLE orders(
-    o_orderkey INTEGER PRIMARY KEY,
+    o_orderkey INTEGER,
     o_custkey INTEGER,
     o_orderdate DATE,
-    o_comment VARCHAR,
-    FOREIGN KEY (o_custkey) REFERENCES customer(c_custkey)
+    o_comment VARCHAR
 );
+
+statement ok
+ALTER PU TABLE orders ADD PAC_KEY (o_orderkey);
+
+statement ok
+ALTER PU TABLE orders ADD PAC_LINK (o_custkey) REFERENCES customer(c_custkey);
 
 statement ok
 INSERT INTO orders VALUES
@@ -97,10 +106,14 @@ CREATE TABLE lineitem(
     l_quantity DECIMAL(15,2),
     l_extendedprice DECIMAL(15,2),
     l_discount DECIMAL(15,2),
-    l_shipdate DATE,
-    PRIMARY KEY (l_orderkey, l_linenumber),
-    FOREIGN KEY (l_orderkey) REFERENCES orders(o_orderkey)
+    l_shipdate DATE
 );
+
+statement ok
+ALTER PU TABLE lineitem ADD PAC_KEY (l_orderkey, l_linenumber);
+
+statement ok
+ALTER PU TABLE lineitem ADD PAC_LINK (l_orderkey) REFERENCES orders(o_orderkey);
 
 statement ok
 INSERT INTO lineitem VALUES
@@ -117,9 +130,6 @@ INSERT INTO lineitem VALUES
     (10, 1, 4, 20.00, 2000.00, 0.00, '1996-08-28'),
     (11, 1, 2, 25.00, 2500.00, 0.10, '1995-12-05'),
     (12, 1, 3, 30.00, 3000.00, 0.05, '1996-02-20');
-
-statement ok
-ALTER TABLE customer SET PU;
 
 # ============================================================
 # Execution tests: verify TopK pushdown produces valid results

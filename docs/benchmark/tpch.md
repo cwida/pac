@@ -22,7 +22,7 @@ ALTER TABLE customer SET PU;
 -- Protected columns in customer table
 ALTER PU TABLE customer ADD PROTECTED (c_custkey, c_comment, c_acctbal, c_name, c_address);
 
--- Orders -> Customer link (foreign key chain)
+-- Orders -> Customer link (PAC_LINK chain)
 ALTER PU TABLE orders ADD PAC_LINK (o_custkey) REFERENCES customer(c_custkey);
 
 -- Lineitem -> Orders link

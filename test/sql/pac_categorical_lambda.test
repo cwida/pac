@@ -18,30 +18,35 @@ require pac
 
 statement ok
 CREATE TABLE products (
-    product_id INTEGER PRIMARY KEY,
+    product_id INTEGER,
     product_name VARCHAR,
     base_price DECIMAL(10,2),
     category VARCHAR
 );
 
 statement ok
-CREATE TABLE customers (
-    customer_id INTEGER PRIMARY KEY,
+ALTER PU TABLE products ADD PAC_KEY (product_id);
+
+statement ok
+CREATE PU TABLE customers (
+    customer_id INTEGER,
     customer_name VARCHAR,
-    region VARCHAR
+    region VARCHAR,
+    PAC_KEY (customer_id)
 );
 
 statement ok
 CREATE TABLE sales (
-    sale_id INTEGER PRIMARY KEY,
+    sale_id INTEGER,
     product_id INTEGER,
     customer_id INTEGER,
     quantity INTEGER,
     sale_price DECIMAL(10,2),
-    sale_date DATE,
-    FOREIGN KEY (product_id) REFERENCES products(product_id),
-    FOREIGN KEY (customer_id) REFERENCES customers(customer_id)
+    sale_date DATE
 );
+
+statement ok
+ALTER PU TABLE sales ADD PAC_KEY (sale_id), ADD PAC_LINK (customer_id) REFERENCES customers(customer_id), ADD PAC_LINK (product_id) REFERENCES products(product_id);
 
 # ============================================================================
 # Test Data
@@ -99,9 +104,6 @@ INSERT INTO sales VALUES
 # ============================================================================
 # PAC Configuration
 # ============================================================================
-
-statement ok
-ALTER TABLE customers SET PU;
 
 statement ok
 SET pac_seed = 42;

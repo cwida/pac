@@ -277,15 +277,10 @@ bool PACParserExtension::ParseCreatePACTable(const string &query, string &stripp
 	// Extract protected columns
 	ExtractProtectedColumns(query, metadata.protected_columns);
 
-	// Validate: CREATE PU TABLE must have PAC_KEY or PRIMARY KEY
+	// Validate: CREATE PU TABLE must have PAC_KEY
 	if (is_create_pu_table) {
-		bool has_pac_key = !metadata.primary_key_columns.empty();
-		// Check for PRIMARY KEY in the SQL (both inline "col INTEGER PRIMARY KEY" and constraint "PRIMARY KEY(col)")
-		bool has_primary_key = std::regex_search(query_lower, std::regex(R"(\bprimary\s+key\b)"));
-
-		if (!has_pac_key && !has_primary_key) {
-			throw ParserException(
-			    "CREATE PU TABLE requires either a PAC_KEY or PRIMARY KEY constraint to identify the privacy unit");
+		if (metadata.primary_key_columns.empty()) {
+			throw ParserException("CREATE PU TABLE requires a PAC_KEY clause to identify the privacy unit");
 		}
 	}
 
@@ -474,6 +469,14 @@ bool PACParserExtension::ParseAlterTableDropPAC(const string &query, string &str
 		if (existing) {
 			metadata = *existing;
 		}
+
+		// Require PAC_KEY to be defined before SET PU
+		if (metadata.primary_key_columns.empty()) {
+			throw ParserException("ALTER TABLE SET PU requires a PAC_KEY. "
+			                      "First run: ALTER PU TABLE " +
+			                      metadata.table_name + " ADD PAC_KEY (column_name)");
+		}
+
 		metadata.is_privacy_unit = true;
 
 		// Metadata-only operation

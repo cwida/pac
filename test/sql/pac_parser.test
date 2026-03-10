@@ -96,9 +96,12 @@ NULL
 # Test 5: Regular CREATE TABLE (no PAC keywords) should still work
 statement ok
 CREATE TABLE departments (
-    dept_id INTEGER PRIMARY KEY,
+    dept_id INTEGER,
     dept_name VARCHAR
 );
+
+statement ok
+ALTER PU TABLE departments ADD PAC_KEY (dept_id);
 
 query I
 SELECT COUNT(*) FROM departments;
@@ -691,13 +694,28 @@ PRAGMA clear_pac_metadata;
 # ALTER TABLE SET PU / UNSET PU Tests
 # ============================================================================
 
+# Test 49a: ALTER TABLE SET PU without PAC_KEY should fail
+statement ok
+CREATE TABLE set_pu_no_key (id INTEGER, value INTEGER);
+
+statement error
+ALTER TABLE set_pu_no_key SET PU;
+----
+ALTER TABLE SET PU requires a PAC_KEY
+
+statement ok
+DROP TABLE set_pu_no_key;
+
 # Test 49: ALTER TABLE SET PU on a regular table
 statement ok
 CREATE TABLE set_pu_test (
-    id INTEGER PRIMARY KEY,
+    id INTEGER,
     name VARCHAR,
     value INTEGER
 );
+
+statement ok
+ALTER PU TABLE set_pu_test ADD PAC_KEY (id);
 
 statement ok
 INSERT INTO set_pu_test VALUES (1, 'Alice', 100), (2, 'Bob', 200);
@@ -713,7 +731,7 @@ SELECT * FROM set_pu_test ORDER BY id;
 statement ok
 ALTER TABLE set_pu_test SET PU;
 
-# After SET PU - cannot project columns (it's now a privacy unit, PK is protected)
+# After SET PU - PAC_KEY column is protected
 statement error
 SELECT * FROM set_pu_test;
 ----
@@ -761,18 +779,27 @@ SELECT secret_col FROM set_pu_with_protected;
 ----
 PAC rewrite: protected column 'set_pu_with_protected.secret_col' can only be accessed inside aggregate functions
 
-# Now SET PU to make it a privacy unit
+# Add PAC_KEY and SET PU to make it a privacy unit
+statement ok
+ALTER PU TABLE set_pu_with_protected ADD PAC_KEY (id);
+
 statement ok
 ALTER TABLE set_pu_with_protected SET PU;
 
-# After SET PU with PROTECTED columns defined:
-# - Non-protected columns CAN still be projected
-# - Only protected columns are restricted
-query II
+# After SET PU with PAC_KEY(id) and PROTECTED(secret_col):
+# - PAC_KEY column (id) is always protected
+# - Explicitly PROTECTED columns are also protected
+# - Other columns (public_col) can be projected
+statement error
 SELECT id, public_col FROM set_pu_with_protected ORDER BY id;
 ----
-1	public1
-2	public2
+PAC rewrite: protected column 'set_pu_with_protected.id' can only be accessed inside aggregate functions
+
+query I
+SELECT public_col FROM set_pu_with_protected ORDER BY public_col;
+----
+public1
+public2
 
 # Protected columns still cannot be projected
 statement error
@@ -885,7 +912,10 @@ CREATE TABLE will_become_pu (
     data VARCHAR
 );
 
-# First add a link to the PU table
+# First add a PAC_KEY and a link to the PU table
+statement ok
+ALTER PU TABLE will_become_pu ADD PAC_KEY (id);
+
 statement ok
 ALTER PU TABLE will_become_pu ADD PAC_LINK (user_id) REFERENCES pu_users(id);
 
@@ -910,6 +940,9 @@ CREATE TABLE source_table (
 );
 
 statement ok
+ALTER PU TABLE source_table ADD PAC_KEY (id);
+
+statement ok
 ALTER PU TABLE source_table ADD PAC_LINK (target_id) REFERENCES target_non_pu(id);
 
 # This should succeed because target_non_pu is not a PU table
@@ -927,6 +960,10 @@ CREATE TABLE multi_link_test (
     pu_ref INTEGER,
     non_pu_ref INTEGER
 );
+
+# Add PAC_KEY first
+statement ok
+ALTER PU TABLE multi_link_test ADD PAC_KEY (id);
 
 # Link to non-PU table should work
 statement ok

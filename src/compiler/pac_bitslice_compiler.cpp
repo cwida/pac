@@ -244,7 +244,7 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
                          unique_ptr<LogicalOperator> &plan, const vector<string> &gets_missing,
                          const vector<string> &gets_present, const vector<string> &fk_path,
                          const vector<string> &privacy_units, const CTETableMap &cte_map) {
-	// Note: we assume we don't use rowid
+	// Note: all PU tables must have PAC_KEY defined
 
 	// Check if join elimination is enabled
 	bool join_elimination = GetBooleanSetting(input.context, "pac_join_elimination", false);
@@ -1531,8 +1531,8 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
  * 2. Filter to aggregates that have at least one PU table in their subtree
  * 3. For each target aggregate:
  *    - For each PU table in the aggregate's subtree:
- *      * Determine whether to use rowid or primary key columns for hashing
- *      *      * Build hash expression: hash(pk) or hash(xor(pk1, pk2, ...)) for composite PKs
+ *      * Use PAC_KEY columns for hashing
+ *      * Build hash expression: hash(pk) or hash(xor(pk1, pk2, ...)) for composite PAC_KEYs
  *      * Propagate the hash expression through projections to the aggregate level
  *    - Combine all PU hash expressions with AND (for multi-PU queries)
  *    - Transform the aggregate to use PAC functions
@@ -1557,8 +1557,8 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
  *   WHERE p_partkey = l_partkey AND ... AND l_quantity < (SELECT 0.2 * avg(l_quantity) FROM lineitem WHERE ...)
  *
  * Transformation:
- *   - Inner aggregate (avg in subquery): Has lineitem (PU table) -> pac_avg(hash(rowid), l_quantity)
- *   - Outer aggregate (sum): Also has lineitem (PU table) -> pac_sum(hash(rowid), l_extendedprice)
+ *   - Inner aggregate (avg in subquery): Has lineitem (PU table) -> pac_avg(hash(pac_key), l_quantity)
+ *   - Outer aggregate (sum): Also has lineitem (PU table) -> pac_sum(hash(pac_key), l_extendedprice)
  *   - Division by 7.0 happens AFTER PAC aggregation, not transformed
  *
  * Counter-example where outer is NOT transformed:
@@ -1784,15 +1784,16 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 				                ", projection_ids.size=" + std::to_string(get.projection_ids.size()));
 #endif
 
-				// Determine if we should use rowid or PKs
-				bool use_rowid = false;
+				// Get PAC_KEY columns (required for all PU tables)
 				vector<string> pks;
 
 				auto it = check.table_metadata.find(pu_table_name);
 				if (it != check.table_metadata.end() && !it->second.pks.empty()) {
 					pks = it->second.pks;
 				} else {
-					use_rowid = true;
+					throw InternalException("PAC compiler: PU table '" + pu_table_name +
+					                        "' has no PAC_KEY defined. Use ALTER PU TABLE " + pu_table_name +
+					                        " ADD PAC_KEY (column_name) to define one.");
 				}
 
 				// Check if the PU table is directly reachable (not behind a nested aggregate).
@@ -1830,7 +1831,7 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 				}
 
 				// Direct path: insert hash projection above get and propagate
-				auto hash_binding = GetOrInsertHashProjection(input, plan, get, pks, use_rowid, hash_cache);
+				auto hash_binding = GetOrInsertHashProjection(input, plan, get, pks, false, hash_cache);
 				auto propagated = PropagateSingleBinding(*plan, hash_binding.table_index, hash_binding,
 				                                         LogicalType::UBIGINT, target_agg);
 				if (propagated.table_index == DConstants::INVALID_INDEX) {
@@ -2057,7 +2058,7 @@ void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExten
 	// a) the query scans PU table(s):
 	// a.1) each PU table has 1 PK: we hash it
 	// a.2) each PU table has multiple PKs: we XOR them and hash the result
-	// a.3) each PU table has no PK: we hash rowid
+	// a.3) each PU table must have a PAC_KEY (no rowid fallback)
 	// a.4) we AND all the hashes together for multiple PUs
 	// b) the query does not scan PU table(s):
 	// b.1) we follow the FK path to find the PK(s) of each PU table

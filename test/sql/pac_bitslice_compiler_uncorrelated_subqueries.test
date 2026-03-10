@@ -22,7 +22,7 @@ SET threads = 1
 statement ok
 SET pac_mi = 0
 
-# Create TPC-H-like schema with proper PK-FK relationships
+# Create TPC-H-like schema with PAC_KEY/PAC_LINK metadata
 # This tests the compiler's ability to handle:
 # - Multiple joins across several tables
 # - Projections with date functions and arithmetic
@@ -33,7 +33,7 @@ SET pac_mi = 0
 # Nation table
 statement ok
 CREATE TABLE nation(
-    n_nationkey INTEGER PRIMARY KEY,
+    n_nationkey INTEGER,
     n_name VARCHAR,
     n_regionkey INTEGER
 );
@@ -48,11 +48,11 @@ INSERT INTO nation VALUES
 
 # Customer table (Privacy Unit)
 statement ok
-CREATE TABLE customer(
-    c_custkey INTEGER PRIMARY KEY,
+CREATE PU TABLE customer(
+    c_custkey INTEGER,
     c_name VARCHAR,
     c_nationkey INTEGER,
-    FOREIGN KEY (c_nationkey) REFERENCES nation(n_nationkey)
+    PAC_KEY (c_custkey)
 );
 
 statement ok
@@ -69,10 +69,9 @@ INSERT INTO customer VALUES
 # Supplier table
 statement ok
 CREATE TABLE supplier(
-    s_suppkey INTEGER PRIMARY KEY,
+    s_suppkey INTEGER,
     s_name VARCHAR,
-    s_nationkey INTEGER,
-    FOREIGN KEY (s_nationkey) REFERENCES nation(n_nationkey)
+    s_nationkey INTEGER
 );
 
 statement ok
@@ -85,11 +84,10 @@ INSERT INTO supplier VALUES
 # Orders table
 statement ok
 CREATE TABLE orders(
-    o_orderkey INTEGER PRIMARY KEY,
+    o_orderkey INTEGER,
     o_custkey INTEGER,
     o_orderdate DATE,
-    o_comment VARCHAR,
-    FOREIGN KEY (o_custkey) REFERENCES customer(c_custkey)
+    o_comment VARCHAR
 );
 
 statement ok
@@ -116,10 +114,7 @@ CREATE TABLE lineitem(
     l_quantity DECIMAL(15,2),
     l_extendedprice DECIMAL(15,2),
     l_discount DECIMAL(15,2),
-    l_shipdate DATE,
-    PRIMARY KEY (l_orderkey, l_linenumber),
-    FOREIGN KEY (l_orderkey) REFERENCES orders(o_orderkey),
-    FOREIGN KEY (l_suppkey) REFERENCES supplier(s_suppkey)
+    l_shipdate DATE
 );
 
 statement ok
@@ -138,8 +133,30 @@ INSERT INTO lineitem VALUES
     (11, 1, 2, 25.00, 2500.00, 0.10, '1995-12-05'),
     (12, 1, 3, 30.00, 3000.00, 0.05, '1996-02-20');
 
+# Add PAC metadata for nation (standalone, key only)
 statement ok
-ALTER TABLE customer SET PU;
+ALTER PU TABLE nation ADD PAC_KEY (n_nationkey);
+
+# Add PAC metadata for supplier (standalone, key only)
+statement ok
+ALTER PU TABLE supplier ADD PAC_KEY (s_suppkey);
+
+# Add PAC metadata for orders (linked to customer)
+statement ok
+ALTER PU TABLE orders ADD PAC_KEY (o_orderkey);
+
+statement ok
+ALTER PU TABLE orders ADD PAC_LINK (o_custkey) REFERENCES customer(c_custkey);
+
+# Add PAC metadata for lineitem (linked to orders and supplier)
+statement ok
+ALTER PU TABLE lineitem ADD PAC_KEY (l_orderkey, l_linenumber);
+
+statement ok
+ALTER PU TABLE lineitem ADD PAC_LINK (l_orderkey) REFERENCES orders(o_orderkey);
+
+statement ok
+ALTER PU TABLE lineitem ADD PAC_LINK (l_suppkey) REFERENCES supplier(s_suppkey);
 
 # Test 1: TPC-H Q7-style query
 # Tests: Multiple joins, date filtering, projections with date_part, arithmetic expressions, GROUP BY, ORDER BY
@@ -447,7 +464,10 @@ INSERT INTO orders_nopk VALUES
     (11, 1, '1995-12-01', 'urgent'),
     (12, 8, '1996-02-17', 'regular');
 
-# Set PAC on customer (no PAC_KEY — PU key must be inferred from PAC_LINK)
+# Add PAC_KEY and set as PU
+statement ok
+ALTER PU TABLE customer_nopk ADD PAC_KEY (c_custkey);
+
 statement ok
 ALTER TABLE customer_nopk SET PU;
 

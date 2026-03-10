@@ -34,21 +34,21 @@ idx_t GetNextTableIndex(unique_ptr<LogicalOperator> &plan);
 void ReplaceNode(unique_ptr<LogicalOperator> &root, unique_ptr<LogicalOperator> &old_node,
                  unique_ptr<LogicalOperator> &new_node, Binder *binder = nullptr);
 
-// Find the primary key column names for the given table (searching the client's catalog search path).
-// Returns a vector with the primary key column names in order; empty vector if there is no PK.
+// Find PAC_KEY column names for the given table. Only uses PAC metadata.
+// Returns a vector with the PAC_KEY column names in order; empty vector if no PAC_KEY is defined.
 vector<string> FindPrimaryKey(ClientContext &context, const string &table_name);
 
-// Find foreign keys declared on the given table (searching the client's catalog search path).
-// Returns a vector of pairs: (referenced_table_name, list_of_fk_column_names) for each FK constraint.
+// Find PAC_LINK relationships declared on the given table. Only uses PAC metadata.
+// Returns a vector of pairs: (referenced_table_name, local_column_names) for each PAC_LINK.
 vector<std::pair<string, vector<string>>> FindForeignKeys(ClientContext &context, const string &table_name);
 
-// Find the referenced (PK) columns on the parent table for a specific FK relationship.
-// E.g., for lineitem(l_orderkey) REFERENCES orders(o_orderkey), calling
+// Find the referenced columns on the parent table for a specific PAC_LINK relationship.
+// E.g., for PAC_LINK (l_orderkey) REFERENCES orders(o_orderkey), calling
 // FindReferencedPKColumns(ctx, "lineitem", "orders") returns {"o_orderkey"}.
 vector<string> FindReferencedPKColumns(ClientContext &context, const string &table_name, const string &ref_table);
 
-// Find foreign-key path(s) from any of `table_names` to any of `privacy_units`.
-// Returns a map: start_table (as provided) -> path (vector of qualified table names from start to privacy unit,
+// Find PAC_LINK path(s) from any of `table_names` to any of `privacy_units`.
+// Returns a map: start_table (as provided) -> path (vector of table names from start to privacy unit,
 // inclusive). If no path exists for a start table, it will not appear in the returned map.
 std::unordered_map<string, vector<string>>
 FindForeignKeyBetween(ClientContext &context, const vector<string> &privacy_units, const vector<string> &table_names);

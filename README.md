@@ -43,7 +43,7 @@ ALTER PU TABLE orders DROP PROTECTED (total_amount);
 ### ALTER TABLE SET PU / UNSET PU
 
 ```sql
-ALTER TABLE customers SET PU;      -- table must have PRIMARY KEY
+ALTER TABLE customers SET PU;      -- requires PAC_KEY to be defined first
 ALTER TABLE customers UNSET PU;
 ```
 
@@ -57,7 +57,7 @@ PRAGMA clear_pac_metadata;
 
 ## PAC_LINK
 
-`PAC_LINK` declares a foreign key relationship between a regular table and a privacy unit, enabling privacy propagation. When a table has a `PAC_LINK`, queries on it are automatically noised using the linked privacy unit's key. Without a `PAC_LINK`, the PU table must appear in the query for PAC to derive the privacy hash.
+`PAC_LINK` declares a join relationship between a regular table and a privacy unit, enabling privacy propagation. When a table has a `PAC_LINK`, queries on it are automatically noised using the linked privacy unit's key. Without a `PAC_LINK`, the PU table must appear in the query for PAC to derive the privacy hash.
 
 ```sql
 CREATE TABLE orders (

@@ -12,7 +12,7 @@ PAC transforms standard SQL aggregates (SUM, COUNT, AVG, MIN, MAX) into privacy-
 
 For each row in the query:
 
-1. **Compute hash**: The privacy unit's key (PAC_KEY, PRIMARY KEY, or rowid) is hashed to produce a 64-bit value. If there are multiple columns, their hashes are XORed. The resulting hash is further transformed by pac_hash(hash), which re-hashes the hash such that each query uses a different hash function.
+1. **Compute hash**: The privacy unit's PAC_KEY is hashed to produce a 64-bit value. If there are multiple key columns, their hashes are XORed. The resulting hash is further transformed by pac_hash(hash), which re-hashes the hash such that each query uses a different hash function.
 2. **Distribute to counters**: Each bit in the hash of a PU key determines whether that entity is or is not part of that possible world. There are 64 possible worlds. Technically, for each of the 64 counters it is simple: if bit `j` of the hash is 1, the value is added to counter `j`
 
 ```cpp
@@ -114,7 +114,7 @@ SELECT SUM(balance) FROM customers;
 SELECT pac_sum(hash(id), balance) FROM customers;
 ```
 
-### Foreign Key Path
+### PAC_LINK Path
 
 When the query scans a table linked to a privacy unit via PAC_LINK:
 
