@@ -86,9 +86,9 @@ SELECT SUM(price) FROM lineitem;
 2. You link related tables with `PAC_LINK` to propagate privacy through joins
 3. PAC intercepts every aggregate query, hashes each privacy unit's key into a 64-bit value, and uses the bits to create 64 sub-samples. Each aggregate runs on all sub-samples independently, and the final result is the noised median — close to the true answer but safe against membership inference
 
-### Membership Inference (MI)
+### Mutual Information (MI)
 
-A membership inference attack tries to determine whether a specific individual (e.g. a patient, customer) is present in the database by observing aggregate query results. PAC defends against this: the `pac_mi` parameter controls the allowed advantage an attacker gains. At the default `pac_mi = 0.0`, an attacker looking at PAC query results learns nothing beyond what they could guess without access to the database. Higher values allow more attacker advantage in exchange for less noise (more accurate results).
+PAC bounds the mutual information (MI) between the query output and whether any specific individual is in the database. The `pac_mi` parameter sets this bound: at the default `pac_mi = 0.0`, an attacker observing PAC query results gains zero additional information about any individual's presence. Higher values relax the bound, allowing less noise (more accurate results) at the cost of more information leakage.
 
 ## SQL Reference
 
