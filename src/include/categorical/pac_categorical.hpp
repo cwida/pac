@@ -37,6 +37,11 @@ namespace duckdb {
 // Register all PAC categorical functions with the extension loader
 void RegisterPacCategoricalFunctions(ExtensionLoader &loader);
 
+// Add a PAC list aggregate overload (LIST<DOUBLE> → LIST<DOUBLE>) to an existing function set.
+// Used to merge the list variant into the same AggregateFunctionSet as the counters variant.
+// aggr_type: "sum", "count", "min", or "max"
+void AddPacListAggregateOverload(AggregateFunctionSet &set, const string &aggr_type);
+
 // ============================================================================
 // PAC_COUNTERS aggregate: Returns all 64 counters as a LIST for categorical queries
 // ============================================================================

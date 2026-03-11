@@ -1114,27 +1114,32 @@ static unique_ptr<Expression> RewriteExpressionWithCounters(OptimizerExtensionIn
 	Expression *expr_for_lambda = simplified_expr ? simplified_expr.get() : expr;
 
 	// Fused avg path: pac_noised_div(sum_counters, count_counters) for division of two PAC lists.
-	// Detects: "/"(CAST?(pac_binding_a), CAST?(pac_binding_b)) with exactly 2 PAC bindings.
-	if (wrap_kind == PacWrapKind::PAC_NOISED && pac_bindings.size() == 2 &&
-	    expr_for_lambda->type == ExpressionType::BOUND_FUNCTION) {
+	// The bitslice compiler generates pac_noised_div directly, so detect it here.
+	if (pac_bindings.size() == 2 && expr_for_lambda->type == ExpressionType::BOUND_FUNCTION) {
 		auto &func = expr_for_lambda->Cast<BoundFunctionExpression>();
-		if (func.function.name == "/" && func.children.size() == 2) {
-			// Strip casts to find the underlying col_refs
-			Expression *lhs = StripCasts(func.children[0].get());
-			Expression *rhs = StripCasts(func.children[1].get());
-			if (lhs->type == ExpressionType::BOUND_COLUMN_REF && rhs->type == ExpressionType::BOUND_COLUMN_REF) {
-				auto &lhs_ref = lhs->Cast<BoundColumnRefExpression>();
-				auto &rhs_ref = rhs->Cast<BoundColumnRefExpression>();
+		if (func.function.name == "pac_noised_div" && func.children.size() == 2) {
+			// Children are already col_refs to pac_sum/pac_count (LIST<FLOAT>)
+			auto &lhs_ref = func.children[0]->Cast<BoundColumnRefExpression>();
+			auto &rhs_ref = func.children[1]->Cast<BoundColumnRefExpression>();
+			if (wrap_kind == PacWrapKind::PAC_NOISED) {
+				// Noised scalar output path: rebind pac_noised_div with LIST<PAC_FLOAT> typed refs
 				auto sum_list = make_uniq<BoundColumnRefExpression>("pac_var", LogicalType::LIST(PacFloatLogicalType()),
 				                                                    lhs_ref.binding);
 				auto cnt_list = make_uniq<BoundColumnRefExpression>("pac_var", LogicalType::LIST(PacFloatLogicalType()),
 				                                                    rhs_ref.binding);
 				auto avg_noised =
 				    input.optimizer.BindScalarFunction("pac_noised_div", std::move(sum_list), std::move(cnt_list));
-				if (target_type != PacFloatLogicalType()) {
+				if (target_type != LogicalType::DOUBLE) {
 					avg_noised = BoundCastExpression::AddDefaultCastToType(std::move(avg_noised), target_type);
 				}
 				return avg_noised;
+			} else {
+				// Categorical filter/join path: swap pac_noised_div → pac_div (LIST<FLOAT> output)
+				auto sum_list = make_uniq<BoundColumnRefExpression>("pac_var", LogicalType::LIST(PacFloatLogicalType()),
+				                                                    lhs_ref.binding);
+				auto cnt_list = make_uniq<BoundColumnRefExpression>("pac_var", LogicalType::LIST(PacFloatLogicalType()),
+				                                                    rhs_ref.binding);
+				return input.optimizer.BindScalarFunction("pac_div", std::move(sum_list), std::move(cnt_list));
 			}
 		}
 	}
@@ -1174,11 +1179,24 @@ static void ReplaceBindingInExpression(Expression &expr, const ColumnBinding &ol
 }
 
 // Wrap PAC aggregate column references in HAVING expressions with pac_noised.
-// When the categorical rewriter converts pac_sum → pac_sum_counters (LIST<FLOAT> output),
+// When the categorical rewriter converts pac_noised_sum → pac_sum (LIST<FLOAT> output),
 // HAVING clause expressions still reference the aggregate with the original type (e.g. DECIMAL).
 // This wraps those references with pac_noised() to convert back to scalar, then casts to original type.
 static void WrapHavingPacRefsWithNoised(unique_ptr<Expression> &expr, const vector<PacBindingInfo> &pac_bindings,
                                         OptimizerExtensionInput &input) {
+	// pac_noised_div already produces a noised scalar — don't recurse into its children
+	if (expr->type == ExpressionType::BOUND_FUNCTION) {
+		auto &func = expr->Cast<BoundFunctionExpression>();
+		if (func.function.name == "pac_noised_div") {
+			// Update children's types to LIST<PAC_FLOAT> to match rewritten aggregate output
+			for (auto &child : func.children) {
+				if (child->type == ExpressionType::BOUND_COLUMN_REF) {
+					child->Cast<BoundColumnRefExpression>().return_type = LogicalType::LIST(PacFloatLogicalType());
+				}
+			}
+			return;
+		}
+	}
 	if (expr->type == ExpressionType::BOUND_COLUMN_REF) {
 		auto &col_ref = expr->Cast<BoundColumnRefExpression>();
 		for (auto &bi : pac_bindings) {
@@ -1206,6 +1224,39 @@ static void RewriteProjectionExpression(OptimizerExtensionInput &input, LogicalP
                                         LogicalOperator *plan_root, bool is_filter_pattern, bool is_terminal,
                                         unordered_map<uint64_t, unique_ptr<Expression>> &saved_filter_pattern_exprs) {
 	auto &expr = proj.expressions[i];
+	// Check if pac_noised_div appears anywhere in this expression.
+	// pac_noised_div already produces a noised scalar from counter lists.
+	// For filter patterns at the top level, swap to pac_div (LIST<FLOAT> output).
+	// Otherwise, the expression is already noised — skip.
+	bool has_noised_div = false;
+	ExpressionIterator::EnumerateExpression(expr, [&](Expression &e) {
+		if (e.type == ExpressionType::BOUND_FUNCTION &&
+		    e.Cast<BoundFunctionExpression>().function.name == "pac_noised_div") {
+			has_noised_div = true;
+		}
+	});
+	if (has_noised_div) {
+		if (is_filter_pattern && expr->type == ExpressionType::BOUND_FUNCTION) {
+			auto &func = expr->Cast<BoundFunctionExpression>();
+			if (func.function.name == "pac_noised_div" && func.children.size() == 2) {
+				// Top-level pac_noised_div → swap to pac_div for categorical path
+				auto &lhs = func.children[0];
+				auto &rhs = func.children[1];
+				if (lhs->type == ExpressionType::BOUND_COLUMN_REF && rhs->type == ExpressionType::BOUND_COLUMN_REF) {
+					auto sum_list =
+					    make_uniq<BoundColumnRefExpression>("pac_var", LogicalType::LIST(PacFloatLogicalType()),
+					                                        lhs->Cast<BoundColumnRefExpression>().binding);
+					auto cnt_list =
+					    make_uniq<BoundColumnRefExpression>("pac_var", LogicalType::LIST(PacFloatLogicalType()),
+					                                        rhs->Cast<BoundColumnRefExpression>().binding);
+					proj.expressions[i] =
+					    input.optimizer.BindScalarFunction("pac_div", std::move(sum_list), std::move(cnt_list));
+					proj.types[i] = LogicalType::LIST(PacFloatLogicalType());
+				}
+			}
+		}
+		return;
+	}
 	if (IsAlreadyWrappedInPacNoised(expr.get())) {
 		return;
 	}
@@ -1259,34 +1310,21 @@ static void RewriteProjectionExpression(OptimizerExtensionInput &input, LogicalP
 	    expr->Cast<BoundCastExpression>().return_type != PacFloatLogicalType()) {
 		expr_to_clone = expr->Cast<BoundCastExpression>().child.get();
 	}
-	if (is_filter_pattern) { // Intermediate: produce LIST<DOUBLE> for downstream filter (no terminal wrapping)
-		if (pac_bindings.size() == 1) {
-			// Save the original arithmetic expression with PAC col_ref rebased to the projection output binding.
-			// The filter will inline this so that e.g. `col_ref(proj, i) > value` becomes
-			// `multiply(0.5, col_ref(proj, i)) > value`, and FindAllPacBindingsInExpression
-			// traces col_ref(proj, i) through the raw counter pass-through to the aggregate.
-			auto saved = expr->Copy();
-			ColumnBinding proj_binding(proj.table_index, i);
-			ReplaceBindingInExpression(*saved, pac_bindings[0].binding, proj_binding);
-			saved_filter_pattern_exprs[HashBinding(proj_binding)] = std::move(saved);
+	if (is_filter_pattern && pac_bindings.size() == 1) {
+		// Single-binding filter pattern: pass through raw counters and save the arithmetic.
+		// The filter inlines the saved expression so the comparison + arithmetic are folded
+		// into one list_transform lambda at the filter level.
+		auto saved = expr->Copy();
+		ColumnBinding proj_binding(proj.table_index, i);
+		ReplaceBindingInExpression(*saved, pac_bindings[0].binding, proj_binding);
+		saved_filter_pattern_exprs[HashBinding(proj_binding)] = std::move(saved);
 
-			// Replace projection expression with raw counter pass-through
-			proj.expressions[i] = make_uniq<BoundColumnRefExpression>(
-			    "pac_var", LogicalType::LIST(PacFloatLogicalType()), pac_bindings[0].binding);
-			proj.types[i] = LogicalType::LIST(PacFloatLogicalType());
-		} else {
-			// Multiple PAC bindings (e.g., avg decomposed to sum/count division): use pac_noised path.
-			// Emitting list_transform here would make IsAlreadyWrappedInPacNoised=true on the projection
-			// expression, which blocks outer operators (e.g. a filter) from tracing PAC bindings through
-			// this projection and rewriting the comparison correctly.
-			auto result = RewriteExpressionWithCounters(input, pac_bindings, expr_to_clone, plan_root,
-			                                            PacWrapKind::PAC_NOISED, expr->return_type);
-			if (result) {
-				proj.expressions[i] = std::move(result);
-				proj.types[i] = expr->return_type;
-			}
-		}
+		proj.expressions[i] = make_uniq<BoundColumnRefExpression>(
+		    "pac_var", LogicalType::LIST(PacFloatLogicalType()), pac_bindings[0].binding);
+		proj.types[i] = LogicalType::LIST(PacFloatLogicalType());
 	} else {
+		// Terminal or multi-binding filter: compute element-wise arithmetic via list_transform
+		// and wrap with pac_noised to produce a scalar result.
 		auto result = RewriteExpressionWithCounters(input, pac_bindings, expr_to_clone, plan_root,
 		                                            PacWrapKind::PAC_NOISED, expr->return_type);
 		if (result) {
@@ -1376,7 +1414,7 @@ static ColumnBinding InsertPacSelectProjection(OptimizerExtensionInput &input, u
 
 // Single bottom-up rewrite pass.
 // Processes children first, then current operator. Handles:
-// - AGGREGATE: convert pac_sum → pac_sum_counters, then aggregate-over-counters → _list
+// - AGGREGATE: convert pac_noised_sum → pac_sum (counters), then aggregate-over-counters → pac_sum (list)
 // - PROJECTION: update simple col_ref types, build list_transform + pac_noised for arithmetic
 // - FILTER (in rewrite_map): build list_transform + pac_filter
 // - JOIN (in rewrite_map): rewrite conditions (two-list → CROSS_PRODUCT+FILTER, single-list → double-lambda)
@@ -1838,7 +1876,7 @@ void RewriteCategoricalQuery(OptimizerExtensionInput &input, unique_ptr<LogicalO
 		}
 	}
 	// Bottom-up rewrite pass
-	// - Aggregates: pac_sum → pac_sum_counters, then aggregate-over-counters → _list
+	// - Aggregates: pac_noised_sum → pac_sum (counters), then aggregate-over-counters → pac_sum (list)
 	// - Projections: update col_ref types, build list_transform + pac_noised/pass-through
 	// - Filters: build list_transform + pac_filter
 	// - Joins: rewrite conditions (two-list → CROSS_PRODUCT+FILTER, single-list → double-lambda)

@@ -2039,7 +2039,6 @@ void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExten
 	// Resolve operator types on the raw plan so that .types vectors are populated.
 	// In the pre-optimizer phase, ResolveOperatorTypes hasn't run yet.
 	plan->ResolveOperatorTypes();
-	RewriteAvgToSumCount(input, plan);
 
 	// Generate filename with all PU names concatenated
 	string path = GetPacCompiledPath(input.context, ".");

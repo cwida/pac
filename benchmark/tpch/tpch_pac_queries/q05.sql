@@ -1,8 +1,9 @@
-SELECT n_name, pac_sum(hash(customer.c_custkey), l_extendedprice * (1 - l_discount)) AS revenue
-FROM customer, orders, lineitem, supplier, nation, region
-WHERE c_custkey = o_custkey AND l_orderkey = o_orderkey AND l_suppkey = s_suppkey
-  AND c_nationkey = s_nationkey AND s_nationkey = n_nationkey AND n_regionkey = r_regionkey
-  AND r_name = 'ASIA'
-  AND o_orderdate >= DATE '1994-01-01' AND o_orderdate <  DATE '1995-01-01'
-GROUP BY n_name
-ORDER BY revenue DESC;
+SELECT n_name, pac_noised_sum(pac_hash(hash(c_custkey)), l_extendedprice * (1 - l_discount)) AS revenue
+  FROM customer JOIN orders ON c_custkey = o_custkey 
+                JOIN lineitem ON o_orderkey = l_orderkey 
+                JOIN supplier ON l_suppkey = s_suppkey 
+                JOIN nation ON s_nationkey = c_nationkey 
+                JOIN region ON n_regionkey = r_regionkey
+ WHERE r_name = 'ASIA' AND o_orderdate >= DATE '1994-01-01' AND o_orderdate <  DATE '1995-01-01'
+ GROUP BY ALL
+ ORDER BY revenue DESC;

@@ -149,7 +149,7 @@ ORDER BY
 3-MEDIUM	2
 
 # Test Top-K pushdown with correlated EXISTS subquery (Q4 + LIMIT)
-# The top-k optimizer should rewrite pac_count to pac_count_counters,
+# The top-k optimizer should rewrite pac_count to list-returning pac_count,
 # insert pac_mean for ordering, and apply pac_mean to the final top-k rows
 query II
 SELECT

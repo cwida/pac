@@ -1,16 +1,12 @@
-SELECT
-    pac_sum(hash(l_orderkey), l_extendedprice * (1 - l_discount)) AS revenue
-FROM
-    lineitem,
-    part
-WHERE (p_partkey = l_partkey
-    AND p_brand = 'Brand#12'
-    AND p_container IN ('SM CASE', 'SM BOX', 'SM PACK', 'SM PKG')
-    AND l_quantity >= 1
-    AND l_quantity <= 1 + 10
-    AND p_size BETWEEN 1 AND 5
-    AND l_shipmode IN ('AIR', 'AIR REG')
-    AND l_shipinstruct = 'DELIVER IN PERSON')
+SELECT pac_noised_sum(pac_hash(hash(l_orderkey)), l_extendedprice * (1 - l_discount)) AS revenue
+  FROM lineitem JOIN part ON l_partkey = p_partkey
+ WHERE (p_brand = 'Brand#12'
+        AND p_container IN ('SM CASE', 'SM BOX', 'SM PACK', 'SM PKG')
+        AND l_quantity >= 1
+        AND l_quantity <= 1 + 10
+        AND p_size BETWEEN 1 AND 5
+        AND l_shipmode IN ('AIR', 'AIR REG')
+        AND l_shipinstruct = 'DELIVER IN PERSON')
     OR (p_partkey = l_partkey
         AND p_brand = 'Brand#23'
         AND p_container IN ('MED BAG', 'MED BOX', 'MED PKG', 'MED PACK')

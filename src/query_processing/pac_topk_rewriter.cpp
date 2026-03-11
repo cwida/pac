@@ -96,7 +96,7 @@ void RegisterPacMeanFunction(ExtensionLoader &loader) {
 // Information about a PAC aggregate expression that was rewritten to _counters
 struct PacTopKAggInfo {
 	idx_t agg_index;           // Index in LogicalAggregate::expressions
-	string original_name;      // e.g., "pac_sum"
+	string original_name;      // e.g., "pac_noised_sum"
 	LogicalType original_type; // Return type before converting to LIST
 	ColumnBinding agg_binding; // Binding in the aggregate's output (aggregate_index, agg_index)
 };
@@ -315,7 +315,7 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 	// parent sees its child's updated GetColumnBindings() result.
 	//
 	// IMPORTANT: For materialized CTEs, skip the CTE definition child (children[0]).
-	// TopK rewrites aggregate types (e.g., pac_sum → pac_sum_counters), which changes
+	// TopK rewrites aggregate types (e.g., pac_noised_sum → pac_sum counters), which changes
 	// the CTE's output type. Any CTE_SCAN referencing this CTE would then receive
 	// FLOAT[] instead of the expected scalar type, causing execution crashes.
 	// Only recurse into the consumer child (children[1]).

@@ -84,13 +84,13 @@ At finalization:
 3. **Gaussian noise** `N(0, sqrt(delta))` is added to `counter[J]`
 4. Result is `correction * counter[J] + noise` (correction is typically 2x because each counter sees ~50% of tuples)
 
-### _counters Variants
+### Counters Variants (Overloaded)
 
-Each PAC aggregate has a `_counters` variant that returns the raw 64 counters as `LIST<FLOAT>` instead of a single noised scalar. Used by:
+Each PAC aggregate name (`pac_sum`, `pac_count`, `pac_min`, `pac_max`) is overloaded: with `(UBIGINT key_hash, value)` arguments it returns the raw 64 counters as `LIST<FLOAT>` instead of a single noised scalar. With `(LIST<FLOAT>)` argument it performs element-wise aggregation over counter lists. Used by:
 - **Top-K rewriter**: to defer noise until after TopN selection
 - **Categorical rewriter**: to evaluate predicates against all 64 values
 
-Examples: `pac_sum_counters`, `pac_count_counters`, `pac_avg_counters`, `pac_min_counters`, `pac_max_counters`
+The scalar-returning noised variants are named `pac_noised_sum`, `pac_noised_count`, `pac_noised_min`, `pac_noised_max`.
 
 ### pac_mean and pac_noised
 
@@ -99,9 +99,9 @@ Examples: `pac_sum_counters`, `pac_count_counters`, `pac_avg_counters`, `pac_min
 
 ## PAC Aggregates
 
-### pac_count
+### pac_noised_count
 
-**Signature**: `pac_count(UBIGINT key_hash) -> BIGINT`
+**Signature**: `pac_noised_count(UBIGINT key_hash) -> BIGINT`
 
 Stochastic COUNT: maintains 64 counters, each incremented when the corresponding bit in `key_hash` is set.
 
@@ -115,9 +115,9 @@ Stochastic COUNT: maintains 64 counters, each incremented when the corresponding
 - **Buffering**: delays state allocation; buffers 4 values before flushing to aggregate state (reduces cache misses)
 - **Lazy allocation**: counters are only allocated when the aggregate actually receives values
 
-### pac_sum
+### pac_noised_sum
 
-**Signature**: `pac_sum(UBIGINT key_hash, value) -> numeric`
+**Signature**: `pac_noised_sum(UBIGINT key_hash, value) -> numeric`
 
 Stochastic SUM. For each `(key_hash, value)` pair, adds `value * ((key_hash >> j) & 1)` to counter j (predication, not branching).
 
@@ -127,17 +127,13 @@ Stochastic SUM. For each `(key_hash, value)` pair, adds `value * ((key_hash >> j
 - **Cascading + SWAR**: similar to pac_count, thin 16-bit SIMD lanes
 - **Buffering**: batches 4 updates before flushing
 
-### pac_avg
+### avg() decomposition
 
-**Signature**: `pac_avg(UBIGINT key_hash, value) -> DOUBLE`
+`avg(col)` is rewritten by the PAC compiler to `pac_noised_sum(hash, col) / count(col)`. In categorical contexts, this uses `pac_noised_div(LIST<FLOAT> sum_counters, LIST<FLOAT> count_counters) -> FLOAT`, a fused scalar function that divides element-wise and applies noise in a single pass.
 
-Maintains both sum and count counters. Finalizes as `sum[j] / count[j]` for each counter, then noises.
+### pac_noised_min / pac_noised_max
 
-Supports DECIMAL inputs: divides by `10^scale` in finalization for correct decimal positioning.
-
-### pac_min / pac_max
-
-**Signature**: `pac_min(UBIGINT key_hash, value) -> type` / `pac_max(UBIGINT key_hash, value) -> type`
+**Signature**: `pac_noised_min(UBIGINT key_hash, value) -> type` / `pac_noised_max(UBIGINT key_hash, value) -> type`
 
 Maintains 64 extreme values. For each `(key_hash, value)`: `extremes[j] = min/max(extremes[j], value)` if bit j is set. Uses predication: `value * bit + extreme * (1 - bit)` then min/max.
 
@@ -145,17 +141,9 @@ Maintains 64 extreme values. For each `(key_hash, value)`: `extremes[j] = min/ma
 
 **Buffering**: same delayed allocation as other aggregates.
 
-### pac_count_distinct
+### DISTINCT Aggregates
 
-**Signature**: `pac_count_distinct(UBIGINT key_hash, UBIGINT value_hash) -> BIGINT`
-
-Tracks a hash map of `value_hash -> OR(key_hashes)`. In finalization, each distinct value contributes 1 to `counter[j]` if bit j of its accumulated key_hash is set. Uses a flat hash map for the distinct tracking.
-
-### pac_sum_distinct / pac_avg_distinct
-
-**Signature**: `pac_sum_distinct(UBIGINT key_hash, DOUBLE value) -> DOUBLE`
-
-Tracks `bitcast(value) -> (OR(key_hashes), value)`. Each distinct value contributes its value to `counter[j]` if bit j is set. `pac_avg_distinct` divides each counter by its per-counter distinct count.
+DISTINCT aggregates (e.g., `COUNT(DISTINCT col)`) are handled via pre-aggregation: the compiler inserts a `GROUP BY value` with `bit_or(key_hash)` before the PAC aggregate, deduplicating values before they reach the standard `pac_noised_count`/`pac_noised_sum` functions. The standalone `pac_*_distinct` functions have been removed.
 
 ## pac_aggregate (Scalar)
 

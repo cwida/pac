@@ -1,4 +1,5 @@
 #include "aggregates/pac_min_max.hpp"
+#include "categorical/pac_categorical.hpp"
 
 namespace duckdb {
 
@@ -117,7 +118,7 @@ static void PacMinMaxFinalize(Vector &states, AggregateInputData &input, Vector 
 		} else {
 			memset(buf, 0, sizeof(buf));
 		}
-		CheckPacSampleDiversity(key_hash, buf, s ? s->update_count : 0, IS_MAX ? "pac_max" : "pac_min",
+		CheckPacSampleDiversity(key_hash, buf, s ? s->update_count : 0, IS_MAX ? "pac_noised_max" : "pac_noised_min",
 		                        input.bind_data->Cast<PacBindData>());
 		// Pass mi for noise, 1.0 as correction (no value scaling for min/max)
 		data[offset + i] =
@@ -182,7 +183,7 @@ static unique_ptr<FunctionData> PacMinMaxBind(ClientContext &ctx, AggregateFunct
 	}
 #undef BIND_TYPE
 
-	return MakePacBindData(ctx, args, 2, IS_MAX ? "pac_max" : "pac_min");
+	return MakePacBindData(ctx, args, 2, IS_MAX ? "pac_noised_max" : "pac_noised_min");
 }
 
 // ============================================================================
@@ -240,7 +241,7 @@ static void PacMinMaxFinalizeCounters(Vector &states, AggregateInputData &input,
 				dst[j] = 0.0;
 			}
 		}
-		CheckPacSampleDiversity(key_hash, dst, s->update_count, IS_MAX ? "pac_max" : "pac_min",
+		CheckPacSampleDiversity(key_hash, dst, s->update_count, IS_MAX ? "pac_noised_max" : "pac_noised_min",
 		                        input.bind_data->Cast<PacBindData>());
 	}
 }
@@ -285,7 +286,7 @@ static unique_ptr<FunctionData> PacMinMaxCountersBind(ClientContext &ctx, Aggreg
 	}
 #undef BIND_COUNTERS_TYPE
 
-	return MakePacBindData(ctx, args, 2, IS_MAX ? "pac_max_counters" : "pac_min_counters");
+	return MakePacBindData(ctx, args, 2, IS_MAX ? "pac_max" : "pac_min");
 }
 
 // ============================================================================
@@ -293,13 +294,14 @@ static unique_ptr<FunctionData> PacMinMaxCountersBind(ClientContext &ctx, Aggreg
 // ============================================================================
 
 void RegisterPacMinFunctions(ExtensionLoader &loader) {
-	AggregateFunctionSet fcn_set("pac_min");
+	AggregateFunctionSet fcn_set("pac_noised_min");
 
-	fcn_set.AddFunction(AggregateFunction("pac_min", {LogicalType::UBIGINT, LogicalType::ANY}, LogicalType::ANY,
+	fcn_set.AddFunction(AggregateFunction("pac_noised_min", {LogicalType::UBIGINT, LogicalType::ANY}, LogicalType::ANY,
 	                                      nullptr, nullptr, nullptr, nullptr, nullptr,
 	                                      FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr, PacMinMaxBind<false>));
 
-	fcn_set.AddFunction(AggregateFunction("pac_min", {LogicalType::UBIGINT, LogicalType::ANY, LogicalType::DOUBLE},
+	fcn_set.AddFunction(AggregateFunction("pac_noised_min",
+	                                      {LogicalType::UBIGINT, LogicalType::ANY, LogicalType::DOUBLE},
 	                                      LogicalType::ANY, nullptr, nullptr, nullptr, nullptr, nullptr,
 	                                      FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr, PacMinMaxBind<false>));
 
@@ -307,37 +309,43 @@ void RegisterPacMinFunctions(ExtensionLoader &loader) {
 }
 
 void RegisterPacMaxFunctions(ExtensionLoader &loader) {
-	AggregateFunctionSet fcn_set("pac_max");
+	AggregateFunctionSet fcn_set("pac_noised_max");
 
-	fcn_set.AddFunction(AggregateFunction("pac_max", {LogicalType::UBIGINT, LogicalType::ANY}, LogicalType::ANY,
+	fcn_set.AddFunction(AggregateFunction("pac_noised_max", {LogicalType::UBIGINT, LogicalType::ANY}, LogicalType::ANY,
 	                                      nullptr, nullptr, nullptr, nullptr, nullptr,
 	                                      FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr, PacMinMaxBind<true>));
 
-	fcn_set.AddFunction(AggregateFunction("pac_max", {LogicalType::UBIGINT, LogicalType::ANY, LogicalType::DOUBLE},
-	                                      LogicalType::ANY, nullptr, nullptr, nullptr, nullptr, nullptr,
-	                                      FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr, PacMinMaxBind<true>));
+	fcn_set.AddFunction(AggregateFunction(
+	    "pac_noised_max", {LogicalType::UBIGINT, LogicalType::ANY, LogicalType::DOUBLE}, LogicalType::ANY, nullptr,
+	    nullptr, nullptr, nullptr, nullptr, FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr, PacMinMaxBind<true>));
 
 	loader.RegisterFunction(fcn_set);
 }
 
 void RegisterPacMinCountersFunctions(ExtensionLoader &loader) {
 	auto list_double_type = LogicalType::LIST(PacFloatLogicalType());
-	AggregateFunctionSet fcn_set("pac_min_counters");
+	AggregateFunctionSet fcn_set("pac_min");
 
 	fcn_set.AddFunction(AggregateFunction(
-	    "pac_min_counters", {LogicalType::UBIGINT, LogicalType::ANY}, list_double_type, nullptr, nullptr, nullptr,
-	    nullptr, nullptr, FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr, PacMinMaxCountersBind<false>));
+	    "pac_min", {LogicalType::UBIGINT, LogicalType::ANY}, list_double_type, nullptr, nullptr, nullptr, nullptr,
+	    nullptr, FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr, PacMinMaxCountersBind<false>));
+
+	// Add list aggregate overload (LIST<DOUBLE> → LIST<DOUBLE>) for subquery/categorical contexts
+	AddPacListAggregateOverload(fcn_set, "min");
 
 	loader.RegisterFunction(fcn_set);
 }
 
 void RegisterPacMaxCountersFunctions(ExtensionLoader &loader) {
 	auto list_double_type = LogicalType::LIST(PacFloatLogicalType());
-	AggregateFunctionSet fcn_set("pac_max_counters");
+	AggregateFunctionSet fcn_set("pac_max");
 
 	fcn_set.AddFunction(AggregateFunction(
-	    "pac_max_counters", {LogicalType::UBIGINT, LogicalType::ANY}, list_double_type, nullptr, nullptr, nullptr,
-	    nullptr, nullptr, FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr, PacMinMaxCountersBind<true>));
+	    "pac_max", {LogicalType::UBIGINT, LogicalType::ANY}, list_double_type, nullptr, nullptr, nullptr, nullptr,
+	    nullptr, FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr, PacMinMaxCountersBind<true>));
+
+	// Add list aggregate overload (LIST<DOUBLE> → LIST<DOUBLE>) for subquery/categorical contexts
+	AddPacListAggregateOverload(fcn_set, "max");
 
 	loader.RegisterFunction(fcn_set);
 }
