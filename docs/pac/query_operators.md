@@ -152,13 +152,7 @@ Two paths depending on plan structure:
 
 ## DISTINCT Aggregates
 
-`SELECT DISTINCT` is **rejected** by the compatibility checker. However, **aggregate DISTINCT** (e.g., `COUNT(DISTINCT col)`) is supported:
-
-- `COUNT(DISTINCT x)` -> `pac_count_distinct(key_hash, value_hash)`: tracks a map of `value_hash -> OR(key_hashes)`, finalizes by building 64 counters from distinct values
-- `SUM(DISTINCT x)` -> `pac_sum_distinct(key_hash, value)`: tracks map of `bitcast(value) -> (OR(key_hashes), value)`, builds 64 sum counters from distinct values
-- `AVG(DISTINCT x)` -> `pac_avg_distinct(key_hash, value)`: like sum_distinct but divides each counter by its distinct count
-
-The compiler detects when an aggregate expression is marked as distinct and routes to the appropriate distinct variant.
+`SELECT DISTINCT` is **rejected** by the compatibility checker. However, **aggregate DISTINCT** (e.g., `COUNT(DISTINCT col)`) is supported via pre-aggregation: an inner aggregate groups by the distinct column and ORs the privacy-unit hashes with `bit_or`, then the outer aggregate applies the standard PAC function (`pac_count`, `pac_sum`, etc.) on the combined hash. When a query mixes DISTINCT and non-DISTINCT aggregates or uses multiple distinct columns, the compiler splits the plan into separate branches joined on the GROUP BY keys.
 
 ## Categorical Queries (Comparison Against PAC Aggregate)
 

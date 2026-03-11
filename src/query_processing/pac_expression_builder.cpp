@@ -1156,10 +1156,10 @@ void ModifyAggregatesWithPacFunctions(OptimizerExtensionInput &input, LogicalAgg
 		GetPacAggregateFunctionName(check_aggr.function.name); // throws if unsupported
 	}
 
-	// === DISTINCT pre-aggregation optimization ===
+	// === DISTINCT pre-aggregation ===
 	// When ALL aggregates are DISTINCT on the same column, use DuckDB's native GROUP BY
-	// for deduplication instead of the slower PacFlatMap-based pac_*_distinct functions.
-	// This leverages DuckDB's optimized GroupedAggregateHashTable instead of our custom hash map.
+	// for deduplication: an inner aggregate groups by the distinct column and ORs the
+	// privacy-unit hashes with bit_or, then an outer pac_count/pac_sum operates on the result.
 	{
 		bool has_any_distinct = false;
 		bool has_any_non_distinct = false;
@@ -1230,31 +1230,8 @@ void ModifyAggregatesWithPacFunctions(OptimizerExtensionInput &input, LogicalAgg
 			value_child = old_aggr.children[0]->Copy();
 		}
 
-		// Determine if this is a DISTINCT aggregate that needs a _distinct variant.
-		// _distinct variants are NON-DISTINCT aggregates that handle dedup internally,
-		// avoiding the issue where DuckDB's DISTINCT deduplicates on ALL args (including the hash).
-		bool use_distinct_variant = old_aggr.IsDistinct() && !old_aggr.children.empty();
-
 		// Get PAC function name
-		string pac_function_name;
-		if (use_distinct_variant) {
-			if (function_name == "count" || function_name == "count_star") {
-				pac_function_name = "pac_count_distinct";
-			} else if (function_name == "sum" || function_name == "sum_no_overflow") {
-				pac_function_name = "pac_sum_distinct";
-			} else if (function_name == "avg") {
-				pac_function_name = "pac_avg_distinct";
-			} else {
-				throw NotImplementedException("PAC: DISTINCT not supported for aggregate: " + function_name);
-			}
-		} else {
-			pac_function_name = GetPacAggregateFunctionName(function_name);
-		}
-
-		// For DISTINCT count: wrap value in hash() so _distinct function deduplicates on value_hash
-		if (use_distinct_variant && (function_name == "count" || function_name == "count_star")) {
-			value_child = input.optimizer.BindScalarFunction("hash", std::move(value_child));
-		}
+		string pac_function_name = GetPacAggregateFunctionName(function_name);
 
 		// Bind the PAC aggregate function
 		auto new_aggr = BindPacAggregate(input, pac_function_name, hash_input_expr->Copy(), std::move(value_child));
