@@ -85,9 +85,6 @@ static inline LogicalType PacFloatLogicalType() {
 // Header for PAC aggregate helpers and public declarations used across pac_* files.
 // Contains bindings and small helpers shared between pac_aggregate, pac_count and pac_sum implementations.
 
-// Forward-declare local state type (defined in pac_aggregate.cpp)
-struct PacAggregateLocalState;
-
 // ============================================================================
 // PacPState: per-query Bayesian posterior tracker for persistent secret composition
 // ============================================================================
@@ -114,13 +111,6 @@ std::shared_ptr<PacPState> GetOrCreatePState(uint64_t query_hash);
 // Throws InvalidInputException if mi < 0.
 double ComputeDeltaFromValues(const vector<PAC_FLOAT> &values, double mi);
 
-// Initialize thread-local state for pac_aggregate (reads pac_seed setting).
-unique_ptr<FunctionLocalState> PacAggregateInit(ExpressionState &state, const BoundFunctionExpression &expr,
-                                                FunctionData *bind_data);
-
-// Register pac_aggregate scalar function(s) with the extension loader
-void RegisterPacAggregateFunctions(ExtensionLoader &loader);
-
 // Register pac_hash scalar function (UBIGINT -> UBIGINT with exactly 32 bits set)
 void RegisterPacHashFunction(ExtensionLoader &loader);
 
@@ -130,8 +120,7 @@ void RegisterPacHashFunction(ExtensionLoader &loader);
 // correction: factor to multiply values by after compacting NULLs but before adding noise
 // pstate: optional shared p-tracking state for persistent secret composition (may be nullptr)
 PAC_FLOAT PacNoisySampleFrom64Counters(const PAC_FLOAT counters[64], double mi, double correction, std::mt19937_64 &gen,
-                                       bool use_deterministic_noise = true, uint64_t is_null = 0,
-                                       uint64_t counter_selector = 0,
+                                       uint64_t is_null = 0, uint64_t counter_selector = 0,
                                        const std::shared_ptr<PacPState> &pstate = nullptr);
 
 // PacNoisedSelect: returns true with probability proportional to popcount(key_hash)/64
@@ -184,7 +173,6 @@ struct PacBindData : public FunctionData {
 	uint64_t seed;                // RNG seed: pac_seed setting value, or query-id if not set
 	uint64_t query_hash;          // derived from seed: used inside pac_hash() for XOR and as counter selector
 	double scale_divisor;         // for DECIMAL pac_avg: divide result by 10^scale (default 1.0)
-	bool use_deterministic_noise; // if true, use platform-agnostic Box-Muller noise generation
 	bool hash_repair;             // if true, pac_hash() repairs hash to exactly 32 bits set
 
 	// Persistent secret p-tracking: shared across all aggregates in the same query (same query_hash).
@@ -201,7 +189,7 @@ struct PacBindData : public FunctionData {
 	// All aggregates in the same query get the same seed and query_hash.
 	explicit PacBindData(ClientContext &ctx, double mi_val, double correction_val = 1.0, double scale_div = 1.0,
 	                     bool hash_repair_val = false)
-	    : mi(mi_val), correction(correction_val), scale_divisor(scale_div), use_deterministic_noise(false),
+	    : mi(mi_val), correction(correction_val), scale_divisor(scale_div),
 	      hash_repair(hash_repair_val), total_update_count(0), suspicious_count(0), nonsuspicious_count(0) {
 		Value pac_seed_val;
 		if (ctx.TryGetCurrentSetting("pac_seed", pac_seed_val) && !pac_seed_val.IsNull()) {
@@ -237,8 +225,7 @@ struct PacBindData : public FunctionData {
 	bool Equals(const FunctionData &other) const override {
 		auto &o = other.Cast<PacBindData>();
 		return mi == o.mi && correction == o.correction && seed == o.seed && query_hash == o.query_hash &&
-		       scale_divisor == o.scale_divisor && use_deterministic_noise == o.use_deterministic_noise &&
-		       hash_repair == o.hash_repair;
+		       scale_divisor == o.scale_divisor && hash_repair == o.hash_repair;
 	}
 };
 

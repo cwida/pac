@@ -94,7 +94,7 @@ Probabilistic row filter at the outermost categorical query boundary. Checks the
 SELECT * FROM (SELECT department, pac_hash(hash(id)) AS h FROM employees) WHERE pac_filter(h);
 ```
 
-### pac_mean / pac_noised
+### pac_mean / pac_noisedis the deter
 
 `pac_mean(LIST<FLOAT>) → FLOAT` — Computes the mean of non-NULL list elements. Used internally for ordering by the true aggregate value in top-K queries.
 

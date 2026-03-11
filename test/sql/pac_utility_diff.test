@@ -19,9 +19,6 @@ SET threads = 1
 statement ok
 SET pac_mi = 0
 
-statement ok
-SET pac_deterministic_noise = true
-
 # Create PU table and a child table
 statement ok
 CREATE PU TABLE diff_pu(

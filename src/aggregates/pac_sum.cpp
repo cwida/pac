@@ -439,7 +439,7 @@ void PacSumFinalize(Vector &states, AggregateInputData &input, Vector &result, i
 #endif
 		CheckPacSampleDiversity(key_hash, buf, update_count, "pac_sum", input.bind_data->Cast<PacBindData>());
 		PAC_FLOAT result_val =
-		    PacNoisySampleFrom64Counters(buf, mi, correction, gen, true, ~key_hash, query_hash, pstate);
+		    PacNoisySampleFrom64Counters(buf, mi, correction, gen, ~key_hash, query_hash, pstate);
 		// pac_sum needs 2x compensation: doubles the sum to compensate for ~50% of values contributing to each counter
 		result_val *= PAC_FLOAT(2.0);
 #if PAC_DEBUG

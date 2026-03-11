@@ -15,9 +15,6 @@ statement ok
 SET pac_hash_repair = true
 
 statement ok
-SET pac_deterministic_noise = true
-
-statement ok
 SET threads = 1
 
 statement ok

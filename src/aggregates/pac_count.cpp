@@ -172,7 +172,7 @@ void PacCountFinalize(Vector &states, AggregateInputData &input, Vector &result,
 		                        input.bind_data->Cast<PacBindData>());
 		// Multiply by 2 to compensate for 50% sampling, then apply correction
 		data[offset + i] = static_cast<int64_t>(
-		    PacNoisySampleFrom64Counters(buf, mi, correction, gen, true, ~key_hash, query_hash, pstate) * 2.0);
+		    PacNoisySampleFrom64Counters(buf, mi, correction, gen, ~key_hash, query_hash, pstate) * 2.0);
 	}
 }
 

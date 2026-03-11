@@ -8,9 +8,6 @@ statement ok
 PRAGMA clear_pac_metadata;
 
 statement ok
-SET pac_deterministic_noise = true;
-
-statement ok
 SET threads = 1;
 
 statement ok
@@ -115,9 +112,6 @@ set pac_seed = 42;
 
 statement ok
 SET pac_hash_repair = true
-
-statement ok
-SET pac_deterministic_noise = true;
 
 # Test correlated subquery with EXISTS (semi-join) - similar to TPC-H Q04
 # This query finds order priorities for orders in a date range that have at least one lineitem

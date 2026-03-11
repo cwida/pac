@@ -121,7 +121,7 @@ static void PacMinMaxFinalize(Vector &states, AggregateInputData &input, Vector 
 		                        input.bind_data->Cast<PacBindData>());
 		// Pass mi for noise, 1.0 as correction (no value scaling for min/max)
 		data[offset + i] =
-		    FromDouble<T>(PacNoisySampleFrom64Counters(buf, mi, 1.0, gen, true, ~key_hash, query_hash, pstate));
+		    FromDouble<T>(PacNoisySampleFrom64Counters(buf, mi, 1.0, gen, ~key_hash, query_hash, pstate));
 	}
 }
 
