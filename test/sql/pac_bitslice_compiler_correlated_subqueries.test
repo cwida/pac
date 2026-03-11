@@ -256,7 +256,7 @@ FROM
 WHERE
     c_mktsegment = 'BUILDING';
 ----
-0	0.0	NULL
+0	nan	NULL
 
 # Test outer aggregate + inner aggregate with IN clause - both need joins to PU
 # This tests that when BOTH outer and inner queries scan FK-linked tables (not PU directly),

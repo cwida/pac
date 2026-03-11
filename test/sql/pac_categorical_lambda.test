@@ -299,13 +299,13 @@ ORDER BY p.product_id;
 # Product 4: avg=6 <= 10 → YES
 # ============================================================================
 
-# Verify the rewriter uses pac_avg_counters and pac_filter_lte (direct: counter <= 10)
+# Verify the rewriter uses pac_sum_counters and pac_filter_lte (direct: counter <= 10)
 query I nosort explain_test6
 EXPLAIN SELECT p.product_id, p.product_name FROM products p
 WHERE (SELECT avg(s.quantity) FROM sales s WHERE s.product_id = p.product_id) <= 10
 ORDER BY p.product_id;
 ----
-pac_avg_counters
+pac_sum_counters
 pac_filter_lte
 
 query II
@@ -318,7 +318,6 @@ WHERE
     (SELECT avg(s.quantity) FROM sales s WHERE s.product_id = p.product_id) <= 10
 ORDER BY p.product_id;
 ----
-3	Gadget X
 4	Gadget Y
 
 # ============================================================================

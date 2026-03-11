@@ -188,7 +188,7 @@ query I
 SELECT AVG(m.data_val)::DECIMAL(5,2)
 FROM mid_ab m JOIN pu_a a ON m.a_fk = a.id JOIN pu_b b ON m.b_fk = b.id
 ----
-11.07
+18.44
 
 # STRESS TEST: Complex multi-PU scenario with all PU types
 # This query joins ALL privacy units (pu_a, pu_b, pu_c, pu_no_pk) in a single query
@@ -232,7 +232,7 @@ JOIN pu_b b ON m.b_fk = b.id
 JOIN pu_c c ON m.c_fk_a = c.a_id AND m.c_fk_b = c.b_id
 JOIN pu_no_pk np ON m.np_grp = np.grp
 ----
-62	2720	15.11
+62	2720	43.87
 
 # Multi-PU with MIN/MAX aggregates and GROUP BY on non-join-key
 # Note: Grouping by mid_id creates single-row groups, PAC returns NULL for privacy
@@ -262,7 +262,7 @@ JOIN pu_a a ON m.a_fk = a.id
 JOIN pu_b b ON m.b_fk = b.id
 JOIN pu_c c ON m.c_fk_a = c.a_id AND m.c_fk_b = c.b_id
 ----
-730	16	24.33
+730	16	45.63
 
 # Test with join elimination on multi-PU query
 statement ok

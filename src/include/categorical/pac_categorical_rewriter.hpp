@@ -116,7 +116,7 @@ void RewriteCategoricalQuery(OptimizerExtensionInput &input, unique_ptr<LogicalO
 // ==========================================================================================
 static inline bool IsPacAggregate(const string &pattern, const string &suffix = "", const string &prefix = "pac_") {
 	const string name = StringUtil::Lower(pattern);
-	for (auto &aggr_name : {"sum", "count", "avg", "min", "max"}) {
+	for (auto &aggr_name : {"sum", "count", "min", "max"}) {
 		if (name == prefix + aggr_name + suffix) {
 			return true; // function name is some PAC aggregate
 		}
@@ -152,8 +152,13 @@ static inline string GetBasePacAggregateName(const string &name) {
 }
 
 static inline string GetListAggregateVariant(const string &name) {
+	// Match bare aggregate names: sum → pac_sum_list
 	if (IsPacAggregate(name, "", "")) {
 		return "pac_" + name + "_list";
+	}
+	// Match PAC aggregate names: pac_sum → pac_sum_list
+	if (IsPacAggregate(name)) {
+		return name + "_list";
 	}
 	return "";
 }
@@ -239,11 +244,10 @@ static inline bool IsAlreadyWrappedInPacNoised(Expression *expr) {
 	if (expr->type == ExpressionType::BOUND_FUNCTION) {
 		auto &func = expr->Cast<BoundFunctionExpression>();
 		// Check for all categorical rewrite terminal functions
-		if (func.function.name == "pac_noised" || func.function.name == "pac_filter" ||
-		    func.function.name == "pac_select" || func.function.name == "pac_coalesce" ||
-		    func.function.name == "list_transform" || func.function.name == "list_zip" ||
-		    StringUtil::StartsWith(func.function.name, "pac_filter_") ||
-		    StringUtil::StartsWith(func.function.name, "pac_select_")) {
+		if (StringUtil::StartsWith(func.function.name, "pac_noised") ||
+		    StringUtil::StartsWith(func.function.name, "pac_filter") ||
+		    StringUtil::StartsWith(func.function.name, "pac_select") || func.function.name == "pac_coalesce" ||
+		    func.function.name == "list_transform" || func.function.name == "list_zip") {
 			return true;
 		}
 	}

@@ -1,5 +1,5 @@
 # name: test/sql/pac_avg.test
-# description: Test pac_avg aggregate function
+# description: Test avg() rewritten to pac_sum(hash,col)/count(col)
 # group: [sql]
 
 require pac
@@ -32,15 +32,15 @@ CREATE TABLE test_data AS
 SELECT i AS rowid, i % 3 AS grp, (i % 100) AS value
 FROM range(4000) t(i)
 
-# Ungrouped pac_avg with INTEGER
+# Ungrouped pac_sum/count with INTEGER
 query I
-SELECT pac_avg(hash(rowid)::UBIGINT, value::INTEGER) IS NOT NULL FROM test_data
+SELECT pac_sum(hash(rowid)::UBIGINT, value::INTEGER) / count(value::INTEGER) IS NOT NULL FROM test_data
 ----
 true
 
 # Verify returns DOUBLE for integers
 query I
-SELECT typeof(pac_avg(hash(rowid)::UBIGINT, value::INTEGER)) FROM test_data
+SELECT typeof(pac_sum(hash(rowid)::UBIGINT, value::INTEGER) / count(value::INTEGER)) FROM test_data
 ----
 DOUBLE
 
@@ -49,7 +49,7 @@ statement ok
 SET pac_mi = 128
 
 query I
-SELECT pac_avg(hash(rowid)::UBIGINT, value::INTEGER) IS NOT NULL FROM test_data
+SELECT pac_sum(hash(rowid)::UBIGINT, value::INTEGER) / count(value::INTEGER) IS NOT NULL FROM test_data
 ----
 true
 
@@ -58,13 +58,13 @@ SET pac_mi = 0
 
 # Test with explicit mi parameter (0.0 for no noise)
 query I
-SELECT pac_avg(hash(rowid)::UBIGINT, value::INTEGER) IS NOT NULL FROM test_data
+SELECT pac_sum(hash(rowid)::UBIGINT, value::INTEGER) / count(value::INTEGER) IS NOT NULL FROM test_data
 ----
 true
 
-# Grouped pac_avg
+# Grouped pac_sum/count
 query II
-SELECT grp, pac_avg(hash(rowid)::UBIGINT, value::INTEGER) IS NOT NULL AS has_result
+SELECT grp, pac_sum(hash(rowid)::UBIGINT, value::INTEGER) / count(value::INTEGER) IS NOT NULL AS has_result
 FROM test_data
 GROUP BY grp
 ORDER BY grp
@@ -75,59 +75,61 @@ ORDER BY grp
 
 # Test with different numeric types
 query I
-SELECT pac_avg(hash(rowid)::UBIGINT, value::BIGINT) IS NOT NULL FROM test_data
+SELECT pac_sum(hash(rowid)::UBIGINT, value::BIGINT) / count(value::BIGINT) IS NOT NULL FROM test_data
 ----
 true
 
 query I
-SELECT pac_avg(hash(rowid)::UBIGINT, value::DOUBLE) IS NOT NULL FROM test_data
+SELECT pac_sum(hash(rowid)::UBIGINT, value::DOUBLE) / count(value::DOUBLE) IS NOT NULL FROM test_data
 ----
 true
 
 query I
-SELECT pac_avg(hash(rowid)::UBIGINT, value::FLOAT) IS NOT NULL FROM test_data
+SELECT pac_sum(hash(rowid)::UBIGINT, value::FLOAT) / count(value::FLOAT) IS NOT NULL FROM test_data
 ----
 true
 
 query I
-SELECT pac_avg(hash(rowid)::UBIGINT, value::SMALLINT) IS NOT NULL FROM test_data
+SELECT pac_sum(hash(rowid)::UBIGINT, value::SMALLINT) / count(value::SMALLINT) IS NOT NULL FROM test_data
 ----
 true
 
 query I
-SELECT pac_avg(hash(rowid)::UBIGINT, (value % 127)::TINYINT) IS NOT NULL FROM test_data
+SELECT pac_sum(hash(rowid)::UBIGINT, (value % 127)::TINYINT) / count((value % 127)::TINYINT) IS NOT NULL FROM test_data
 ----
 true
 
 # Verify return type is always DOUBLE
 query I
-SELECT typeof(pac_avg(hash(rowid)::UBIGINT, value::BIGINT)) FROM test_data
+SELECT typeof(pac_sum(hash(rowid)::UBIGINT, value::BIGINT) / count(value::BIGINT)) FROM test_data
 ----
 DOUBLE
 
 query I
-SELECT typeof(pac_avg(hash(rowid)::UBIGINT, value::DOUBLE)) FROM test_data
+SELECT typeof(pac_sum(hash(rowid)::UBIGINT, value::DOUBLE) / count(value::DOUBLE)) FROM test_data
 ----
 DOUBLE
 
 query I
-SELECT typeof(pac_avg(hash(rowid)::UBIGINT, value::TINYINT)) FROM test_data
+SELECT typeof(pac_sum(hash(rowid)::UBIGINT, value::TINYINT) / count(value::TINYINT)) FROM test_data
 ----
 DOUBLE
 
 # ===========================================================
-# NULL handling tests - pac_avg ignores NULLs (safe behavior, like DuckDB's AVG)
+# NULL handling tests - pac_sum ignores NULLs (safe behavior, like DuckDB's AVG)
 # ===========================================================
 
 # Test ungrouped: NULL in value is ignored, result is NOT NULL
 query I
-SELECT pac_avg(hash(rowid)::UBIGINT, CASE WHEN rowid = 100 THEN NULL ELSE value END::INTEGER) IS NOT NULL FROM test_data
+SELECT pac_sum(hash(rowid)::UBIGINT, CASE WHEN rowid = 100 THEN NULL ELSE value END::INTEGER) /
+       count(CASE WHEN rowid = 100 THEN NULL ELSE value END::INTEGER) IS NOT NULL FROM test_data
 ----
 true
 
 # Test ungrouped: NULL in key_hash is ignored, result is NOT NULL
 query I
-SELECT pac_avg(CASE WHEN rowid = 50 THEN NULL ELSE hash(rowid)::UBIGINT END, value::INTEGER) IS NOT NULL FROM test_data
+SELECT pac_sum(CASE WHEN rowid = 50 THEN NULL ELSE hash(rowid)::UBIGINT END, value::INTEGER) /
+       count(value::INTEGER) IS NOT NULL FROM test_data
 ----
 true
 
@@ -140,7 +142,7 @@ FROM range(30) t(i)
 
 # All groups should have non-NULL results (NULLs are just ignored)
 query II
-SELECT grp, pac_avg(hash(rowid)::UBIGINT, value) IS NULL AS is_null
+SELECT grp, pac_sum(hash(rowid)::UBIGINT, value) / count(value) IS NULL AS is_null
 FROM test_null_groups
 GROUP BY grp
 ORDER BY grp
@@ -153,20 +155,22 @@ statement ok
 DROP TABLE test_null_groups
 
 # ===========================================================
-# Accuracy tests - pac_avg should be close to actual AVG
+# Accuracy tests - pac_sum/count should be close to actual AVG
 # ===========================================================
 
-# With large enough data, pac_avg should be reasonably close to AVG
+# With large enough data, pac_sum/count should be reasonably close to AVG
 # Using a tolerance of 10% of the actual average
 query I
-SELECT abs(pac_avg(hash(rowid)::UBIGINT, value::INTEGER) - AVG(value)) < (AVG(value) * 0.1) FROM test_data
+SELECT abs(pac_sum(hash(rowid)::UBIGINT, value::INTEGER) / count(value::INTEGER) - AVG(value)) < (AVG(value) * 0.1) FROM test_data
 ----
 true
 
 # Test grouped accuracy
 query I
 SELECT COUNT(*) = 3 FROM (
-    SELECT grp, pac_avg(hash(rowid)::UBIGINT, value::INTEGER) AS pa, AVG(value) AS a
+    SELECT grp,
+           pac_sum(hash(rowid)::UBIGINT, value::INTEGER) / count(value::INTEGER) AS pa,
+           AVG(value) AS a
     FROM test_data
     GROUP BY grp
     HAVING abs(pa - a) < (a * 0.2)
@@ -178,13 +182,13 @@ true
 # Edge cases
 # ===========================================================
 
-# Single row - pac_avg may return NULL based on key_hash bit pattern
+# Single row
 statement ok
 CREATE TABLE test_single AS
 SELECT 1 AS rowid, 42.0 AS value
 
 query I
-SELECT pac_avg(hash(rowid)::UBIGINT, value) IS NOT NULL FROM test_single
+SELECT pac_sum(hash(rowid)::UBIGINT, value) / count(value) IS NOT NULL FROM test_single
 ----
 1
 
@@ -197,7 +201,7 @@ CREATE TABLE test_constant AS
 SELECT i AS rowid, 50.0 AS value FROM range(1000) t(i)
 
 query I
-SELECT abs(pac_avg(hash(rowid)::UBIGINT, value) - 50.0) < 10 FROM test_constant
+SELECT abs(pac_sum(hash(rowid)::UBIGINT, value) / count(value) - 50.0) < 10 FROM test_constant
 ----
 true
 

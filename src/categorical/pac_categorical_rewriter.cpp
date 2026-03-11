@@ -397,6 +397,7 @@ void FindCategoricalPatternsInOperator(LogicalOperator *op, LogicalOperator *pla
 		FindCategoricalPatternsInOperator(child.get(), plan_root, patterns, now_inside_aggregate, hash_for_children);
 	}
 	// On the way back up: if patterns were found in this subtree, strip scalar wrappers in direct children.
+	// Record the resulting table_index so RewriteBottomUp knows these projections are terminal.
 	if (patterns.size() > patterns_before_all) {
 		for (auto &child : op->children) {
 			if (child->type == LogicalOperatorType::LOGICAL_PROJECTION) {
@@ -426,6 +427,48 @@ static bool TracesPacCountersAggregate(Expression *expr, LogicalOperator *plan_r
 }
 
 // with pac_*_list variants that aggregate element-wise
+// Try to rebind an aggregate expression at index i to its _list variant.
+// Returns true if the aggregate was successfully rebound.
+// The aggregate's value child is extracted (dropping the hash for PAC aggregates),
+// its type set to LIST<FLOAT>, and the aggregate rebound to the _list variant.
+static bool TryRebindToListVariant(LogicalAggregate &agg, idx_t i, ClientContext &context) {
+	auto &agg_expr = agg.expressions[i];
+	if (agg_expr->type != ExpressionType::BOUND_AGGREGATE) {
+		return false;
+	}
+	auto &bound_agg = agg_expr->Cast<BoundAggregateExpression>();
+	if (bound_agg.children.empty()) {
+		return false;
+	}
+	// PAC/PAC_counters aggregates have (hash, value); standard aggregates have (value).
+	// For _list variants we only need the value child.
+	bool is_pac_style = (IsPacAggregate(bound_agg.function.name) || IsPacCountersAggregate(bound_agg.function.name)) &&
+	                    bound_agg.children.size() > 1;
+	idx_t value_child_idx = is_pac_style ? 1 : 0;
+	string base_name = GetBasePacAggregateName(bound_agg.function.name); // strips _counters if present
+	string list_name = GetListAggregateVariant(base_name);
+	if (list_name.empty()) {
+		return false;
+	}
+	PAC_DEBUG_PRINT("[CAT] TryRebindToList: " + bound_agg.function.name + " → " + list_name);
+	vector<unique_ptr<Expression>> children;
+	auto child_copy = bound_agg.children[value_child_idx]->Copy();
+	child_copy->return_type = LogicalType::LIST(PacFloatLogicalType());
+	children.push_back(std::move(child_copy));
+	auto new_aggr = RebindAggregate(context, list_name, std::move(children), bound_agg.IsDistinct());
+	if (!new_aggr) {
+		return false;
+	}
+	agg.expressions[i] = std::move(new_aggr);
+	idx_t types_index = agg.groups.size() + i;
+	if (types_index < agg.types.size()) {
+		agg.types[types_index] = LogicalType::LIST(PacFloatLogicalType());
+	}
+	return true;
+}
+
+// Replace aggregates whose input traces to a PAC _counters aggregate with _list variants.
+// Called during RewriteBottomUp so projections above get properly list_transform'd.
 static void ReplaceAggregatesOverCounters(LogicalOperator *op, ClientContext &context, LogicalOperator *plan_root) {
 	if (op->type != LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
 		return;
@@ -440,32 +483,11 @@ static void ReplaceAggregatesOverCounters(LogicalOperator *op, ClientContext &co
 		if (bound_agg.children.empty()) {
 			continue;
 		}
-		// Check if input traces to a PAC _counters aggregate
-		bool traces_counters = TracesPacCountersAggregate(bound_agg.children[0].get(), plan_root);
-		if (!traces_counters) {
+		idx_t trace_child_idx = IsPacAggregate(bound_agg.function.name) && bound_agg.children.size() > 1 ? 1 : 0;
+		if (!TracesPacCountersAggregate(bound_agg.children[trace_child_idx].get(), plan_root)) {
 			continue;
 		}
-		string list_variant = GetListAggregateVariant(bound_agg.function.name);
-		if (list_variant.empty()) {
-			continue;
-		}
-		// Rebind to the list variant
-		vector<unique_ptr<Expression>> children;
-		for (auto &child : bound_agg.children) {
-			auto child_copy = child->Copy();
-			if (child_copy->type == ExpressionType::BOUND_COLUMN_REF) {
-				child_copy->return_type = LogicalType::LIST(PacFloatLogicalType());
-			}
-			children.push_back(std::move(child_copy));
-		}
-		auto new_aggr = RebindAggregate(context, list_variant, std::move(children), bound_agg.IsDistinct());
-		if (new_aggr) {
-			agg.expressions[i] = std::move(new_aggr);
-			idx_t types_index = agg.groups.size() + i;
-			if (types_index < agg.types.size()) {
-				agg.types[types_index] = LogicalType::LIST(PacFloatLogicalType());
-			}
-		}
+		TryRebindToListVariant(agg, i, context);
 	}
 }
 
@@ -1090,6 +1112,33 @@ static unique_ptr<Expression> RewriteExpressionWithCounters(OptimizerExtensionIn
 		}
 	}
 	Expression *expr_for_lambda = simplified_expr ? simplified_expr.get() : expr;
+
+	// Fused avg path: pac_noised_div(sum_counters, count_counters) for division of two PAC lists.
+	// Detects: "/"(CAST?(pac_binding_a), CAST?(pac_binding_b)) with exactly 2 PAC bindings.
+	if (wrap_kind == PacWrapKind::PAC_NOISED && pac_bindings.size() == 2 &&
+	    expr_for_lambda->type == ExpressionType::BOUND_FUNCTION) {
+		auto &func = expr_for_lambda->Cast<BoundFunctionExpression>();
+		if (func.function.name == "/" && func.children.size() == 2) {
+			// Strip casts to find the underlying col_refs
+			Expression *lhs = StripCasts(func.children[0].get());
+			Expression *rhs = StripCasts(func.children[1].get());
+			if (lhs->type == ExpressionType::BOUND_COLUMN_REF && rhs->type == ExpressionType::BOUND_COLUMN_REF) {
+				auto &lhs_ref = lhs->Cast<BoundColumnRefExpression>();
+				auto &rhs_ref = rhs->Cast<BoundColumnRefExpression>();
+				auto sum_list = make_uniq<BoundColumnRefExpression>("pac_var", LogicalType::LIST(PacFloatLogicalType()),
+				                                                    lhs_ref.binding);
+				auto cnt_list = make_uniq<BoundColumnRefExpression>("pac_var", LogicalType::LIST(PacFloatLogicalType()),
+				                                                    rhs_ref.binding);
+				auto avg_noised =
+				    input.optimizer.BindScalarFunction("pac_noised_div", std::move(sum_list), std::move(cnt_list));
+				if (target_type != PacFloatLogicalType()) {
+					avg_noised = BoundCastExpression::AddDefaultCastToType(std::move(avg_noised), target_type);
+				}
+				return avg_noised;
+			}
+		}
+	}
+
 	LogicalType result_element_type =
 	    (wrap_kind == PacWrapKind::PAC_NOISED) ? PacFloatLogicalType() : LogicalType::BOOLEAN;
 	auto list_expr = BuildCounterListTransform(input, pac_bindings, expr_for_lambda, plan_root, result_element_type);
@@ -1226,12 +1275,15 @@ static void RewriteProjectionExpression(OptimizerExtensionInput &input, LogicalP
 			    "pac_var", LogicalType::LIST(PacFloatLogicalType()), pac_bindings[0].binding);
 			proj.types[i] = LogicalType::LIST(PacFloatLogicalType());
 		} else {
-			// Multiple bindings: keep existing list_transform (fallback)
-			auto list_expr =
-			    BuildCounterListTransform(input, pac_bindings, expr_to_clone, plan_root, PacFloatLogicalType());
-			if (list_expr) {
-				proj.expressions[i] = std::move(list_expr);
-				proj.types[i] = LogicalType::LIST(PacFloatLogicalType());
+			// Multiple PAC bindings (e.g., avg decomposed to sum/count division): use pac_noised path.
+			// Emitting list_transform here would make IsAlreadyWrappedInPacNoised=true on the projection
+			// expression, which blocks outer operators (e.g. a filter) from tracing PAC bindings through
+			// this projection and rewriting the comparison correctly.
+			auto result = RewriteExpressionWithCounters(input, pac_bindings, expr_to_clone, plan_root,
+			                                            PacWrapKind::PAC_NOISED, expr->return_type);
+			if (result) {
+				proj.expressions[i] = std::move(result);
+				proj.types[i] = expr->return_type;
 			}
 		}
 	} else {
@@ -1338,11 +1390,14 @@ static void RewriteBottomUp(unique_ptr<LogicalOperator> &op_ptr, OptimizerExtens
 	// Strip scalar wrappers (Projection→first()→Projection) over PAC aggregates before recursing.
 	// This removes the first() aggregate that can't handle LIST<DOUBLE>, and lets the inner
 	// projection be processed naturally with the outer's table_index.
+	// Track whether we stripped, so the inner projection is treated as terminal (scalar output).
+	bool stripped_scalar_wrapper = false;
 	if (op->type == LogicalOperatorType::LOGICAL_PROJECTION && !inside_cte_definition) {
 		auto *unwrapped = RecognizeDuckDBScalarWrapper(op);
 		if (unwrapped && !FindPacAggregateInOperator(unwrapped).empty()) {
 			StripScalarWrapperInPlace(op_ptr, true);
 			op = op_ptr.get();
+			stripped_scalar_wrapper = true;
 		}
 	}
 	for (idx_t ci = 0; ci < op->children.size(); ci++) { // Recurse into children first (bottom-up)
@@ -1379,7 +1434,12 @@ static void RewriteBottomUp(unique_ptr<LogicalOperator> &op_ptr, OptimizerExtens
 		// === AGGREGATE: convert PAC aggregates to _counters, then check aggregates-over-counters ===
 		auto &agg = op->Cast<LogicalAggregate>();
 
-		// Convert PAC aggregates to _counters variants
+		// First: replace standard/PAC aggregates whose input traces to _counters
+		// with _list variants. Must happen before _counters conversion below so that
+		// the projection rewrite (later in this pass) sees _list outputs.
+		ReplaceAggregatesOverCounters(op, input.context, plan_root);
+
+		// Convert remaining PAC aggregates to _counters variants
 		for (idx_t i = 0; i < agg.expressions.size(); i++) {
 			auto &agg_expr = agg.expressions[i];
 			if (agg_expr->type != ExpressionType::BOUND_AGGREGATE) {
@@ -1407,16 +1467,17 @@ static void RewriteBottomUp(unique_ptr<LogicalOperator> &op_ptr, OptimizerExtens
 				agg.types[types_index] = LogicalType::LIST(PacFloatLogicalType());
 			}
 		}
-		// Check for standard aggregates over counters (e.g., sum(LIST<DOUBLE>) → pac_sum_list)
-		// Children already converted (bottom-up), so their types are LIST<DOUBLE>
-		ReplaceAggregatesOverCounters(op, input.context, plan_root);
 	} else if (op->type == LogicalOperatorType::LOGICAL_PROJECTION &&
 	           !inside_cte_definition) { // === PROJECTION: rewrite PAC expressions ===
 		auto &proj = op->Cast<LogicalProjection>();
 		bool is_filter_pattern = IsProjectionReferencedByFilterPattern(proj, patterns, plan_root);
 		// A projection is terminal if it's the top-level output projection:
 		// either it IS the plan root, or the plan root is ORDER_BY/TOP_N/LIMIT whose child is this projection.
-		bool is_terminal = (op == plan_root);
+		// A stripped scalar-wrapper projection is also treated as terminal: it produces a single scalar
+		// value consumed by outer aggregate input (not a GROUP BY result), so it must emit pac_noised
+		// (scalar FLOAT) rather than LIST<FLOAT>. Emitting LIST would cause type mismatches in the outer
+		// aggregate that uses the scalar subquery result as a value argument.
+		bool is_terminal = stripped_scalar_wrapper || (op == plan_root);
 		if (!is_terminal) {
 			auto *root = plan_root;
 			while (root &&
@@ -1665,6 +1726,92 @@ static void RewriteBottomUp(unique_ptr<LogicalOperator> &op_ptr, OptimizerExtens
 	}
 }
 
+// Visitor that updates all col_ref types to match their source operator's output types.
+class ColRefTypePropagator : public LogicalOperatorVisitor {
+public:
+	unordered_map<uint64_t, LogicalType> binding_types;
+
+	void VisitOperator(LogicalOperator &op) override {
+		VisitOperatorChildren(op);
+		VisitOperatorExpressions(op);
+	}
+
+	void VisitExpression(unique_ptr<Expression> *expr_ptr) override {
+		auto &expr = *expr_ptr;
+		// First recurse into children
+		VisitExpressionChildren(*expr);
+		// Update col_ref types
+		if (expr->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
+			auto &col_ref = expr->Cast<BoundColumnRefExpression>();
+			auto it = binding_types.find(HashBinding(col_ref.binding));
+			if (it != binding_types.end() && col_ref.return_type != it->second) {
+				col_ref.return_type = it->second;
+			}
+		}
+		// Strip CASTs wrapping col_refs that now have LIST type (the CASTs are stale from pre-rewrite)
+		if (expr->GetExpressionClass() == ExpressionClass::BOUND_CAST) {
+			auto &cast = expr->Cast<BoundCastExpression>();
+			if (cast.child->return_type.id() == LogicalTypeId::LIST && cast.return_type.id() != LogicalTypeId::LIST) {
+				// The child became LIST<FLOAT> but the cast still tries scalar conversion — remove it
+				*expr_ptr = std::move(cast.child);
+			}
+		}
+	}
+};
+
+// After _counters conversion, propagate type changes through col_refs.
+// Builds a global binding→type map from all operators, then updates all col_refs to match.
+static void PropagateTypeChanges(LogicalOperator &plan) {
+	// First resolve types so operator types vectors reflect expression return_types
+	plan.ResolveOperatorTypes();
+	// Build global binding → type map
+	ColRefTypePropagator propagator;
+	std::function<void(LogicalOperator &)> collect = [&](LogicalOperator &op) {
+		for (auto &child : op.children) {
+			collect(*child);
+		}
+		auto bindings = op.GetColumnBindings();
+		for (idx_t i = 0; i < bindings.size() && i < op.types.size(); i++) {
+			propagator.binding_types[HashBinding(bindings[i])] = op.types[i];
+		}
+	};
+	collect(plan);
+	// Update all col_refs using the visitor (handles expressions, conditions, etc.)
+	propagator.VisitOperator(plan);
+}
+
+// After PropagateTypeChanges, convert aggregates with LIST-typed value children
+// to _list variants. Catches cases ReplaceAggregatesOverCounters misses (DELIM_JOIN paths
+// where tracing fails but PropagateTypeChanges has already set correct col_ref types).
+static void ConvertPacAggregatesToListVariants(LogicalOperator &plan, ClientContext &context) {
+	for (auto &child : plan.children) {
+		ConvertPacAggregatesToListVariants(*child, context);
+	}
+	if (plan.type != LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+		return;
+	}
+	auto &agg = plan.Cast<LogicalAggregate>();
+	for (idx_t i = 0; i < agg.expressions.size(); i++) {
+		if (agg.expressions[i]->type != ExpressionType::BOUND_AGGREGATE) {
+			continue;
+		}
+		auto &bound_agg = agg.expressions[i]->Cast<BoundAggregateExpression>();
+		if (bound_agg.children.empty() || IsPacListAggregate(bound_agg.function.name)) {
+			continue; // Already a _list variant or no children
+		}
+		// Check if the value child has LIST type (from inner _counters)
+		idx_t value_idx =
+		    (IsPacAggregate(bound_agg.function.name) || IsPacCountersAggregate(bound_agg.function.name)) &&
+		            bound_agg.children.size() > 1
+		        ? 1
+		        : 0;
+		if (bound_agg.children[value_idx]->return_type.id() != LogicalTypeId::LIST) {
+			continue;
+		}
+		TryRebindToListVariant(agg, i, context);
+	}
+}
+
 void RewriteCategoricalQuery(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan) {
 	// Detect categorical patterns
 	vector<CategoricalPatternInfo> patterns;
@@ -1698,7 +1845,14 @@ void RewriteCategoricalQuery(OptimizerExtensionInput &input, unique_ptr<LogicalO
 	unordered_map<uint64_t, unique_ptr<Expression>> saved_filter_pattern_exprs;
 	unordered_set<uint64_t> replaced_mark_bindings;
 	RewriteBottomUp(plan, input, plan, pattern_lookup, patterns, saved_filter_pattern_exprs, replaced_mark_bindings);
+	// After _counters conversion, propagate type changes (col_refs, stale CASTs),
+	// then fix up aggregates that now consume LIST (from inner _counters) to _list variants,
+	// then propagate again since _list conversion changes aggregate output types.
+	PropagateTypeChanges(*plan);
+	ConvertPacAggregatesToListVariants(*plan, input.context);
+	PropagateTypeChanges(*plan);
 	plan->ResolveOperatorTypes();
+	PAC_DEBUG_PRINT("[CAT] Final plan after PropagateTypeChanges:\n" + plan->ToString());
 }
 
 } // namespace duckdb

@@ -247,8 +247,8 @@ GROUP BY oi.grp
 ORDER BY oi.grp
 LIMIT 2;
 ----
-0	22	1160	114.74
-1	22	1260	122.63
+0	22	1160	99.09
+1	22	1260	105.91
 
 # ==============================================================================
 # Test 11: Chain Break - Query middle table with aggregates from both ends

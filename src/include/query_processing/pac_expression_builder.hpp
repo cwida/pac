@@ -64,6 +64,10 @@ unique_ptr<Expression> BindBitOrAggregate(OptimizerExtensionInput &input, unique
 void ModifyAggregatesWithPacFunctions(OptimizerExtensionInput &input, LogicalAggregate *agg,
                                       unique_ptr<Expression> &hash_input_expr, unique_ptr<LogicalOperator> &plan);
 
+// Pre-pass: replace avg(col) with sum(col)/count(col) BEFORE PAC compilation.
+// Must be called after ResolveOperatorTypes() and before ModifyAggregatesWithPacFunctions.
+void RewriteAvgToSumCount(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan);
+
 } // namespace duckdb
 
 #endif // PAC_EXPRESSION_BUILDER_HPP

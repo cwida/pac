@@ -643,9 +643,7 @@ logical_opt	<REGEX>:.*pac_mean.*
 
 # Test 25: Top-K with non-numerical CASE WHEN on PAC aggregate (SQLStorm Q25283 pattern)
 # CASE WHEN returning VARCHAR that internally compares a PAC aggregate (AVG) must not crash.
-# The TopK rewriter converts pac_avg to pac_avg_counters (LIST<FLOAT>), then WrapListRefs
-# must wrap the col refs inside the CASE WHEN with pac_mean + cast to DOUBLE so the
-# comparison operators get the correct type.
+# avg() is rewritten to pac_sum/count; categorical rewriter converts pac_sum → pac_sum_counters.
 query II
 EXPLAIN SELECT
     n_name,
@@ -664,7 +662,7 @@ GROUP BY n_name
 ORDER BY total_quantity DESC
 LIMIT 3;
 ----
-logical_opt	<REGEX>:.*pac_avg_counters.*
+logical_opt	<REGEX>:.*pac_sum_counters.*
 
 # Test 26: HAVING clause with PAC aggregate (SQLStorm Q28426 pattern)
 # ROUND(AVG(...), 2) triggers a categorical pattern (arithmetic with PAC aggregate)
@@ -684,7 +682,7 @@ GROUP BY n_name
 HAVING SUM(l_extendedprice) > 0
 ORDER BY TotalRevenue DESC;
 ----
-logical_opt	<REGEX>:.*pac_avg_counters.*
+logical_opt	<REGEX>:.*pac_sum_counters.*pac_count_counters.*
 
 # ============================================================
 # DISTINCT aggregate rewriting tests
@@ -723,8 +721,9 @@ GROUP BY
 ----
 logical_opt	<REGEX>:.*bit_or.*
 
-# Test 29: AVG(DISTINCT) uses pre-aggregation with bit_or + pac_avg
-query II
+# Test 29: AVG(DISTINCT) is not yet supported after pac_avg removal
+# (pac_avg was replaced by pac_sum/pac_count decomposition, DISTINCT variant not yet implemented)
+statement error
 EXPLAIN SELECT
     c_nationkey,
     AVG(DISTINCT l_discount) AS distinct_avg_discount
@@ -738,10 +737,10 @@ WHERE
 GROUP BY
     c_nationkey;
 ----
-logical_opt	<REGEX>:.*bit_or.*
+unsupported aggregate function avg
 
 # Test 30: Non-DISTINCT aggregates are NOT rewritten to _distinct variants
-# Regular SUM/COUNT/AVG must still produce pac_sum/pac_count/pac_avg (not _distinct)
+# Regular SUM/COUNT/AVG must still produce pac_sum_counters/pac_count_counters (not _distinct)
 query II
 EXPLAIN SELECT
     c_nationkey,
@@ -758,7 +757,7 @@ WHERE
 GROUP BY
     c_nationkey;
 ----
-logical_opt	<REGEX>:.*pac_sum\(.*
+logical_opt	<REGEX>:.*pac_sum_counters.*
 
 # Test 31: Non-DISTINCT plan must NOT contain _distinct variants
 query II

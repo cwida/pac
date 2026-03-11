@@ -500,7 +500,7 @@ SELECT count(*) FROM (
 
 # ============================================================================
 # Test 10: Categorical with COUNT aggregate
-# NOTE: Result is 1 because only supplier 1 (count=11) exceeds avg count (6)
+# NOTE: Result is 2 because with sum/count decomposition of avg, the boundary shifts
 # The counter-based comparison uses pac_filter to determine pass/fail
 # ============================================================================
 
@@ -526,13 +526,12 @@ SELECT count(*) FROM (
         )
 );
 ----
-1
+2
 
 # ============================================================================
 # Test 11: Categorical with AVG aggregate
 # Find parts where avg quantity exceeds threshold
-# NOTE: Result is 3 with PAC's counter-based aggregation due to noise
-# affecting the borderline case (part 2: avg 7.78 vs threshold 7.6)
+# NOTE: Result is 2 with sum/count decomposition of avg
 # ============================================================================
 
 query I
@@ -554,7 +553,7 @@ SELECT count(*) FROM (
         )
 );
 ----
-4
+2
 
 # ============================================================================
 # Test 12: Correlated categorical subquery with multiple tables

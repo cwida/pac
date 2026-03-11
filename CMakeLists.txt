@@ -39,7 +39,6 @@ set(EXTENSION_SOURCES
     src/aggregates/pac_distinct.cpp
     src/aggregates/pac_min_max.cpp
     src/aggregates/pac_sum.cpp
-    src/aggregates/pac_avg.cpp
     src/compiler/pac_bitslice_compiler.cpp
     src/compiler/pac_compiler_helpers.cpp
     src/query_processing/pac_expression_builder.cpp

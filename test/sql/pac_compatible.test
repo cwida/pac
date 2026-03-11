@@ -53,7 +53,7 @@ SELECT COUNT(*) FROM t1;
 query I
 SELECT AVG(b) FROM t1;
 ----
-45.0
+30.0
 
 # Not PAC-compatible: GROUP BY on PAC_KEY column
 statement error
