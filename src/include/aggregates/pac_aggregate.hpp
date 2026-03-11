@@ -168,12 +168,12 @@ inline double GetPacMiFromSetting(ClientContext &ctx) {
 // query_hash is XOR'd with per-row key_hash inside pac_hash() (centralized) and used as
 // the counter selector for PacNoisySampleFrom64Counters in finalize functions.
 struct PacBindData : public FunctionData {
-	double mi;                    // mutual information parameter from pac_mi setting (controls noise/NULL probability)
-	double correction;            // correction factor: multiplies sum/avg/count results, reduces NULL prob for min/max
-	uint64_t seed;                // RNG seed: pac_seed setting value, or query-id if not set
-	uint64_t query_hash;          // derived from seed: used inside pac_hash() for XOR and as counter selector
-	double scale_divisor;         // for DECIMAL pac_avg: divide result by 10^scale (default 1.0)
-	bool hash_repair;             // if true, pac_hash() repairs hash to exactly 32 bits set
+	double mi;            // mutual information parameter from pac_mi setting (controls noise/NULL probability)
+	double correction;    // correction factor: multiplies sum/avg/count results, reduces NULL prob for min/max
+	uint64_t seed;        // RNG seed: pac_seed setting value, or query-id if not set
+	uint64_t query_hash;  // derived from seed: used inside pac_hash() for XOR and as counter selector
+	double scale_divisor; // for DECIMAL pac_avg: divide result by 10^scale (default 1.0)
+	bool hash_repair;     // if true, pac_hash() repairs hash to exactly 32 bits set
 
 	// Persistent secret p-tracking: shared across all aggregates in the same query (same query_hash).
 	// When active (mi > 0 and pac_ptracking enabled), noise calibration uses p-weighted variance
@@ -189,8 +189,8 @@ struct PacBindData : public FunctionData {
 	// All aggregates in the same query get the same seed and query_hash.
 	explicit PacBindData(ClientContext &ctx, double mi_val, double correction_val = 1.0, double scale_div = 1.0,
 	                     bool hash_repair_val = false)
-	    : mi(mi_val), correction(correction_val), scale_divisor(scale_div),
-	      hash_repair(hash_repair_val), total_update_count(0), suspicious_count(0), nonsuspicious_count(0) {
+	    : mi(mi_val), correction(correction_val), scale_divisor(scale_div), hash_repair(hash_repair_val),
+	      total_update_count(0), suspicious_count(0), nonsuspicious_count(0) {
 		Value pac_seed_val;
 		if (ctx.TryGetCurrentSetting("pac_seed", pac_seed_val) && !pac_seed_val.IsNull()) {
 			seed = uint64_t(pac_seed_val.GetValue<int64_t>());
