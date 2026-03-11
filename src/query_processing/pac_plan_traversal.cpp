@@ -612,14 +612,12 @@ static bool CheckColumnsAccessible(LogicalOperator *op, idx_t table_index) {
 	}
 
 	// Check for join types that block right-side column access
-	if (op->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN ||
-	    op->type == LogicalOperatorType::LOGICAL_ANY_JOIN) {
+	if (op->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN || op->type == LogicalOperatorType::LOGICAL_ANY_JOIN) {
 		auto &join = op->Cast<LogicalJoin>();
 
 		// MARK, SEMI, and ANTI joins don't output right-side columns
-		if (join.join_type == JoinType::MARK || join.join_type == JoinType::SEMI ||
-		    join.join_type == JoinType::ANTI || join.join_type == JoinType::RIGHT_SEMI ||
-		    join.join_type == JoinType::RIGHT_ANTI) {
+		if (join.join_type == JoinType::MARK || join.join_type == JoinType::SEMI || join.join_type == JoinType::ANTI ||
+		    join.join_type == JoinType::RIGHT_SEMI || join.join_type == JoinType::RIGHT_ANTI) {
 			// Check if table is in the right child (blocked side)
 			if (op->children.size() >= 2 && HasTableIndexInSubtree(op->children[1].get(), table_index)) {
 				// Table is in the right child of a MARK/SEMI/ANTI join - columns NOT accessible

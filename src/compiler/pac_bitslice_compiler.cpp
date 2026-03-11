@@ -155,8 +155,7 @@ static bool TablesShareJoinSubtree(LogicalOperator *op, idx_t table_idx_a, idx_t
 		// Tables are in different children of this operator
 		// Check if this is a JOIN that connects them (valid) vs CROSS_PRODUCT (separate branches)
 		if (op->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN ||
-		    op->type == LogicalOperatorType::LOGICAL_DELIM_JOIN ||
-		    op->type == LogicalOperatorType::LOGICAL_ANY_JOIN) {
+		    op->type == LogicalOperatorType::LOGICAL_DELIM_JOIN || op->type == LogicalOperatorType::LOGICAL_ANY_JOIN) {
 			return true;
 		}
 		return false;

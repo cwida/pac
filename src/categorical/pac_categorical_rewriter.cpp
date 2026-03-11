@@ -1302,7 +1302,7 @@ static void RewriteProjectionExpression(OptimizerExtensionInput &input, LogicalP
 // the saved expression itself contains the same binding as an intermediate col_ref).
 // Recursively fix column reference return types to match child operator output types.
 static void FixExprColumnTypes(unique_ptr<Expression> &e, const vector<ColumnBinding> &bindings,
-                                const vector<LogicalType> &types) {
+                               const vector<LogicalType> &types) {
 	if (e->type == ExpressionType::BOUND_COLUMN_REF) {
 		auto &col_ref = e->Cast<BoundColumnRefExpression>();
 		for (idx_t ci = 0; ci < bindings.size() && ci < types.size(); ci++) {
@@ -1312,9 +1312,8 @@ static void FixExprColumnTypes(unique_ptr<Expression> &e, const vector<ColumnBin
 			}
 		}
 	}
-	ExpressionIterator::EnumerateChildren(*e, [&bindings, &types](unique_ptr<Expression> &child) {
-		FixExprColumnTypes(child, bindings, types);
-	});
+	ExpressionIterator::EnumerateChildren(
+	    *e, [&bindings, &types](unique_ptr<Expression> &child) { FixExprColumnTypes(child, bindings, types); });
 }
 
 static void InlineSavedExpressionsIntoExpr(unique_ptr<Expression> &expr,

@@ -55,7 +55,7 @@ GROUP BY department;
 └─────────────┴────────────┴───────┘
 ```
 
-The noised result is close to the real answer but perturbed — an attacker cannot determine whether any specific employee is in the database. The true averages are 78750, 86250, and 102000; the counts are off because PAC's sub-sampling noise dominates on small tables.
+The noised result is close to the real answer but perturbed — an attacker cannot determine whether any specific employee is in the database. 
 
 ## Multi-Table Example: Protecting Customer Orders
 

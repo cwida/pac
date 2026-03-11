@@ -94,7 +94,7 @@ static ColumnBinding EnsureBindingFlowsThroughRecursive(LogicalOperator *op, idx
 // identified by source_table_index. Matches both LogicalGet and LogicalProjection by table_index.
 // May modify operators (e.g., add to aggregate groups) to ensure the binding flows through.
 static ColumnBinding EnsureBindingFlowsThrough(LogicalOperator *target_op, idx_t source_table_index,
-                                               ColumnBinding source_binding, LogicalType source_type) {
+                                               ColumnBinding source_binding, const LogicalType &source_type) {
 	return EnsureBindingFlowsThroughRecursive(target_op, source_table_index, source_binding, source_type);
 }
 
@@ -135,7 +135,7 @@ static bool HasSourceTableInSubtree(LogicalOperator *op, idx_t source_table_inde
 
 // Recursive search for FindDelimJoinForSource.
 static LogicalComparisonJoin *SearchForDelimJoin(LogicalOperator *op, idx_t source_table_index,
-                                                  LogicalAggregate *target_agg) {
+                                                 LogicalAggregate *target_agg) {
 	if (!op) {
 		return nullptr;
 	}
@@ -147,7 +147,8 @@ static LogicalComparisonJoin *SearchForDelimJoin(LogicalOperator *op, idx_t sour
 		bool agg_in_right = join.children.size() >= 2 && HasNodeInSubtree(join.children[1].get(), target_agg);
 
 		// Check if source is in children[0] (outer query side) by table_index
-		bool source_in_left = !join.children.empty() && HasSourceTableInSubtree(join.children[0].get(), source_table_index);
+		bool source_in_left =
+		    !join.children.empty() && HasSourceTableInSubtree(join.children[0].get(), source_table_index);
 
 		if (agg_in_right && source_in_left) {
 			return &join;
@@ -200,9 +201,8 @@ static void UpdateDelimGetsInSubtree(LogicalOperator *op, const LogicalType &sou
 		dg.chunk_types.push_back(source_type);
 		op->ResolveOperatorTypes();
 #if PAC_DEBUG
-		PAC_DEBUG_PRINT("AddBindingToDelimJoin: DELIM_GET #" + std::to_string(dg.table_index) +
-		                " chunk_types after=" + std::to_string(dg.chunk_types.size()) +
-		                " types after=" + std::to_string(dg.types.size()));
+		PAC_DEBUG_PRINT("AddBindingToDelimJoin: DELIM_GET #" + std::to_string(dg.table_index) + " chunk_types after=" +
+		                std::to_string(dg.chunk_types.size()) + " types after=" + std::to_string(dg.types.size()));
 #endif
 	}
 	for (auto &child : op->children) {
@@ -212,7 +212,7 @@ static void UpdateDelimGetsInSubtree(LogicalOperator *op, const LogicalType &sou
 
 // Core function: add a binding to a DELIM_JOIN's duplicate_eliminated_columns
 DelimColumnResult AddBindingToDelimJoin(unique_ptr<LogicalOperator> &plan, idx_t source_table_index,
-                                        ColumnBinding source_binding, LogicalType source_type,
+                                        ColumnBinding source_binding, const LogicalType &source_type,
                                         LogicalAggregate *target_agg) {
 	DelimColumnResult invalid_result;
 	invalid_result.binding = ColumnBinding(DConstants::INVALID_INDEX, DConstants::INVALID_INDEX);

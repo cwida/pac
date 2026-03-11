@@ -37,7 +37,7 @@ DelimColumnResult AddColumnToDelimJoin(unique_ptr<LogicalOperator> &plan, Logica
 // Similar to AddColumnToDelimJoin but takes a binding + type instead of LogicalGet + column name.
 // The source_table_index is used to locate the source operator in the DELIM_JOIN's left child.
 DelimColumnResult AddBindingToDelimJoin(unique_ptr<LogicalOperator> &plan, idx_t source_table_index,
-                                        ColumnBinding source_binding, LogicalType source_type,
+                                        ColumnBinding source_binding, const LogicalType &source_type,
                                         LogicalAggregate *target_agg);
 
 } // namespace duckdb
