@@ -49,6 +49,8 @@ src/aggregates/pac_min_max.cpp
     src/parser/pac_parser.cpp
     src/parser/pac_parser_helpers.cpp
     src/categorical/pac_categorical.cpp
+    src/categorical/pac_categorical_detection.cpp
+    src/categorical/pac_categorical_lambdas.cpp
     src/categorical/pac_categorical_rewriter.cpp
     src/diff/pac_utility_diff.cpp
     src/diff/pac_utility_summary.cpp

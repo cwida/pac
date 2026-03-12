@@ -258,7 +258,7 @@ static CTEHashMatch FindCTEHashSource(LogicalOperator *op, const string &pu_tabl
 
 void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
                       const vector<string> &pu_table_names, const PACCompatibilityResult &check,
-                      const CTETableMap &cte_map) {
+                      const CTETableMap &cte_map, PacAggregateInfoMap &pac_agg_info) {
 	// Find ALL aggregate nodes in the plan first
 	vector<LogicalAggregate *> all_aggregates;
 	FindAllAggregates(plan, all_aggregates);
@@ -546,8 +546,23 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 		// Combine all hash expressions with AND
 		auto combined_hash_expr = BuildAndFromHashes(input, hash_exprs);
 
+		// Record hash binding for categorical rewriter before modifying
+		ColumnBinding hash_binding;
+		if (combined_hash_expr->type == ExpressionType::BOUND_COLUMN_REF) {
+			hash_binding = combined_hash_expr->Cast<BoundColumnRefExpression>().binding;
+		}
+
 		// Modify this aggregate with PAC functions
 		ModifyAggregatesWithPacFunctions(input, target_agg, combined_hash_expr, plan, correction);
+
+		// Record metadata for the categorical rewriter
+		if (hash_binding.table_index != DConstants::INVALID_INDEX) {
+			PacAggregateInfo info;
+			info.aggregate_index = target_agg->aggregate_index;
+			info.group_index = target_agg->group_index;
+			info.hash_binding = hash_binding;
+			pac_agg_info[target_agg->aggregate_index] = info;
+		}
 	}
 }
 
@@ -648,9 +663,10 @@ void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExten
 		AddMissingFKJoins(check, input, plan, unique_gets_missing, gets_present, it->second, privacy_units, cte_map);
 	}
 	// Phase 2: always transform aggregates via unified path
+	PacAggregateInfoMap pac_agg_info;
 	{
 		auto &pu_names = (pu_present_in_tree && !pu_via_cte) ? check.scanned_pu_tables : privacy_units;
-		ModifyPlanWithPU(input, plan, pu_names, check, cte_map);
+		ModifyPlanWithPU(input, plan, pu_names, check, cte_map, pac_agg_info);
 	}
 
 	// ============================================================================
@@ -660,7 +676,7 @@ void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExten
 	// (outer query compares against inner PAC aggregate without its own aggregate).
 	// If so, rewrite to use _counters variants and pac_filter for probabilistic filtering.
 	if (GetBooleanSetting(input.context, "pac_categorical", true)) {
-		RewriteCategoricalQuery(input, plan);
+		RewriteCategoricalQuery(input, plan, pac_agg_info);
 	}
 #if PAC_DEBUG
 	PAC_DEBUG_PRINT("=== PAC-OPTIMIZED PLAN ===");
