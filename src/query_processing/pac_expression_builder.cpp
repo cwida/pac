@@ -387,12 +387,16 @@ unique_ptr<Expression> BuildAndFromHashes(OptimizerExtensionInput &input, vector
 	return left;
 }
 
-// Bind a PAC aggregate function with hash + value arguments.
+// Bind a PAC aggregate function with hash + value arguments and optional correction factor.
 unique_ptr<Expression> BindPacAggregate(OptimizerExtensionInput &input, const string &pac_func_name,
-                                        unique_ptr<Expression> hash_expr, unique_ptr<Expression> value_expr) {
+                                        unique_ptr<Expression> hash_expr, unique_ptr<Expression> value_expr,
+                                        unique_ptr<Expression> correction_expr) {
 	FunctionBinder function_binder(input.context);
 	ErrorData error;
 	vector<LogicalType> arg_types = {hash_expr->return_type, value_expr->return_type};
+	if (correction_expr) {
+		arg_types.push_back(correction_expr->return_type);
+	}
 
 	auto &entry = Catalog::GetSystemCatalog(input.context)
 	                  .GetEntry<AggregateFunctionCatalogEntry>(input.context, DEFAULT_SCHEMA, pac_func_name);
@@ -405,6 +409,9 @@ unique_ptr<Expression> BindPacAggregate(OptimizerExtensionInput &input, const st
 	vector<unique_ptr<Expression>> children;
 	children.push_back(std::move(hash_expr));
 	children.push_back(std::move(value_expr));
+	if (correction_expr) {
+		children.push_back(std::move(correction_expr));
+	}
 	return function_binder.BindAggregateFunction(func, std::move(children), nullptr, AggregateType::NON_DISTINCT);
 }
 

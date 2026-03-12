@@ -83,19 +83,27 @@ static void RewritePacAvgAggregate(OptimizerExtensionInput &input, unique_ptr<Lo
 		auto &old_aggr = agg.expressions[pos]->Cast<BoundAggregateExpression>();
 		bool is_noised = (old_aggr.function.name == "pac_noised_avg");
 
-		// Extract hash and value children: pac_noised_avg(hash, col) / pac_avg(hash, col)
+		// Extract hash and value children: pac_[noised_]avg(hash, col[, correction])
 		auto hash_child = old_aggr.children[0]->Copy();
 		auto value_child = old_aggr.children[1]->Copy();
+
+		// Extract optional correction factor (3rd arg), default to constant 1.0
+		unique_ptr<Expression> corr_expr;
+		if (old_aggr.children.size() >= 3) {
+			corr_expr = old_aggr.children[2]->Copy();
+		}
 
 		string sum_name = is_noised ? "pac_noised_sum" : "pac_sum";
 		string count_name = is_noised ? "pac_noised_count" : "pac_count";
 
-		// Replace avg at position with sum
-		agg.expressions[pos] = BindPacAggregate(input, sum_name, hash_child->Copy(), value_child->Copy());
+		// Replace avg at position with sum, forwarding correction to both sum and count
+		agg.expressions[pos] = BindPacAggregate(input, sum_name, hash_child->Copy(), value_child->Copy(),
+		                                        corr_expr ? corr_expr->Copy() : nullptr);
 
 		// Append count at the end
 		idx_t count_pos = agg.expressions.size();
-		agg.expressions.push_back(BindPacAggregate(input, count_name, std::move(hash_child), std::move(value_child)));
+		agg.expressions.push_back(
+		    BindPacAggregate(input, count_name, std::move(hash_child), std::move(value_child), std::move(corr_expr)));
 
 		decomp_map[pos] = {pos, count_pos, is_noised};
 	}

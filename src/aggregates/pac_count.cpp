@@ -293,21 +293,30 @@ void RegisterPacCountCountersFunctions(ExtensionLoader &loader) {
 // RewritePacAvgToDiv replaces these with sum/count + division before execution.
 // ============================================================================
 void RegisterPacAvgFunctions(ExtensionLoader &loader) {
-	// pac_noised_avg(UBIGINT, value_type) → DOUBLE — same implementation as pac_noised_count(UBIGINT, ANY)
+	// pac_noised_avg(UBIGINT, value_type[, correction]) → DOUBLE — same implementation as pac_noised_count(UBIGINT,
+	// ANY)
 	AggregateFunctionSet noised_set("pac_noised_avg");
 	noised_set.AddFunction(AggregateFunction(
 	    "pac_noised_avg", {LogicalType::UBIGINT, LogicalType::ANY}, LogicalType::DOUBLE, PacCountStateSize,
 	    PacCountInitialize, PacCountColumnScatterUpdate, PacCountCombine, PacCountFinalize,
 	    FunctionNullHandling::DEFAULT_NULL_HANDLING, PacCountColumnUpdate, PacCountBind));
+	noised_set.AddFunction(AggregateFunction(
+	    "pac_noised_avg", {LogicalType::UBIGINT, LogicalType::ANY, LogicalType::DOUBLE}, LogicalType::DOUBLE,
+	    PacCountStateSize, PacCountInitialize, PacCountColumnScatterUpdate, PacCountCombine, PacCountFinalize,
+	    FunctionNullHandling::DEFAULT_NULL_HANDLING, PacCountColumnUpdate, PacCountBind));
 	loader.RegisterFunction(noised_set);
 
-	// pac_avg(UBIGINT, value_type) → LIST<FLOAT> — same implementation as pac_count(UBIGINT, ANY)
+	// pac_avg(UBIGINT, value_type[, correction]) → LIST<FLOAT> — same implementation as pac_count(UBIGINT, ANY)
 	auto list_float_type = LogicalType::LIST(PacFloatLogicalType());
 	AggregateFunctionSet counters_set("pac_avg");
 	counters_set.AddFunction(
 	    AggregateFunction("pac_avg", {LogicalType::UBIGINT, LogicalType::ANY}, list_float_type, PacCountStateSize,
 	                      PacCountInitialize, PacCountColumnScatterUpdate, PacCountCombine, PacCountFinalizeCounters,
 	                      FunctionNullHandling::DEFAULT_NULL_HANDLING, PacCountColumnUpdate, PacCountBind));
+	counters_set.AddFunction(AggregateFunction(
+	    "pac_avg", {LogicalType::UBIGINT, LogicalType::ANY, LogicalType::DOUBLE}, list_float_type, PacCountStateSize,
+	    PacCountInitialize, PacCountColumnScatterUpdate, PacCountCombine, PacCountFinalizeCounters,
+	    FunctionNullHandling::DEFAULT_NULL_HANDLING, PacCountColumnUpdate, PacCountBind));
 	loader.RegisterFunction(counters_set);
 }
 
