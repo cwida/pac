@@ -63,8 +63,6 @@ namespace duckdb {
 // Information about a single PAC aggregate binding found in an expression
 struct PacBindingInfo {
 	ColumnBinding binding;
-	string aggregate_name;        // e.g., "pac_noised_sum", "pac_noised_count"
-	LogicalType original_type;    // The type before conversion to LIST<DOUBLE>
 	idx_t index;                  // Position in the list (0-based, for list_zip field access)
 	ColumnBinding source_binding; // The aggregate-level binding that defines this PAC aggregate
 	PacBindingInfo() : index(0) {
@@ -77,18 +75,6 @@ struct CategoricalPatternInfo {
 	LogicalOperator *parent_op;
 	// Index of the expression in the parent's expressions list (or conditions list for joins)
 	idx_t expr_index;
-	// The aggregate function name (e.g., "pac_noised_sum", "pac_noised_count")
-	string aggregate_name;
-	// The column binding that references the PAC aggregate result
-	ColumnBinding pac_binding;
-	// Whether we have a valid pac_binding
-	bool has_pac_binding;
-	// The original return type of the PAC aggregate expression (before conversion to LIST<DOUBLE>)
-	// Used by double-lambda rewrite to cast list elements back to the expected type
-	LogicalType original_return_type;
-	// The aggregate-level binding (table_index=aggregate_index, column_index=expression index)
-	// that defines this pattern's PAC aggregate. Set during detection by tracing the binding.
-	ColumnBinding source_binding;
 	// Pre-collected PAC bindings from detection
 	vector<PacBindingInfo> pac_bindings;
 	// Hash binding from outer PAC aggregate (resolved to filter level)
@@ -96,8 +82,7 @@ struct CategoricalPatternInfo {
 	// True if an outer PAC aggregate was found above this pattern
 	bool has_outer_pac_hash = false;
 
-	CategoricalPatternInfo()
-	    : parent_op(nullptr), expr_index(0), has_pac_binding(false), original_return_type(LogicalType::DOUBLE) {
+	CategoricalPatternInfo() : parent_op(nullptr), expr_index(0) {
 	}
 };
 
@@ -373,28 +358,6 @@ static inline LogicalOperator *RecognizeDuckDBScalarWrapper(LogicalOperator *op)
 	}
 	auto &inner_proj = inner_proj_op->Cast<LogicalProjection>();
 	return inner_proj.children.empty() ? nullptr : inner_proj.children[0].get();
-}
-
-static inline LogicalOperator *StripScalarWrapperInPlace(unique_ptr<LogicalOperator> &wrapper_ptr, bool remove = true) {
-	if (!wrapper_ptr || wrapper_ptr->type != LogicalOperatorType::LOGICAL_PROJECTION) {
-		return nullptr;
-	}
-	auto *unwrapped = RecognizeDuckDBScalarWrapper(wrapper_ptr.get());
-	if (!unwrapped) {
-		return nullptr;
-	}
-	if (remove) {
-		auto &outer_proj = wrapper_ptr->Cast<LogicalProjection>();
-		auto &agg = outer_proj.children[0]->Cast<LogicalAggregate>();
-		auto &inner_proj = agg.children[0]->Cast<LogicalProjection>();
-		inner_proj.table_index = outer_proj.table_index; // Change inner projection's table_index to match outer's
-		inner_proj.types.clear();                        // Update inner projection's types to match its expressions
-		for (auto &expr : inner_proj.expressions) {
-			inner_proj.types.push_back(expr->return_type);
-		}
-		wrapper_ptr = std::move(agg.children[0]); // Replace the wrapper_ptr with the inner projection
-	}
-	return unwrapped;
 }
 
 // ============================================================================

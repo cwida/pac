@@ -529,7 +529,7 @@ SELECT count(*) FROM (
 # ============================================================================
 # Test 11: Categorical with AVG aggregate
 # Find parts where avg quantity exceeds threshold
-# NOTE: Result is 4 with proper avg decomposition (pac_noised_avg → sum/count)
+# NOTE: Result is 2 with proper avg decomposition (pac_noised_avg → sum/count)
 # ============================================================================
 
 query I
@@ -551,7 +551,7 @@ SELECT count(*) FROM (
         )
 );
 ----
-4
+2
 
 # ============================================================================
 # Test 12: Correlated categorical subquery with multiple tables

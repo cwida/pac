@@ -78,8 +78,6 @@ static void CollectPacBindingsInExpression(Expression *expr, LogicalOperator *ro
 			if (binding_hash_to_index.find(binding_hash) == binding_hash_to_index.end()) {
 				PacBindingInfo info;
 				info.binding = col_ref.binding;
-				info.aggregate_name = pac_name;
-				info.original_type = col_ref.return_type;
 				info.index = bindings.size();
 				info.source_binding = source_binding;
 				binding_hash_to_index[binding_hash] = info.index;
@@ -265,10 +263,6 @@ void FindCategoricalPatternsInOperator(LogicalOperator *op, LogicalOperator *pla
 		}
 	}
 
-	// Track patterns count before checking this operator AND its children.
-	// Used at the end to strip scalar wrappers when any new patterns were found.
-	size_t patterns_before_all = patterns.size();
-
 	// Check filter expressions - detect ANY boolean expression containing a PAC aggregate
 	if (op->type == LogicalOperatorType::LOGICAL_FILTER) {
 		auto &filter = op->Cast<LogicalFilter>();
@@ -297,11 +291,6 @@ void FindCategoricalPatternsInOperator(LogicalOperator *op, LogicalOperator *pla
 				CategoricalPatternInfo info;
 				info.parent_op = op;
 				info.expr_index = i;
-				info.pac_binding = pac_bindings[0].binding;
-				info.has_pac_binding = true;
-				info.aggregate_name = pac_bindings[0].aggregate_name;
-				info.source_binding = pac_bindings[0].source_binding;
-				info.original_return_type = pac_bindings[0].original_type;
 				info.pac_bindings = std::move(pac_bindings);
 				info.outer_pac_hash = hash_for_children;
 				info.has_outer_pac_hash = (hash_for_children.table_index != DConstants::INVALID_INDEX);
@@ -322,13 +311,8 @@ void FindCategoricalPatternsInOperator(LogicalOperator *op, LogicalOperator *pla
 				CategoricalPatternInfo info;
 				info.parent_op = op;
 				info.expr_index = i;
-				info.aggregate_name = pac_name;
 				info.outer_pac_hash = hash_for_children;
 				info.has_outer_pac_hash = (hash_for_children.table_index != DConstants::INVALID_INDEX);
-				if (side->type == ExpressionType::BOUND_COLUMN_REF) {
-					TracePacAggregateFromBinding(side->Cast<BoundColumnRefExpression>().binding, plan_root,
-					                             &info.source_binding);
-				}
 				patterns.push_back(info);
 				break; // one match per condition is enough
 			}
@@ -375,11 +359,6 @@ void FindCategoricalPatternsInOperator(LogicalOperator *op, LogicalOperator *pla
 				CategoricalPatternInfo info;
 				info.parent_op = op;
 				info.expr_index = i;
-				info.pac_binding = pac_bindings[0].binding;
-				info.has_pac_binding = true;
-				info.aggregate_name = pac_bindings[0].aggregate_name;
-				info.original_return_type = expr->return_type;
-				info.source_binding = pac_bindings[0].source_binding;
 				info.pac_bindings = std::move(pac_bindings);
 				patterns.push_back(std::move(info));
 			}
@@ -387,18 +366,6 @@ void FindCategoricalPatternsInOperator(LogicalOperator *op, LogicalOperator *pla
 	}
 	for (auto &child : op->children) {
 		FindCategoricalPatternsInOperator(child.get(), plan_root, patterns, now_inside_aggregate, hash_for_children);
-	}
-	// On the way back up: if patterns were found in this subtree, strip scalar wrappers in direct children.
-	// Record the resulting table_index so RewriteBottomUp knows these projections are terminal.
-	if (patterns.size() > patterns_before_all) {
-		for (auto &child : op->children) {
-			if (child->type == LogicalOperatorType::LOGICAL_PROJECTION) {
-				auto *unwrapped = RecognizeDuckDBScalarWrapper(child.get());
-				if (unwrapped) {
-					StripScalarWrapperInPlace(child, true);
-				}
-			}
-		}
 	}
 }
 
@@ -426,7 +393,12 @@ static bool TryRebindToListVariant(LogicalAggregate &agg, idx_t i, ClientContext
 	string base_name = GetBasePacAggregateName(bound_agg.function.name); // strips _counters if present
 	string list_name = GetListAggregateVariant(base_name);
 	if (list_name.empty()) {
-		return false;
+		// Generic aggregate (e.g., first()) over counter input — rebind with same name
+		if (bound_agg.children[value_child_idx]->return_type == LogicalType::LIST(PacFloatLogicalType())) {
+			list_name = bound_agg.function.name;
+		} else {
+			return false;
+		}
 	}
 	vector<unique_ptr<Expression>> children;
 	auto child_copy = bound_agg.children[value_child_idx]->Copy();
@@ -1257,19 +1229,6 @@ static void RewriteBottomUp(unique_ptr<LogicalOperator> &op_ptr, OptimizerExtens
                             unordered_map<uint64_t, ColumnBinding> &counter_bindings,
                             bool inside_cte_definition = false) {
 	auto *op = op_ptr.get();
-	// Strip scalar wrappers (Projection→first()→Projection) over PAC aggregates before recursing.
-	// This removes the first() aggregate that can't handle LIST<DOUBLE>, and lets the inner
-	// projection be processed naturally with the outer's table_index.
-	// Track whether we stripped, so the inner projection is treated as terminal (scalar output).
-	bool stripped_scalar_wrapper = false;
-	if (op->type == LogicalOperatorType::LOGICAL_PROJECTION && !inside_cte_definition) {
-		auto *unwrapped = RecognizeDuckDBScalarWrapper(op);
-		if (unwrapped && !FindPacAggregateInOperator(unwrapped).empty()) {
-			StripScalarWrapperInPlace(op_ptr, true);
-			op = op_ptr.get();
-			stripped_scalar_wrapper = true;
-		}
-	}
 	for (idx_t ci = 0; ci < op->children.size(); ci++) { // Recurse into children first (bottom-up)
 		// Child 0 of MATERIALIZED_CTE is the CTE definition — its output types must remain
 		// stable (numeric, not LIST) because CTE_SCAN consumers may re-aggregate the results.
@@ -1414,7 +1373,7 @@ static void RewriteBottomUp(unique_ptr<LogicalOperator> &op_ptr, OptimizerExtens
 			}
 		} else {
 			// Normal projection: full PAC rewriting with pac_noised terminal.
-			bool is_terminal = stripped_scalar_wrapper || (op == plan_root);
+			bool is_terminal = (op == plan_root);
 			if (!is_terminal) {
 				auto *root = plan_root;
 				while (root &&
@@ -1591,6 +1550,9 @@ static void ConvertPacAggregatesToListVariants(LogicalOperator &plan, ClientCont
 		if (agg.expressions[i]->type != ExpressionType::BOUND_AGGREGATE) {
 			continue;
 		}
+		if (counter_bindings.count(HashBinding(ColumnBinding(agg.aggregate_index, i)))) {
+			continue;
+		}
 		auto &bound_agg = agg.expressions[i]->Cast<BoundAggregateExpression>();
 		if (bound_agg.children.empty() || IsPacListAggregate(bound_agg.function.name)) {
 			continue;
@@ -1613,12 +1575,6 @@ void RewriteCategoricalQuery(OptimizerExtensionInput &input, unique_ptr<LogicalO
 	// Detect categorical patterns
 	vector<CategoricalPatternInfo> patterns;
 	FindCategoricalPatternsInOperator(plan.get(), plan.get(), patterns, false);
-	for (idx_t i = 0; i < patterns.size(); i++) {
-		auto &p = patterns[i];
-		for (idx_t j = 0; j < p.pac_bindings.size(); j++) {
-			auto &bi = p.pac_bindings[j];
-		}
-	}
 	if (patterns.empty()) {
 		return;
 	}
