@@ -1,4 +1,5 @@
 #include "aggregates/pac_sum.hpp"
+#include "categorical/pac_categorical.hpp"
 #include "duckdb/common/types/decimal.hpp"
 #include <cmath>
 #include <limits>
@@ -437,7 +438,7 @@ void PacSumFinalize(Vector &states, AggregateInputData &input, Vector &result, i
 		pos->GetTotals(buf);
 		uint64_t update_count = pos->update_count;
 #endif
-		CheckPacSampleDiversity(key_hash, buf, update_count, "pac_sum", input.bind_data->Cast<PacBindData>());
+		CheckPacSampleDiversity(key_hash, buf, update_count, "pac_noised_sum", input.bind_data->Cast<PacBindData>());
 		PAC_FLOAT result_val = PacNoisySampleFrom64Counters(buf, mi, correction, gen, ~key_hash, query_hash, pstate);
 		// pac_sum needs 2x compensation: doubles the sum to compensate for ~50% of values contributing to each counter
 		result_val *= PAC_FLOAT(2.0);
@@ -558,7 +559,7 @@ void PacSumFinalizeDoubleToHugeint(Vector &states, AggregateInputData &input, Ve
 // Internal bind helper with scale_divisor parameter (used by BindDecimalPacSum)
 static unique_ptr<FunctionData> PacBindWithScaleDivisor(ClientContext &ctx, vector<unique_ptr<Expression>> &args,
                                                         double scale_divisor) {
-	return MakePacBindData(ctx, args, 2, "pac_sum", scale_divisor);
+	return MakePacBindData(ctx, args, 2, "pac_noised_sum", scale_divisor);
 }
 
 unique_ptr<FunctionData> // Bind function for pac_sum with optional mi parameter (must be constant)
@@ -593,11 +594,11 @@ static void AddFcn(AggregateFunctionSet &set, const LogicalType &value_type, con
                    aggregate_size_t state_size, aggregate_initialize_t init, aggregate_update_t scatter,
                    aggregate_combine_t combine, aggregate_finalize_t finalize, aggregate_simple_update_t update,
                    aggregate_destructor_t destructor = nullptr) {
-	set.AddFunction(AggregateFunction("pac_sum", {LogicalType::UBIGINT, value_type}, result_type, state_size, init,
-	                                  scatter, combine, finalize, FunctionNullHandling::DEFAULT_NULL_HANDLING, update,
-	                                  PacSumBind, destructor));
-	set.AddFunction(AggregateFunction("pac_sum", {LogicalType::UBIGINT, value_type, LogicalType::DOUBLE}, result_type,
-	                                  state_size, init, scatter, combine, finalize,
+	set.AddFunction(AggregateFunction("pac_noised_sum", {LogicalType::UBIGINT, value_type}, result_type, state_size,
+	                                  init, scatter, combine, finalize, FunctionNullHandling::DEFAULT_NULL_HANDLING,
+	                                  update, PacSumBind, destructor));
+	set.AddFunction(AggregateFunction("pac_noised_sum", {LogicalType::UBIGINT, value_type, LogicalType::DOUBLE},
+	                                  result_type, state_size, init, scatter, combine, finalize,
 	                                  FunctionNullHandling::DEFAULT_NULL_HANDLING, update, PacSumBind, destructor));
 }
 
@@ -605,29 +606,29 @@ static void AddFcn(AggregateFunctionSet &set, const LogicalType &value_type, con
 static AggregateFunction GetPacSumAggregate(PhysicalType type) {
 	switch (type) {
 	case PhysicalType::INT16:
-		return AggregateFunction("pac_sum", {LogicalType::UBIGINT, LogicalType::SMALLINT}, LogicalType::HUGEINT,
+		return AggregateFunction("pac_noised_sum", {LogicalType::UBIGINT, LogicalType::SMALLINT}, LogicalType::HUGEINT,
 		                         PacSumIntStateSize, PacSumIntInitialize, PacSumScatterUpdateSmallInt,
 		                         PacSumCombineSigned, PacSumFinalizeSigned, FunctionNullHandling::DEFAULT_NULL_HANDLING,
 		                         PacSumUpdateSmallInt);
 	case PhysicalType::INT32:
-		return AggregateFunction("pac_sum", {LogicalType::UBIGINT, LogicalType::INTEGER}, LogicalType::HUGEINT,
+		return AggregateFunction("pac_noised_sum", {LogicalType::UBIGINT, LogicalType::INTEGER}, LogicalType::HUGEINT,
 		                         PacSumIntStateSize, PacSumIntInitialize, PacSumScatterUpdateInteger,
 		                         PacSumCombineSigned, PacSumFinalizeSigned, FunctionNullHandling::DEFAULT_NULL_HANDLING,
 		                         PacSumUpdateInteger);
 	case PhysicalType::INT64:
-		return AggregateFunction("pac_sum", {LogicalType::UBIGINT, LogicalType::BIGINT}, LogicalType::HUGEINT,
+		return AggregateFunction("pac_noised_sum", {LogicalType::UBIGINT, LogicalType::BIGINT}, LogicalType::HUGEINT,
 		                         PacSumIntStateSize, PacSumIntInitialize, PacSumScatterUpdateBigInt,
 		                         PacSumCombineSigned, PacSumFinalizeSigned, FunctionNullHandling::DEFAULT_NULL_HANDLING,
 		                         PacSumUpdateBigInt);
 	case PhysicalType::INT128:
 #ifndef PAC_EXACTSUM
 		// In approx mode, HUGEINT uses double state; returns HUGEINT via PacSumFinalizeDoubleToHugeint
-		return AggregateFunction("pac_sum", {LogicalType::UBIGINT, LogicalType::HUGEINT}, LogicalType::HUGEINT,
+		return AggregateFunction("pac_noised_sum", {LogicalType::UBIGINT, LogicalType::HUGEINT}, LogicalType::HUGEINT,
 		                         PacSumDoubleStateSize, PacSumDoubleInitialize, PacSumScatterUpdateHugeIntDouble,
 		                         PacSumCombineDoubleWrapper, PacSumFinalizeDoubleToHugeint,
 		                         FunctionNullHandling::DEFAULT_NULL_HANDLING, PacSumUpdateHugeIntDouble);
 #else
-		return AggregateFunction("pac_sum", {LogicalType::UBIGINT, LogicalType::HUGEINT}, LogicalType::HUGEINT,
+		return AggregateFunction("pac_noised_sum", {LogicalType::UBIGINT, LogicalType::HUGEINT}, LogicalType::HUGEINT,
 		                         PacSumIntStateSize, PacSumIntInitialize, PacSumScatterUpdateHugeInt,
 		                         PacSumCombineSigned, PacSumFinalizeSigned, FunctionNullHandling::DEFAULT_NULL_HANDLING,
 		                         PacSumUpdateHugeInt);
@@ -642,14 +643,14 @@ unique_ptr<FunctionData> BindDecimalPacSum(ClientContext &ctx, AggregateFunction
                                            vector<unique_ptr<Expression>> &args) {
 	auto decimal_type = args[1]->return_type; // value is arg 1 (arg 0 is hash)
 	function = GetPacSumAggregate(decimal_type.InternalType());
-	function.name = "pac_sum";
+	function.name = "pac_noised_sum";
 	function.arguments[1] = decimal_type;
 	function.return_type = LogicalType::DECIMAL(Decimal::MAX_WIDTH_DECIMAL, DecimalType::GetScale(decimal_type));
 	return PacBindWithScaleDivisor(ctx, args, 1.0);
 }
 
 void RegisterPacSumFunctions(ExtensionLoader &loader) {
-	AggregateFunctionSet fcn_set("pac_sum");
+	AggregateFunctionSet fcn_set("pac_noised_sum");
 
 	// Signed integers (accumulate to hugeint_t, return HUGEINT)
 	AddFcn(fcn_set, LogicalType::TINYINT, LogicalType::HUGEINT, PacSumIntStateSize, PacSumIntInitialize,
@@ -766,7 +767,7 @@ void PacSumAvgFinalizeCounters(Vector &states, AggregateInputData &input, Vector
 #endif
 		}
 
-		CheckPacSampleDiversity(key_hash, buf, update_count, "pac_sum", input.bind_data->Cast<PacBindData>());
+		CheckPacSampleDiversity(key_hash, buf, update_count, "pac_noised_sum", input.bind_data->Cast<PacBindData>());
 
 		// Copy counters to list: 0 where key_hash bit is 0, value * 2 otherwise
 		// pac_sum_counters needs 2x compensation to account for ~50% of values in each counter
@@ -800,16 +801,16 @@ static void AddCountersFcn(AggregateFunctionSet &set, const LogicalType &value_t
                            aggregate_initialize_t init, aggregate_update_t scatter, aggregate_combine_t combine,
                            aggregate_finalize_t finalize, aggregate_simple_update_t update) {
 	auto list_double_type = LogicalType::LIST(PacFloatLogicalType());
-	set.AddFunction(AggregateFunction("pac_sum_counters", {LogicalType::UBIGINT, value_type}, list_double_type,
-	                                  state_size, init, scatter, combine, finalize,
-	                                  FunctionNullHandling::DEFAULT_NULL_HANDLING, update, PacSumBind));
-	set.AddFunction(AggregateFunction("pac_sum_counters", {LogicalType::UBIGINT, value_type, LogicalType::DOUBLE},
+	set.AddFunction(AggregateFunction("pac_sum", {LogicalType::UBIGINT, value_type}, list_double_type, state_size, init,
+	                                  scatter, combine, finalize, FunctionNullHandling::DEFAULT_NULL_HANDLING, update,
+	                                  PacSumBind));
+	set.AddFunction(AggregateFunction("pac_sum", {LogicalType::UBIGINT, value_type, LogicalType::DOUBLE},
 	                                  list_double_type, state_size, init, scatter, combine, finalize,
 	                                  FunctionNullHandling::DEFAULT_NULL_HANDLING, update, PacSumBind));
 }
 
 void RegisterPacSumCountersFunctions(ExtensionLoader &loader) {
-	AggregateFunctionSet counters_set("pac_sum_counters");
+	AggregateFunctionSet counters_set("pac_sum");
 
 	// Signed integers
 	AddCountersFcn(counters_set, LogicalType::TINYINT, PacSumIntStateSize, PacSumIntInitialize,
@@ -859,6 +860,9 @@ void RegisterPacSumCountersFunctions(ExtensionLoader &loader) {
 	AddCountersFcn(counters_set, LogicalType::DOUBLE, PacSumDoubleStateSize, PacSumDoubleInitialize,
 	               PacSumScatterUpdateDouble, PacSumCombineDoubleWrapper, PacSumFinalizeCountersDouble,
 	               PacSumUpdateDouble);
+
+	// Add list aggregate overload (LIST<DOUBLE> → LIST<DOUBLE>) for subquery/categorical contexts
+	AddPacListAggregateOverload(counters_set, "sum");
 
 	loader.RegisterFunction(counters_set);
 }

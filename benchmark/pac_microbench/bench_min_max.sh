@@ -97,7 +97,7 @@ for idx in "${!DATA_VIEWS[@]}"; do
             if [[ "$variant" == "standard" ]]; then
                 query="SELECT MAX($col) FROM $view;"
             else
-                query="SELECT pac_max(hash(i), $col, 0.0) FROM $view;"
+                query="SELECT pac_noised_max(hash(i), $col) FROM $view;"
             fi
 
             result=$(run_bench_db "$binary" "$query")
@@ -143,7 +143,7 @@ for idx in "${!DATA_VIEWS[@]}"; do
             if [[ "$variant" == "standard" ]]; then
                 query="SELECT MAX($col) FROM $view;"
             else
-                query="SELECT pac_max(hash(i), $col, 0.0) FROM $view;"
+                query="SELECT pac_noised_max(hash(i), $col) FROM $view;"
             fi
 
             result=$(run_bench_db "$binary" "$query")
@@ -187,7 +187,7 @@ for idx in "${!DATA_VIEWS[@]}"; do
             if [[ "$variant" == "standard" ]]; then
                 query="SELECT $grp_col, MAX($col) FROM $view GROUP BY $grp_col;"
             else
-                query="SELECT $grp_col, pac_max(hash(i), $col, 0.0) FROM $view GROUP BY $grp_col;"
+                query="SELECT $grp_col, pac_noised_max(hash(i), $col) FROM $view GROUP BY $grp_col;"
             fi
 
             result=$(run_bench_db "$binary" "$query")
@@ -230,7 +230,7 @@ for idx in "${!DATA_VIEWS[@]}"; do
             if [[ "$variant" == "standard" ]]; then
                 query="SELECT $grp_col, MAX($col) FROM $view GROUP BY $grp_col;"
             else
-                query="SELECT $grp_col, pac_max(hash(i), $col, 0.0) FROM $view GROUP BY $grp_col;"
+                query="SELECT $grp_col, pac_noised_max(hash(i), $col) FROM $view GROUP BY $grp_col;"
             fi
 
             result=$(run_bench_db "$binary" "$query")
@@ -267,7 +267,7 @@ for idx in "${!DATA_VIEWS[@]}"; do
             if [[ "$variant" == "standard" ]]; then
                 query="SELECT MAX($col) FROM $view;"
             else
-                query="SELECT pac_max(hash(i), $col, 0.0) FROM $view;"
+                query="SELECT pac_noised_max(hash(i), $col) FROM $view;"
             fi
 
             result=$(run_bench_db "$binary" "$query")

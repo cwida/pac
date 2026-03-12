@@ -1,5 +1,5 @@
 # name: test/sql/pac_counters.test
-# description: Test pac_*_counters aggregate functions that return LIST<DOUBLE> for categorical queries
+# description: Test pac_* aggregate functions that return LIST<DOUBLE> for categorical queries
 # group: [sql]
 
 require pac
@@ -30,36 +30,36 @@ SELECT i AS rowid, i % 3 AS group_id, i * 10 AS value
 FROM range(10) t(i)
 
 # ============================================================================
-# PAC_COUNT_COUNTERS tests
+# PAC_COUNT tests
 # ============================================================================
 
 # Basic test - returns LIST<FLOAT>
 query I
-SELECT typeof(pac_count_counters(pac_hash(hash(rowid)::UBIGINT))) FROM test_data
+SELECT typeof(pac_count(pac_hash(hash(rowid)::UBIGINT))) FROM test_data
 ----
 FLOAT[]
 
 # Returns exactly 64 elements
 query I
-SELECT length(pac_count_counters(pac_hash(hash(rowid)::UBIGINT))) FROM test_data
+SELECT length(pac_count(pac_hash(hash(rowid)::UBIGINT))) FROM test_data
 ----
 64
 
 # Show first 5 counter values (doubled to compensate for 50% sampling)
 query IIIII
 SELECT
-    pac_count_counters(pac_hash(hash(rowid)::UBIGINT))[1]::INTEGER,
-    pac_count_counters(pac_hash(hash(rowid)::UBIGINT))[2]::INTEGER,
-    pac_count_counters(pac_hash(hash(rowid)::UBIGINT))[3]::INTEGER,
-    pac_count_counters(pac_hash(hash(rowid)::UBIGINT))[4]::INTEGER,
-    pac_count_counters(pac_hash(hash(rowid)::UBIGINT))[5]::INTEGER
+    pac_count(pac_hash(hash(rowid)::UBIGINT))[1]::INTEGER,
+    pac_count(pac_hash(hash(rowid)::UBIGINT))[2]::INTEGER,
+    pac_count(pac_hash(hash(rowid)::UBIGINT))[3]::INTEGER,
+    pac_count(pac_hash(hash(rowid)::UBIGINT))[4]::INTEGER,
+    pac_count(pac_hash(hash(rowid)::UBIGINT))[5]::INTEGER
 FROM test_data
 ----
 10	12	16	10	10
 
-# Grouped pac_count_counters - show first counter per group (NULL where key_hash bit 0 is not set)
+# Grouped pac_count - show first counter per group (NULL where key_hash bit 0 is not set)
 query II
-SELECT group_id, pac_count_counters(pac_hash(hash(rowid)::UBIGINT))[1]::INTEGER AS counter1
+SELECT group_id, pac_count(pac_hash(hash(rowid)::UBIGINT))[1]::INTEGER AS counter1
 FROM test_data
 GROUP BY group_id
 ORDER BY group_id
@@ -70,41 +70,41 @@ ORDER BY group_id
 
 # With column parameter (doubled)
 query I
-SELECT pac_count_counters(pac_hash(hash(rowid)::UBIGINT), value)[1]::INTEGER FROM test_data
+SELECT pac_count(pac_hash(hash(rowid)::UBIGINT), value)[1]::INTEGER FROM test_data
 ----
 10
 
 # ============================================================================
-# PAC_SUM_COUNTERS tests
+# PAC_SUM tests
 # ============================================================================
 
 # Basic test - returns LIST<DOUBLE>
 query I
-SELECT typeof(pac_sum_counters(pac_hash(hash(rowid)::UBIGINT), value)) FROM test_data
+SELECT typeof(pac_sum(pac_hash(hash(rowid)::UBIGINT), value)) FROM test_data
 ----
 FLOAT[]
 
 # Returns exactly 64 elements
 query I
-SELECT length(pac_sum_counters(pac_hash(hash(rowid)::UBIGINT), value)) FROM test_data
+SELECT length(pac_sum(pac_hash(hash(rowid)::UBIGINT), value)) FROM test_data
 ----
 64
 
 # Show first 5 sum counter values (doubled to compensate for 50% sampling)
 query IIIII
 SELECT
-    pac_sum_counters(pac_hash(hash(rowid)::UBIGINT), value)[1]::INTEGER,
-    pac_sum_counters(pac_hash(hash(rowid)::UBIGINT), value)[2]::INTEGER,
-    pac_sum_counters(pac_hash(hash(rowid)::UBIGINT), value)[3]::INTEGER,
-    pac_sum_counters(pac_hash(hash(rowid)::UBIGINT), value)[4]::INTEGER,
-    pac_sum_counters(pac_hash(hash(rowid)::UBIGINT), value)[5]::INTEGER
+    pac_sum(pac_hash(hash(rowid)::UBIGINT), value)[1]::INTEGER,
+    pac_sum(pac_hash(hash(rowid)::UBIGINT), value)[2]::INTEGER,
+    pac_sum(pac_hash(hash(rowid)::UBIGINT), value)[3]::INTEGER,
+    pac_sum(pac_hash(hash(rowid)::UBIGINT), value)[4]::INTEGER,
+    pac_sum(pac_hash(hash(rowid)::UBIGINT), value)[5]::INTEGER
 FROM test_data
 ----
 400	580	680	580	520
 
-# Grouped pac_sum_counters - show first counter per group (NULL where key_hash bit 0 is not set)
+# Grouped pac_sum - show first counter per group (NULL where key_hash bit 0 is not set)
 query II
-SELECT group_id, pac_sum_counters(pac_hash(hash(rowid)::UBIGINT), value)[1]::INTEGER AS sum1
+SELECT group_id, pac_sum(pac_hash(hash(rowid)::UBIGINT), value)[1]::INTEGER AS sum1
 FROM test_data
 GROUP BY group_id
 ORDER BY group_id
@@ -114,42 +114,42 @@ ORDER BY group_id
 2	200
 
 # ============================================================================
-# NOTE: pac_avg_counters has been removed. avg() is now rewritten to
-# pac_sum(hash,col)/count(col) by the PAC compiler. The categorical rewriter
-# handles this via pac_sum_counters (LIST<FLOAT>) / count scalar.
+# NOTE: pac_avg has been removed. avg() is decomposed into
+# pac_sum(hash,col) + pac_count(hash,col) + pac_noised_div by the bitslice compiler.
+# The categorical rewriter swaps pac_noised_div → pac_div for the filter/join path.
 # ============================================================================
 
 # ============================================================================
-# PAC_MIN_COUNTERS tests
+# PAC_MIN tests
 # ============================================================================
 
 # Basic test - returns LIST<DOUBLE>
 query I
-SELECT typeof(pac_min_counters(pac_hash(hash(rowid)::UBIGINT), value)) FROM test_data
+SELECT typeof(pac_min(pac_hash(hash(rowid)::UBIGINT), value)) FROM test_data
 ----
 FLOAT[]
 
 # Returns exactly 64 elements
 query I
-SELECT length(pac_min_counters(pac_hash(hash(rowid)::UBIGINT), value)) FROM test_data
+SELECT length(pac_min(pac_hash(hash(rowid)::UBIGINT), value)) FROM test_data
 ----
 64
 
 # Show first 5 min counter values (no scaling for min/max)
 query IIIII
 SELECT
-    pac_min_counters(pac_hash(hash(rowid)::UBIGINT), value)[1]::INTEGER,
-    pac_min_counters(pac_hash(hash(rowid)::UBIGINT), value)[2]::INTEGER,
-    pac_min_counters(pac_hash(hash(rowid)::UBIGINT), value)[3]::INTEGER,
-    pac_min_counters(pac_hash(hash(rowid)::UBIGINT), value)[4]::INTEGER,
-    pac_min_counters(pac_hash(hash(rowid)::UBIGINT), value)[5]::INTEGER
+    pac_min(pac_hash(hash(rowid)::UBIGINT), value)[1]::INTEGER,
+    pac_min(pac_hash(hash(rowid)::UBIGINT), value)[2]::INTEGER,
+    pac_min(pac_hash(hash(rowid)::UBIGINT), value)[3]::INTEGER,
+    pac_min(pac_hash(hash(rowid)::UBIGINT), value)[4]::INTEGER,
+    pac_min(pac_hash(hash(rowid)::UBIGINT), value)[5]::INTEGER
 FROM test_data
 ----
 0	10	0	20	10
 
-# Grouped pac_min_counters - show first counter per group
+# Grouped pac_min - show first counter per group
 query II
-SELECT group_id, pac_min_counters(pac_hash(hash(rowid)::UBIGINT), value)[1]::INTEGER AS min1
+SELECT group_id, pac_min(pac_hash(hash(rowid)::UBIGINT), value)[1]::INTEGER AS min1
 FROM test_data
 GROUP BY group_id
 ORDER BY group_id
@@ -159,18 +159,18 @@ ORDER BY group_id
 2	20
 
 # ============================================================================
-# PAC_MAX_COUNTERS tests
+# PAC_MAX tests
 # ============================================================================
 
 # Basic test - returns LIST<DOUBLE>
 query I
-SELECT typeof(pac_max_counters(pac_hash(hash(rowid)::UBIGINT), value)) FROM test_data
+SELECT typeof(pac_max(pac_hash(hash(rowid)::UBIGINT), value)) FROM test_data
 ----
 FLOAT[]
 
 # Returns exactly 64 elements
 query I
-SELECT length(pac_max_counters(pac_hash(hash(rowid)::UBIGINT), value)) FROM test_data
+SELECT length(pac_max(pac_hash(hash(rowid)::UBIGINT), value)) FROM test_data
 ----
 64
 

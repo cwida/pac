@@ -279,6 +279,7 @@ SELECT
 # ============================================================
 # Test 7: CTE referenced multiple times
 # Tests: Single CTE referenced in both main query and subquery
+# Categorical rewrite: subquery AVG becomes counter-based pac_select_gt
 # ============================================================
 query I
 WITH cust_orders AS (
@@ -291,7 +292,7 @@ SELECT COUNT(*)
 FROM cust_orders
 WHERE order_count > (SELECT AVG(order_count) FROM cust_orders);
 ----
-0
+4
 
 # ============================================================
 # Test 8: Nested CTE - CTE B references CTE A which references PU table

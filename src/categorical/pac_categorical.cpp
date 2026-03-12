@@ -215,37 +215,6 @@ static PacFilterParams GetPacFilterParams(ExpressionState &state) {
 	return {mi, correction, local_state.gen};
 }
 
-// pac_filter(UBIGINT hash) -> BOOLEAN
-// Returns true if the bit at the counter position selected by query_hash is set.
-// The input hash already has query_hash XOR'd in by pac_hash(), so the bit positions
-// are query-specific. We check bit (query_hash % 64).
-static void PacFilterFromHashFunction(DataChunk &args, ExpressionState &state, Vector &result) {
-	idx_t count = args.size();
-
-	uint64_t qh = 0;
-	auto &function = state.expr.Cast<BoundFunctionExpression>();
-	if (function.bind_info) {
-		qh = function.bind_info->Cast<PacCategoricalBindData>().query_hash;
-	}
-	int bit_pos = static_cast<int>(qh % 64);
-
-	UnifiedVectorFormat hash_data;
-	args.data[0].ToUnifiedFormat(count, hash_data);
-	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
-
-	auto result_data = FlatVector::GetData<bool>(result);
-	auto &result_validity = FlatVector::Validity(result);
-
-	for (idx_t i = 0; i < count; i++) {
-		auto idx = hash_data.sel->get_index(i);
-		if (!hash_data.validity.RowIsValid(idx)) {
-			result_validity.SetInvalid(i);
-		} else {
-			result_data[i] = (hashes[idx] >> bit_pos) & 1ULL;
-		}
-	}
-}
-
 // pac_filter(list<bool>) -> BOOLEAN
 // Converts list to mask, then applies filter logic
 static void PacFilterFromBoolListFunction(DataChunk &args, ExpressionState &state, Vector &result) {
@@ -633,11 +602,86 @@ static void PacNoisedFunction(DataChunk &args, ExpressionState &state, Vector &r
 }
 
 // ============================================================================
-// PAC_AVG_NOISED: Fused sum/count division + noise in a single pass
+// PAC_DIV: Element-wise division of two 64-element counter lists
 // ============================================================================
-// pac_noised_div(list<PAC_FLOAT> sum_counters, list<PAC_FLOAT> count_counters) -> PAC_FLOAT
+// pac_div(list<PAC_FLOAT> numerator, list<PAC_FLOAT> denominator) -> list<PAC_FLOAT>
+// Returns a 64-element list where result[j] = numerator[j] / denominator[j].
+// If either element is NULL, the result element is NULL.
+static void PacDivFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	auto &num_vec = args.data[0];
+	auto &den_vec = args.data[1];
+	idx_t count = args.size();
+
+	UnifiedVectorFormat num_data, den_data;
+	num_vec.ToUnifiedFormat(count, num_data);
+	den_vec.ToUnifiedFormat(count, den_data);
+
+	auto &num_child = ListVector::GetEntry(num_vec);
+	auto &den_child = ListVector::GetEntry(den_vec);
+	UnifiedVectorFormat num_child_data, den_child_data;
+	num_child.ToUnifiedFormat(ListVector::GetListSize(num_vec), num_child_data);
+	den_child.ToUnifiedFormat(ListVector::GetListSize(den_vec), den_child_data);
+	auto num_values = UnifiedVectorFormat::GetData<PAC_FLOAT>(num_child_data);
+	auto den_values = UnifiedVectorFormat::GetData<PAC_FLOAT>(den_child_data);
+
+	result.SetVectorType(VectorType::FLAT_VECTOR);
+	auto list_entries = FlatVector::GetData<list_entry_t>(result);
+	auto &result_validity = FlatVector::Validity(result);
+	auto &result_child = ListVector::GetEntry(result);
+
+	idx_t total_elements = count * 64;
+	ListVector::Reserve(result, total_elements);
+	ListVector::SetListSize(result, total_elements);
+	auto result_data = FlatVector::GetData<PAC_FLOAT>(result_child);
+	auto &result_child_validity = FlatVector::Validity(result_child);
+
+	for (idx_t i = 0; i < count; i++) {
+		auto n_idx = num_data.sel->get_index(i);
+		auto d_idx = den_data.sel->get_index(i);
+
+		list_entries[i].offset = i * 64;
+		list_entries[i].length = 64;
+
+		if (!num_data.validity.RowIsValid(n_idx) || !den_data.validity.RowIsValid(d_idx)) {
+			result_validity.SetInvalid(i);
+			continue;
+		}
+
+		auto num_entries = UnifiedVectorFormat::GetData<list_entry_t>(num_data);
+		auto den_entries = UnifiedVectorFormat::GetData<list_entry_t>(den_data);
+		auto &num_entry = num_entries[n_idx];
+		auto &den_entry = den_entries[d_idx];
+		idx_t len = std::min(num_entry.length, den_entry.length);
+		if (len > 64) {
+			len = 64;
+		}
+
+		idx_t base = i * 64;
+		for (idx_t j = 0; j < len; j++) {
+			auto nv_idx = num_child_data.sel->get_index(num_entry.offset + j);
+			auto dv_idx = den_child_data.sel->get_index(den_entry.offset + j);
+			bool n_valid = num_child_data.validity.RowIsValid(nv_idx);
+			bool d_valid = den_child_data.validity.RowIsValid(dv_idx);
+			if (n_valid && d_valid) {
+				result_data[base + j] = num_values[nv_idx] / den_values[dv_idx];
+			} else {
+				result_child_validity.SetInvalid(base + j);
+			}
+		}
+		// Zero-fill any remaining positions (if lists shorter than 64)
+		for (idx_t j = len; j < 64; j++) {
+			result_child_validity.SetInvalid(base + j);
+		}
+	}
+}
+
+// ============================================================================
+// PAC_NOISED_DIV: Fused sum/count division + noise in a single pass
+// ============================================================================
+// pac_noised_div(list<PAC_FLOAT> sum_counters, list<PAC_FLOAT> count_counters) -> DOUBLE
 // Equivalent to pac_noised(list_transform(list_zip(sum, cnt), x -> x.a / x.b))
 // but avoids the lambda/list_zip/list_transform overhead.
+// Returns DOUBLE (not PAC_FLOAT) because avg() returns DOUBLE in SQL.
 static void PacNoisedDivFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &sum_vec = args.data[0];
 	auto &cnt_vec = args.data[1];
@@ -651,7 +695,7 @@ static void PacNoisedDivFunction(DataChunk &args, ExpressionState &state, Vector
 	sum_vec.ToUnifiedFormat(count, sum_data);
 	cnt_vec.ToUnifiedFormat(count, cnt_data);
 
-	auto result_data = FlatVector::GetData<PAC_FLOAT>(result);
+	auto result_data = FlatVector::GetData<double>(result);
 	auto &result_validity = FlatVector::Validity(result);
 
 	auto &sum_child = ListVector::GetEntry(sum_vec);
@@ -693,8 +737,8 @@ static void PacNoisedDivFunction(DataChunk &args, ExpressionState &state, Vector
 			PAC_FLOAT c = cnt_values[c_idx];
 			counters[j] = s / c; // 0/0 → NaN, which propagates correctly
 		}
-		result_data[i] = PacNoisySampleFrom64Counters(counters, bind_data.mi, bind_data.correction, gen, ~key_hash,
-		                                              bind_data.query_hash, bind_data.pstate);
+		result_data[i] = static_cast<double>(PacNoisySampleFrom64Counters(
+		    counters, bind_data.mi, bind_data.correction, gen, ~key_hash, bind_data.query_hash, bind_data.pstate));
 	}
 }
 
@@ -1076,6 +1120,18 @@ static AggregateFunction CreatePacListAggregate(const string &name) {
 	                         nullptr, PacListAggregateDestructor);
 }
 
+void AddPacListAggregateOverload(AggregateFunctionSet &set, const string &aggr_type) {
+	if (aggr_type == "sum") {
+		set.AddFunction(CreatePacListAggregate<PacListAggType::SUM>(set.name));
+	} else if (aggr_type == "count") {
+		set.AddFunction(CreatePacListAggregate<PacListAggType::COUNT>(set.name));
+	} else if (aggr_type == "min") {
+		set.AddFunction(CreatePacListAggregate<PacListAggType::MIN>(set.name));
+	} else if (aggr_type == "max") {
+		set.AddFunction(CreatePacListAggregate<PacListAggType::MAX>(set.name));
+	}
+}
+
 // ============================================================================
 // Registration
 // ============================================================================
@@ -1086,11 +1142,6 @@ void RegisterPacCategoricalFunctions(ExtensionLoader &loader) {
 	ScalarFunction pac_select_fn("pac_select", {LogicalType::UBIGINT, list_bool_type}, LogicalType::UBIGINT,
 	                             PacSelectFunction, PacCategoricalBind);
 	loader.RegisterFunction(pac_select_fn);
-
-	// pac_filter(UBIGINT hash) -> BOOLEAN : true if selected counter bit is set in hash
-	ScalarFunction pac_filter_hash("pac_filter", {LogicalType::UBIGINT}, LogicalType::BOOLEAN,
-	                               PacFilterFromHashFunction, PacCategoricalBind);
-	loader.RegisterFunction(pac_filter_hash);
 
 	// pac_filter(list<bool>) -> BOOLEAN : Probabilistic filter from list (convenience)
 	ScalarFunction pac_filter_list("pac_filter", {list_bool_type}, LogicalType::BOOLEAN, PacFilterFromBoolListFunction,
@@ -1108,8 +1159,12 @@ void RegisterPacCategoricalFunctions(ExtensionLoader &loader) {
 	                          PacCategoricalBind, nullptr, nullptr, PacCategoricalInitLocal);
 	loader.RegisterFunction(pac_noised);
 
-	// pac_noised_div(list<PAC_FLOAT> sum, list<PAC_FLOAT> cnt) -> PAC_FLOAT : Fused avg + noise
-	ScalarFunction pac_noised_div("pac_noised_div", {list_double_type, list_double_type}, PacFloatLogicalType(),
+	// pac_div(list<PAC_FLOAT>, list<PAC_FLOAT>) -> list<PAC_FLOAT> : Element-wise division of counter lists
+	ScalarFunction pac_div("pac_div", {list_double_type, list_double_type}, list_double_type, PacDivFunction);
+	loader.RegisterFunction(pac_div);
+
+	// pac_noised_div(list<PAC_FLOAT> sum, list<PAC_FLOAT> cnt) -> DOUBLE : Fused avg + noise
+	ScalarFunction pac_noised_div("pac_noised_div", {list_double_type, list_double_type}, LogicalType::DOUBLE,
 	                              PacNoisedDivFunction, PacCategoricalBind, nullptr, nullptr, PacCategoricalInitLocal);
 	loader.RegisterFunction(pac_noised_div);
 
@@ -1129,12 +1184,9 @@ void RegisterPacCategoricalFunctions(ExtensionLoader &loader) {
 	RegisterPacSelectCmp<PacFilterCmpOp::EQ>(loader, "pac_select_eq");
 	RegisterPacSelectCmp<PacFilterCmpOp::NEQ>(loader, "pac_select_neq");
 
-	// List aggregates: aggregate over LIST<DOUBLE> inputs element-wise
-	// These handle cases where PAC _counters results are used as input to another aggregate
-	loader.RegisterFunction(CreatePacListAggregate<PacListAggType::SUM>("pac_sum_list"));
-	loader.RegisterFunction(CreatePacListAggregate<PacListAggType::COUNT>("pac_count_list"));
-	loader.RegisterFunction(CreatePacListAggregate<PacListAggType::MIN>("pac_min_list"));
-	loader.RegisterFunction(CreatePacListAggregate<PacListAggType::MAX>("pac_max_list"));
+	// List aggregates are now registered as overloads of pac_sum/pac_count/pac_min/pac_max
+	// alongside the counters variants, via AddPacListAggregateOverload() called from each
+	// Register*CountersFunctions() function.
 }
 
 } // namespace duckdb

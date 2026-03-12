@@ -24,6 +24,7 @@ using uint64_t = unsigned long long;
 namespace duckdb {
 void RegisterPacCountFunctions(ExtensionLoader &);
 void RegisterPacCountCountersFunctions(ExtensionLoader &);
+void RegisterPacAvgFunctions(ExtensionLoader &);
 
 // PAC_COUNT(key_hash) implements a COUNT aggregate that for each privacy-unit (identified by a key_hash)
 // computes 64 independent counts, where each independent count randomly (50% chance) includes a PU or not.

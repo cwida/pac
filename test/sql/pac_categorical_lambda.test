@@ -131,13 +131,13 @@ SELECT current_setting('pac_mi');
 # more products than the precise avg would suggest.
 # ============================================================================
 
-# Verify the rewriter uses pac_avg_counters, list_transform, and pac_filter
+# Verify the rewriter uses pac_avg, list_transform, and pac_filter
 query I nosort explain_test1
 EXPLAIN SELECT p.product_id, p.product_name FROM products p
 WHERE NOT ((SELECT avg(s.quantity) FROM sales s WHERE s.product_id = p.product_id) > 15)
 ORDER BY p.product_id;
 ----
-pac_avg_counters
+pac_avg
 list_transform
 pac_filter
 
@@ -166,13 +166,13 @@ ORDER BY p.product_id;
 # Products 3-5: 25, 15, 30 - all clearly below 40
 # ============================================================================
 
-# Verify the rewriter uses pac_sum_counters and pac_filter_gt (algebraic simplification: counter * 0.5 > 40 → counter > 80)
+# Verify the rewriter uses pac_sum and pac_filter_gt (algebraic simplification: counter * 0.5 > 40 → counter > 80)
 query I nosort explain_test2
 EXPLAIN SELECT p.product_id, p.product_name FROM products p
 WHERE (SELECT sum(s.quantity) FROM sales s WHERE s.product_id = p.product_id) * 0.5 > 40
 ORDER BY p.product_id;
 ----
-pac_sum_counters
+pac_sum
 pac_filter_gt
 
 query II
@@ -194,13 +194,13 @@ ORDER BY p.product_id;
 # All products pass this comparison
 # ============================================================================
 
-# Verify the rewriter uses pac_avg_counters and pac_filter_gt (scalar side has arithmetic, PAC side is bare)
+# Verify the rewriter uses pac_avg and pac_filter_gt (scalar side has arithmetic, PAC side is bare)
 query I nosort explain_test3
 EXPLAIN SELECT p.product_id, p.product_name FROM products p
 WHERE p.base_price * 5 > (SELECT avg(s.quantity) FROM sales s WHERE s.product_id = p.product_id)
 ORDER BY p.product_id;
 ----
-pac_avg_counters
+pac_avg
 pac_filter_gt
 
 query II
@@ -233,13 +233,13 @@ ORDER BY p.product_id;
 # Product 5: (30+10)*2=80 > 60? YES
 # ============================================================================
 
-# Verify the rewriter uses pac_sum_counters and pac_filter_gt (scalar side has nested arithmetic, PAC side is bare)
+# Verify the rewriter uses pac_sum and pac_filter_gt (scalar side has nested arithmetic, PAC side is bare)
 query I nosort explain_test4
 EXPLAIN SELECT p.product_id, p.product_name FROM products p
 WHERE (p.base_price + 10) * 2 > (SELECT sum(s.quantity) FROM sales s WHERE s.product_id = p.product_id)
 ORDER BY p.product_id;
 ----
-pac_sum_counters
+pac_sum
 pac_filter_gt
 
 query II
@@ -266,13 +266,13 @@ ORDER BY p.product_id;
 # Products: 1 (100), 2 (80), 5 (60)
 # ============================================================================
 
-# Verify the rewriter uses pac_sum_counters and pac_filter_gte (direct: counter >= 60)
+# Verify the rewriter uses pac_sum and pac_filter_gte (direct: counter >= 60)
 query I nosort explain_test5
 EXPLAIN SELECT p.product_id, p.product_name FROM products p
 WHERE (SELECT sum(s.quantity) FROM sales s WHERE s.product_id = p.product_id) >= 60
 ORDER BY p.product_id;
 ----
-pac_sum_counters
+pac_sum
 pac_filter_gte
 
 query II
@@ -296,13 +296,13 @@ ORDER BY p.product_id;
 # Product 4: avg=6 <= 10 → YES
 # ============================================================================
 
-# Verify the rewriter uses pac_sum_counters and pac_filter_lte (direct: counter <= 10)
+# Verify the rewriter uses pac_sum and pac_filter_lte (direct: counter <= 10)
 query I nosort explain_test6
 EXPLAIN SELECT p.product_id, p.product_name FROM products p
 WHERE (SELECT avg(s.quantity) FROM sales s WHERE s.product_id = p.product_id) <= 10
 ORDER BY p.product_id;
 ----
-pac_sum_counters
+pac_sum
 pac_filter_lte
 
 query II
@@ -315,6 +315,7 @@ WHERE
     (SELECT avg(s.quantity) FROM sales s WHERE s.product_id = p.product_id) <= 10
 ORDER BY p.product_id;
 ----
+3	Gadget X
 4	Gadget Y
 
 # ============================================================================
@@ -323,13 +324,13 @@ ORDER BY p.product_id;
 # NOTE: Currently returns 0 rows - equality comparisons may not be properly handled
 # ============================================================================
 
-# Verify the rewriter uses pac_count_counters and pac_filter_eq (direct: counter = 5)
+# Verify the rewriter uses pac_count and pac_filter_eq (direct: counter = 5)
 query I nosort explain_test7
 EXPLAIN SELECT p.product_id, p.product_name FROM products p
 WHERE (SELECT count(*) FROM sales s WHERE s.product_id = p.product_id) = 5
 ORDER BY p.product_id;
 ----
-pac_count_counters
+pac_count
 pac_filter_eq
 
 query II
@@ -350,13 +351,13 @@ ORDER BY p.product_id;
 # NOTE: Also includes Product 5 due to counter variance in inequality check
 # ============================================================================
 
-# Verify the rewriter uses pac_sum_counters and pac_filter_neq (direct: counter <> 60)
+# Verify the rewriter uses pac_sum and pac_filter_neq (direct: counter <> 60)
 query I nosort explain_test8
 EXPLAIN SELECT p.product_id, p.product_name FROM products p
 WHERE (SELECT sum(s.quantity) FROM sales s WHERE s.product_id = p.product_id) <> 60
 ORDER BY p.product_id;
 ----
-pac_sum_counters
+pac_sum
 pac_filter_neq
 
 query II
@@ -389,13 +390,13 @@ ORDER BY p.product_id;
 # Product 2: avg=16 > 15 → YES
 # ============================================================================
 
-# Verify the rewriter uses pac_avg_counters, list_transform, and pac_filter
+# Verify the rewriter uses pac_avg, list_transform, and pac_filter
 query I nosort explain_test10
 EXPLAIN SELECT p.product_id, p.product_name FROM products p
 WHERE NOT NOT ((SELECT avg(s.quantity) FROM sales s WHERE s.product_id = p.product_id) > 15)
 ORDER BY p.product_id;
 ----
-pac_avg_counters
+pac_avg
 list_transform
 pac_filter
 
@@ -420,14 +421,14 @@ ORDER BY p.product_id;
 # Product 1: 100/10=10 >= 10 → YES
 # ============================================================================
 
-# Verify the rewriter uses pac_sum_counters and pac_filter_gte (algebraic simplification: counter / 10.0 >= base_price → counter >= base_price * 10.0)
+# Verify the rewriter uses pac_sum and pac_filter_gte (algebraic simplification: counter / 10.0 >= base_price → counter >= base_price * 10.0)
 query I nosort explain_test11
 EXPLAIN SELECT count(*) FROM (
     SELECT p.product_id FROM products p
     WHERE (SELECT sum(s.quantity) FROM sales s WHERE s.product_id = p.product_id) / 10.0 >= p.base_price
 );
 ----
-pac_sum_counters
+pac_sum
 pac_filter_gte
 
 query I
@@ -446,13 +447,13 @@ SELECT count(*) FROM (
 # Products: 1 (100-50=50), 2 (80-50=30), 5 (60-50=10)
 # ============================================================================
 
-# Verify the rewriter uses pac_sum_counters and pac_filter_gt (algebraic simplification: counter - 50 > 0 → counter > 50)
+# Verify the rewriter uses pac_sum and pac_filter_gt (algebraic simplification: counter - 50 > 0 → counter > 50)
 query I nosort explain_test12
 EXPLAIN SELECT p.product_id, p.product_name FROM products p
 WHERE (SELECT sum(s.quantity) FROM sales s WHERE s.product_id = p.product_id) - 50 > 0
 ORDER BY p.product_id;
 ----
-pac_sum_counters
+pac_sum
 pac_filter_gt
 
 query II
@@ -480,14 +481,14 @@ ORDER BY p.product_id;
 # Product 5: 60 > 150/5=30? YES
 # ============================================================================
 
-# Verify the rewriter uses pac_sum_counters (appears twice), list_zip, list_transform, and pac_filter
+# Verify the rewriter uses pac_sum (appears twice), list_zip, list_transform, and pac_filter
 query I nosort explain_test13
 EXPLAIN SELECT p.product_id, p.product_name FROM products p
 WHERE (SELECT sum(s.quantity) FROM sales s, customers c WHERE s.product_id = p.product_id AND s.customer_id = c.customer_id) >
       (SELECT sum(s.sale_price) / 5.0 FROM sales s, customers c WHERE s.product_id = p.product_id AND s.customer_id = c.customer_id)
 ORDER BY p.product_id;
 ----
-pac_sum_counters
+pac_sum
 list_zip
 list_transform
 pac_filter

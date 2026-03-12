@@ -171,7 +171,7 @@ echo "  grp_X: sequential groups - consecutive rows in same group"
 echo "  prg_X: scattered groups - rows cycle through all groups"
 echo ""
 echo "Usage in benchmarks:"
-echo "  SELECT pac_sum(hash(i), col_64, 0.0) FROM data10;"
+echo "  SELECT pac_noised_sum(hash(i), col_64) FROM data10;"
 echo ""
 
 ls -lh "$DB_FILE"

@@ -134,10 +134,11 @@ SELECT SUM(t1a.b + t1b.b) FROM t1 t1a JOIN t1 t1b ON t1a.a = t1b.a;
 640
 
 # Test same table in main query and subquery (different scopes)
+# Categorical rewrite: pac_select_gt filters rows, pac_noised_sum aggregates survivors
 query I
 SELECT SUM(b) FROM t1 WHERE a > (SELECT AVG(b) FROM t1);
 ----
-0
+NULL
 
 # Test conservative mode OFF: window function should succeed
 statement ok

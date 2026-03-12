@@ -199,6 +199,7 @@ ColumnBinding InsertHashProjectionAboveGet(OptimizerExtensionInput &input, uniqu
 
 	// 1b. Wrap in pac_hash() to XOR with query_hash and optionally repair to 32 bits set
 	hash_expr = input.optimizer.BindScalarFunction("pac_hash", std::move(hash_expr));
+	hash_expr->alias = "pac_pu";
 
 	// 2. Find the unique_ptr slot holding this get in the plan tree
 	vector<unique_ptr<LogicalOperator> *> get_nodes;
@@ -319,6 +320,7 @@ ColumnBinding InsertHashProjectionAboveCTERef(OptimizerExtensionInput &input, un
 
 	// Wrap in pac_hash() to XOR with query_hash and optionally repair to 32 bits set
 	hash_expr = input.optimizer.BindScalarFunction("pac_hash", std::move(hash_expr));
+	hash_expr->alias = "pac_pu";
 
 	// 3. Find the unique_ptr slot holding this CTE_SCAN in the plan tree
 	auto *cte_slot_ptr = FindCTERefSlot(plan, cte_ref.table_index);
@@ -438,13 +440,15 @@ unique_ptr<Expression> BindBitOrAggregate(OptimizerExtensionInput &input, unique
 static string GetPacAggregateFunctionName(const string &function_name) {
 	string pac_function_name;
 	if (function_name == "sum" || function_name == "sum_no_overflow") {
-		pac_function_name = "pac_sum";
+		pac_function_name = "pac_noised_sum";
 	} else if (function_name == "count" || function_name == "count_star") {
-		pac_function_name = "pac_count";
+		pac_function_name = "pac_noised_count";
 	} else if (function_name == "min") {
-		pac_function_name = "pac_min";
+		pac_function_name = "pac_noised_min";
 	} else if (function_name == "max") {
-		pac_function_name = "pac_max";
+		pac_function_name = "pac_noised_max";
+	} else if (function_name == "avg") {
+		pac_function_name = "pac_noised_avg";
 	} else {
 		throw NotImplementedException("PAC compiler: unsupported aggregate function " + function_name);
 	}
@@ -517,7 +521,7 @@ static void InsertDistinctPreAggregation(OptimizerExtensionInput &input, Logical
 		if (function_name == "count" || function_name == "count_star") {
 			value_ref = make_uniq_base<Expression, BoundConstantExpression>(Value::BIGINT(1));
 		} else {
-			// SUM/AVG DISTINCT: value comes from the distinct column (now a group key in inner agg)
+			// SUM/AVG/MIN/MAX DISTINCT: value comes from the distinct column (now a group key in inner agg)
 			value_ref = make_uniq<BoundColumnRefExpression>(distinct_value_expr->return_type, distinct_val_binding);
 		}
 
@@ -545,150 +549,6 @@ static unique_ptr<LogicalOperator> *FindSlotByPointer(unique_ptr<LogicalOperator
 		}
 	}
 	return nullptr;
-}
-
-// Visitor that replaces specific BoundColumnRefExpression bindings with arbitrary expressions.
-// Used to replace col_ref(agg_index, avg_ai) with sum/count division expressions in parent operators.
-class PacAvgDivisionReplacer : public LogicalOperatorVisitor {
-public:
-	// Map from binding hash → replacement expression (owned here; Copy() used for each replacement)
-	unordered_map<idx_t, unique_ptr<Expression>> replacements; // key = (table_index << 32 | col_index)
-	LogicalOperator *stop_at = nullptr;
-
-	void VisitOperator(LogicalOperator &op) override {
-		if (stop_at && stop_at == &op) {
-			return;
-		}
-		VisitOperatorChildren(op);
-		VisitOperatorExpressions(op);
-	}
-
-	void VisitExpression(unique_ptr<Expression> *expr_ptr) override {
-		auto &expr = *expr_ptr;
-		if (expr->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
-			auto &col_ref = expr->Cast<BoundColumnRefExpression>();
-			idx_t key = (idx_t(col_ref.binding.table_index) << 32) | col_ref.binding.column_index;
-			auto it = replacements.find(key);
-			if (it != replacements.end()) {
-				*expr_ptr = it->second->Copy();
-				return; // don't recurse into replacement
-			}
-		}
-		VisitExpressionChildren(*expr);
-	}
-};
-
-// Pre-pass: replace avg(col) with sum(col)/count(col) BEFORE PAC compilation.
-// Modifies the aggregate in-place (keeps original table indices):
-//   1. avg(col) at position ai → sum(col) at same position ai
-//   2. Appends count(col) at position num_aggs + k for each avg
-//   3. In all parent operators, replaces col_ref(agg_index, avg_ai)
-//      with CAST(col_ref(agg_index, avg_ai), DOUBLE) / CAST(col_ref(agg_index, count_pos), DOUBLE)
-// This avoids inserting an intermediate projection, so the categorical rewriter
-// sees PAC agg col_refs directly in the parent projections where it already handles them.
-static void RewriteAvgAggregate(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &root,
-                                LogicalAggregate *agg) {
-	// Check for non-distinct avg
-	bool has_avg = false;
-	for (auto &e : agg->expressions) {
-		auto &ba = e->Cast<BoundAggregateExpression>();
-		if (ba.function.name == "avg" && !ba.IsDistinct()) {
-			has_avg = true;
-			break;
-		}
-	}
-	if (!has_avg) {
-		return;
-	}
-
-	auto &context = input.context;
-	idx_t agg_index = agg->aggregate_index;
-	idx_t num_aggs = agg->expressions.size();
-
-	// Bind std "sum" via catalog
-	auto &catalog = Catalog::GetSystemCatalog(context);
-	auto &sum_entry = catalog.GetEntry<AggregateFunctionCatalogEntry>(context, DEFAULT_SCHEMA, "sum");
-
-	// Replace each avg(col) → sum(col) / count(col).
-	// Each avg gets its own count(col) so the PAC pipeline can trace the child expression
-	// and convert it (e.g., to pac_count_list when the child becomes LIST<FLOAT> in subquery contexts).
-	auto &count_entry = catalog.GetEntry<AggregateFunctionCatalogEntry>(context, DEFAULT_SCHEMA, "count");
-
-	// avg_pos → count_pos
-	unordered_map<idx_t, idx_t> avg_to_count;
-
-	for (idx_t i = 0; i < num_aggs; i++) {
-		auto &ba = agg->expressions[i]->Cast<BoundAggregateExpression>();
-		if (ba.function.name != "avg" || ba.IsDistinct()) {
-			continue;
-		}
-		auto avg_col = ba.children[0]->Copy();
-
-		// Append count(col)
-		idx_t count_pos = agg->expressions.size();
-		vector<LogicalType> count_arg_types = {avg_col->return_type};
-		ErrorData count_err;
-		FunctionBinder count_fb(context);
-		auto best_count = count_fb.BindFunction("count", count_entry.functions, count_arg_types, count_err);
-		auto count_func = count_entry.functions.GetFunctionByOffset(best_count.GetIndex());
-		vector<unique_ptr<Expression>> count_children;
-		count_children.push_back(avg_col->Copy());
-		agg->expressions.push_back(count_fb.BindAggregateFunction(count_func, std::move(count_children), nullptr,
-		                                                          AggregateType::NON_DISTINCT));
-
-		// Replace avg(col) → sum(col)
-		vector<LogicalType> arg_types = {avg_col->return_type};
-		ErrorData err;
-		FunctionBinder fb(context);
-		auto best_sum = fb.BindFunction("sum", sum_entry.functions, arg_types, err);
-		auto sum_func = sum_entry.functions.GetFunctionByOffset(best_sum.GetIndex());
-		vector<unique_ptr<Expression>> sum_children;
-		sum_children.push_back(std::move(avg_col));
-		agg->expressions[i] =
-		    fb.BindAggregateFunction(sum_func, std::move(sum_children), nullptr, AggregateType::NON_DISTINCT);
-
-		avg_to_count[i] = count_pos;
-	}
-	agg->ResolveOperatorTypes();
-
-	// Build replacement map: col_ref(agg_index, avg_ai) → sum_ref / count_ref
-	// sum_ref = CAST(col_ref(agg_index, avg_ai), DOUBLE)
-	// count_ref = CAST(col_ref(agg_index, count_pos), DOUBLE)
-	PacAvgDivisionReplacer replacer;
-	for (auto &kv : avg_to_count) {
-		idx_t avg_ai = kv.first;
-		idx_t count_pos = kv.second;
-		auto sum_type = agg->expressions[avg_ai]->return_type;
-		auto count_type = agg->expressions[count_pos]->return_type; // BIGINT
-		auto sum_ref = make_uniq<BoundColumnRefExpression>(sum_type, ColumnBinding(agg_index, avg_ai));
-		auto count_ref = make_uniq<BoundColumnRefExpression>(count_type, ColumnBinding(agg_index, count_pos));
-		auto sum_dbl = BoundCastExpression::AddDefaultCastToType(std::move(sum_ref), LogicalType::DOUBLE);
-		auto count_dbl = BoundCastExpression::AddDefaultCastToType(std::move(count_ref), LogicalType::DOUBLE);
-		auto div_expr = input.optimizer.BindScalarFunction("/", std::move(sum_dbl), std::move(count_dbl));
-		idx_t key = (idx_t(agg_index) << 32) | avg_ai;
-		replacer.replacements[key] = std::move(div_expr);
-	}
-	replacer.stop_at = agg;
-	replacer.VisitOperator(*root);
-}
-
-// Collect all aggregates in post-order (bottom-up).
-static void CollectAggregatesPostOrder(LogicalOperator &op, vector<LogicalAggregate *> &aggs) {
-	for (auto &child : op.children) {
-		CollectAggregatesPostOrder(*child, aggs);
-	}
-	if (op.type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
-		aggs.push_back(&op.Cast<LogicalAggregate>());
-	}
-}
-
-void RewriteAvgToSumCount(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan) {
-	// Collect all aggregates in post-order (bottom-up)
-	vector<LogicalAggregate *> aggs;
-	CollectAggregatesPostOrder(*plan, aggs);
-	for (auto *agg : aggs) {
-		RewriteAvgAggregate(input, plan, agg);
-	}
 }
 
 // Build a standalone aggregate branch for one DISTINCT column.
@@ -1018,6 +878,7 @@ static void InsertMultiBranchPreAggregation(OptimizerExtensionInput &input, uniq
 		}
 		auto &branch = built_branches[it->second.first];
 		idx_t pos_in_branch = it->second.second;
+
 		auto agg_type = agg->expressions[ai]->return_type;
 		proj_expressions.push_back(
 		    make_uniq<BoundColumnRefExpression>(agg_type, ColumnBinding(branch.agg_index, pos_in_branch)));
@@ -1205,24 +1066,11 @@ void ModifyAggregatesWithPacFunctions(OptimizerExtensionInput &input, LogicalAgg
 
 #if PAC_DEBUG
 		PAC_DEBUG_PRINT("ModifyAggregatesWithPacFunctions: Transforming " + function_name + " to PAC function");
-		PAC_DEBUG_PRINT("ModifyAggregatesWithPacFunctions: Old aggregate expression: " + old_aggr.ToString());
-		if (!old_aggr.children.empty()) {
-			PAC_DEBUG_PRINT("ModifyAggregatesWithPacFunctions: Old aggregate child: " +
-			                old_aggr.children[0]->ToString());
-			if (old_aggr.children[0]->type == ExpressionType::BOUND_COLUMN_REF) {
-				auto &child_ref = old_aggr.children[0]->Cast<BoundColumnRefExpression>();
-				PAC_DEBUG_PRINT("ModifyAggregatesWithPacFunctions: Old aggregate child binding: [" +
-				                std::to_string(child_ref.binding.table_index) + "." +
-				                std::to_string(child_ref.binding.column_index) + "]");
-			}
-		}
 #endif
 
-		// Extract the original aggregate's value child expression (e.g., the `val` in SUM(val))
-		// COUNT(*) has no children, so we create a constant 1 expression when there's no child
+		// Extract the original aggregate's value child expression
 		unique_ptr<Expression> value_child;
 		if (old_aggr.children.empty()) {
-			// COUNT(*) case - create a constant 1
 			if (function_name == "count_star" || function_name == "count") {
 				value_child = make_uniq_base<Expression, BoundConstantExpression>(Value::BIGINT(1));
 			} else {
@@ -1232,71 +1080,12 @@ void ModifyAggregatesWithPacFunctions(OptimizerExtensionInput &input, LogicalAgg
 			value_child = old_aggr.children[0]->Copy();
 		}
 
-		// Get PAC function name
 		string pac_function_name = GetPacAggregateFunctionName(function_name);
-
-		// Bind the PAC aggregate function
-		auto new_aggr = BindPacAggregate(input, pac_function_name, hash_input_expr->Copy(), std::move(value_child));
-
-#if PAC_DEBUG
-		PAC_DEBUG_PRINT("ModifyAggregatesWithPacFunctions: New PAC aggregate expression: " + new_aggr->ToString());
-
-		// Print column names for the PAC aggregate arguments
-		string hash_col_name = "unknown";
-		string value_col_name = "unknown";
-
-		// Extract hash column name from hash_input_expr by resolving bindings
-		ExpressionIterator::EnumerateExpression(hash_input_expr, [&](Expression &expr) {
-			if (expr.type == ExpressionType::BOUND_COLUMN_REF) {
-				auto &col_ref = expr.Cast<BoundColumnRefExpression>();
-				hash_col_name = ResolveColumnNameFromBinding(*agg, col_ref.binding);
-			}
-		});
-
-		// Extract value column name from the new aggregate's children
-		if (!new_aggr->Cast<BoundAggregateExpression>().children.empty() &&
-		    new_aggr->Cast<BoundAggregateExpression>().children.size() > 1) {
-			auto &value_expr = new_aggr->Cast<BoundAggregateExpression>().children[1];
-			if (value_expr->type == ExpressionType::BOUND_COLUMN_REF) {
-				auto &val_ref = value_expr->Cast<BoundColumnRefExpression>();
-				value_col_name = ResolveColumnNameFromBinding(*agg, val_ref.binding);
-			} else if (value_expr->type == ExpressionType::VALUE_CONSTANT) {
-				value_col_name = "1"; // COUNT(*) case
-			} else {
-				// For complex expressions, try to extract column names from any column refs
-				vector<string> col_names;
-				ExpressionIterator::EnumerateExpression(value_expr, [&](Expression &e) {
-					if (e.type == ExpressionType::BOUND_COLUMN_REF) {
-						auto &cr = e.Cast<BoundColumnRefExpression>();
-						col_names.push_back(ResolveColumnNameFromBinding(*agg, cr.binding));
-					}
-				});
-				if (!col_names.empty()) {
-					value_col_name = "expression(" + StringUtil::Join(col_names, ", ") + ")";
-				} else {
-					value_col_name = value_expr->ToString();
-				}
-			}
-		}
-
-		PAC_DEBUG_PRINT("ModifyAggregatesWithPacFunctions: Constructing " + pac_function_name + " with hash of " +
-		                hash_col_name + ", value of " + value_col_name);
-#endif
-
-		agg->expressions[i] = std::move(new_aggr);
+		agg->expressions[i] =
+		    BindPacAggregate(input, pac_function_name, hash_input_expr->Copy(), std::move(value_child));
 	}
 
-#if PAC_DEBUG
-	PAC_DEBUG_PRINT("ModifyAggregatesWithPacFunctions: Calling ResolveOperatorTypes on aggregate");
-#endif
 	agg->ResolveOperatorTypes();
-#if PAC_DEBUG
-	PAC_DEBUG_PRINT("ModifyAggregatesWithPacFunctions: After ResolveOperatorTypes, types.size()=" +
-	                std::to_string(agg->types.size()));
-	for (idx_t i = 0; i < agg->types.size(); i++) {
-		PAC_DEBUG_PRINT("  Type " + std::to_string(i) + ": " + agg->types[i].ToString());
-	}
-#endif
 }
 
 } // namespace duckdb

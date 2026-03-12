@@ -34,12 +34,12 @@ set(EXTENSION_SOURCES
     src/metadata/pac_metadata_manager.cpp
     src/metadata/pac_metadata_serialization.cpp
     src/aggregates/pac_aggregate.cpp
-
     src/aggregates/pac_count.cpp
 src/aggregates/pac_min_max.cpp
     src/aggregates/pac_sum.cpp
     src/compiler/pac_bitslice_compiler.cpp
     src/compiler/pac_compiler_helpers.cpp
+    src/query_processing/pac_avg_rewriter.cpp
     src/query_processing/pac_expression_builder.cpp
     src/query_processing/pac_plan_traversal.cpp
     src/query_processing/pac_projection_propagation.cpp

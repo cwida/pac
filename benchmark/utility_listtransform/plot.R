@@ -1,5 +1,5 @@
 #!/usr/bin/env Rscript
-# Utility experiment plot: naive (N x pac_sum) vs optimized (pac_sum_counters + list_transform)
+# Utility experiment plot: naive (N x pac_sum) vs optimized (pac_sum + list_transform)
 # Reads results.csv, plots side-by-side boxplots of relative error by num_ratios and variant.
 #
 # Usage: Rscript plot.R [results.csv]

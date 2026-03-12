@@ -23,6 +23,7 @@
 #include "parser/pac_parser.hpp"
 #include "diff/pac_utility_diff.hpp"
 #include "query_processing/pac_topk_rewriter.hpp"
+#include "query_processing/pac_avg_rewriter.hpp"
 #include "pac_debug.hpp"
 
 namespace duckdb {
@@ -168,6 +169,14 @@ static void LoadInternal(ExtensionLoader &loader) {
 	pac_topk_rule.optimizer_info = pac_info;
 	OptimizerExtension::Register(db.config, std::move(pac_topk_rule));
 
+	// Register pac_avg rewrite rule (post-optimizer: decomposes pac_noised_avg/pac_avg into sum/count + division).
+	// Runs as a separate optimizer so it works for both compiler-generated and user-written pac_avg() SQL.
+	{
+		OptimizerExtension pac_avg_rule;
+		pac_avg_rule.optimize_function = RewritePacAvgToDiv;
+		OptimizerExtension::Register(db.config, std::move(pac_avg_rule));
+	}
+
 	// Add option to enable/disable PAC noise application (this is useful for testing, since noise affects result
 	// determinism)
 	db.config.AddExtensionOption("pac_noise", "apply PAC noise", LogicalType::BOOLEAN);
@@ -231,6 +240,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// Register _counters variants for categorical queries
 	RegisterPacMinCountersFunctions(loader);
 	RegisterPacMaxCountersFunctions(loader);
+
+	// Register dummy pac_noised_avg / pac_avg (replaced by RewritePacAvgToDiv before execution)
+	RegisterPacAvgFunctions(loader);
 
 	// Register PAC categorical functions (pac_select, pac_filter, pac_filter_<cmp>, etc.)
 	RegisterPacCategoricalFunctions(loader);

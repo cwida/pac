@@ -63,9 +63,12 @@ namespace duckdb {
 // Information about a single PAC aggregate binding found in an expression
 struct PacBindingInfo {
 	ColumnBinding binding;
-	string aggregate_name;     // e.g., "pac_sum", "pac_count"
-	LogicalType original_type; // The type before conversion to LIST<DOUBLE>
-	idx_t index;               // Position in the list (0-based, for list_zip field access)
+	string aggregate_name;        // e.g., "pac_noised_sum", "pac_noised_count"
+	LogicalType original_type;    // The type before conversion to LIST<DOUBLE>
+	idx_t index;                  // Position in the list (0-based, for list_zip field access)
+	ColumnBinding source_binding; // The aggregate-level binding that defines this PAC aggregate
+	PacBindingInfo() : index(0) {
+	}
 };
 
 // Information about a detected categorical pattern
@@ -74,7 +77,7 @@ struct CategoricalPatternInfo {
 	LogicalOperator *parent_op;
 	// Index of the expression in the parent's expressions list (or conditions list for joins)
 	idx_t expr_index;
-	// The aggregate function name (e.g., "pac_sum", "pac_count")
+	// The aggregate function name (e.g., "pac_noised_sum", "pac_noised_count")
 	string aggregate_name;
 	// The column binding that references the PAC aggregate result
 	ColumnBinding pac_binding;
@@ -83,10 +86,9 @@ struct CategoricalPatternInfo {
 	// The original return type of the PAC aggregate expression (before conversion to LIST<DOUBLE>)
 	// Used by double-lambda rewrite to cast list elements back to the expected type
 	LogicalType original_return_type;
-	// Scalar subquery wrapper that was skipped during pattern detection (if any)
-	// Points to the outer Projection of the pattern: Project(CASE) -> Aggregate(first) -> Project
-	// When set, these three operators should be stripped during rewrite
-	LogicalOperator *scalar_wrapper_op;
+	// The aggregate-level binding (table_index=aggregate_index, column_index=expression index)
+	// that defines this pattern's PAC aggregate. Set during detection by tracing the binding.
+	ColumnBinding source_binding;
 	// Pre-collected PAC bindings from detection
 	vector<PacBindingInfo> pac_bindings;
 	// Hash binding from outer PAC aggregate (resolved to filter level)
@@ -95,8 +97,7 @@ struct CategoricalPatternInfo {
 	bool has_outer_pac_hash = false;
 
 	CategoricalPatternInfo()
-	    : parent_op(nullptr), expr_index(0), has_pac_binding(false), original_return_type(LogicalType::DOUBLE),
-	      scalar_wrapper_op(nullptr) {
+	    : parent_op(nullptr), expr_index(0), has_pac_binding(false), original_return_type(LogicalType::DOUBLE) {
 	}
 };
 
@@ -114,51 +115,72 @@ void RewriteCategoricalQuery(OptimizerExtensionInput &input, unique_ptr<LogicalO
 // ==========================================================================================
 // simple inlined methods
 // ==========================================================================================
-static inline bool IsPacAggregate(const string &pattern, const string &suffix = "", const string &prefix = "pac_") {
+// Check if name matches pac_noised_<aggr> (noised scalar aggregates).
+// Default: matches pac_noised_sum, pac_noised_count, pac_noised_min, pac_noised_max.
+// With prefix/suffix overrides: matches other PAC aggregate families (counters/list = pac_<aggr>, bare).
+static inline bool IsPacAggregate(const string &pattern, const string &suffix = "",
+                                  const string &prefix = "pac_noised_") {
 	const string name = StringUtil::Lower(pattern);
-	for (auto &aggr_name : {"sum", "count", "min", "max"}) {
+	for (auto &aggr_name : {"sum", "count", "min", "max", "avg"}) {
 		if (name == prefix + aggr_name + suffix) {
-			return true; // function name is some PAC aggregate
+			return true;
 		}
 	}
 	return false;
 }
 
+// pac_sum, pac_count, pac_min, pac_max (counters and list variants share this name)
 static inline bool IsPacCountersAggregate(const string &name) {
-	return IsPacAggregate(name, "_counters"); // Check if a function name is already a PAC counters variant
+	return IsPacAggregate(name, "", "pac_");
 }
 
+// pac_sum, pac_count, pac_min, pac_max (same name for list variant)
 static inline bool IsPacListAggregate(const string &name) {
-	return IsPacAggregate(name, "_list"); // Check if a function name is a PAC list aggregate (pac_*_list)
+	return IsPacAggregate(name, "", "pac_");
 }
 
 static inline bool IsAnyPacAggregate(const string &name) {
-	return IsPacAggregate(name) || IsPacCountersAggregate(name) || IsPacListAggregate(name);
+	return IsPacAggregate(name) || IsPacCountersAggregate(name);
 }
 
+// pac_noised_sum → pac_sum (counters/list variant name)
 string inline GetCountersVariant(const string &aggregate_name) {
 	if (IsPacCountersAggregate(aggregate_name)) {
 		return aggregate_name;
 	}
-	D_ASSERT(IsPacAggregate(aggregate_name));
-	return aggregate_name + "_counters";
+	for (auto &aggr : {"sum", "count", "min", "max", "avg"}) {
+		if (aggregate_name == string("pac_noised_") + aggr) {
+			return string("pac_") + aggr;
+		}
+	}
+	return "";
 }
 
+// pac_sum → pac_noised_sum
 static inline string GetBasePacAggregateName(const string &name) {
-	if (IsPacCountersAggregate(name)) {
-		return name.substr(0, name.size() - 9); // Remove "_counters" suffix
+	for (auto &aggr : {"sum", "count", "min", "max", "avg"}) {
+		if (name == string("pac_") + aggr) {
+			return string("pac_noised_") + aggr;
+		}
 	}
 	return name;
 }
 
+// Any variant → pac_sum (list aggregate name, same as counters name now)
 static inline string GetListAggregateVariant(const string &name) {
-	// Match bare aggregate names: sum → pac_sum_list
-	if (IsPacAggregate(name, "", "")) {
-		return "pac_" + name + "_list";
-	}
-	// Match PAC aggregate names: pac_sum → pac_sum_list
-	if (IsPacAggregate(name)) {
-		return name + "_list";
+	for (auto &aggr : {"sum", "count", "min", "max", "avg"}) {
+		// Match bare names: sum → pac_sum
+		if (name == string(aggr)) {
+			return string("pac_") + aggr;
+		}
+		// Match noised names: pac_noised_sum → pac_sum
+		if (name == string("pac_noised_") + aggr) {
+			return string("pac_") + aggr;
+		}
+		// Match already-correct names: pac_sum → pac_sum
+		if (name == string("pac_") + aggr) {
+			return string("pac_") + aggr;
+		}
 	}
 	return "";
 }
