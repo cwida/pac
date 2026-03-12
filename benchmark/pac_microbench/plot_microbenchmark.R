@@ -46,7 +46,7 @@ PLATFORM_NAMES <- c(
   'epyc' = 'AMD\n(EPYC 9645)',
   'granite-rapids' = 'Intel Xeon\n(Granite Rapids)',
   'graviton' = 'ARM\n(AWS Graviton4)',
-  'macbook' = 'ARM\n(Apple M2 Pro)'
+  'macbook' = 'ARM\n(Apple M2 Max)'
 )
 
 PLATFORM_ORDER <- c('graviton', 'macbook', 'granite-rapids', 'epyc')
