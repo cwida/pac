@@ -43,8 +43,8 @@ src/aggregates/pac_min_max.cpp
     src/query_processing/pac_expression_builder.cpp
     src/query_processing/pac_plan_traversal.cpp
     src/query_processing/pac_projection_propagation.cpp
-    src/query_processing/pac_join_builder.cpp
     src/query_processing/pac_fk_resolver.cpp
+    src/compiler/pac_bitslice_add_fkjoins.cpp
     src/query_processing/pac_subquery_handler.cpp
     src/parser/pac_parser.cpp
     src/parser/pac_parser_helpers.cpp

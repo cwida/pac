@@ -50,8 +50,14 @@ static bool FindDirectPathToSource(LogicalOperator *current, idx_t target_table_
 		}
 	}
 
-	// Stop at nested aggregates - they have their own column scope
+	// Stop at nested aggregates - they have their own column scope.
+	// EXCEPTION: if the aggregate's group_index or aggregate_index IS the target,
+	// this aggregate is the source we're looking for (PU-key passthrough: inner agg output).
 	if (!is_start && current->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+		auto &agg = current->Cast<LogicalAggregate>();
+		if (agg.group_index == target_table_index || agg.aggregate_index == target_table_index) {
+			return true;
+		}
 		return false;
 	}
 
@@ -193,55 +199,6 @@ ColumnBinding PropagateSingleBinding(LogicalOperator &plan_root, idx_t source_ta
 	}
 
 	return current;
-}
-
-// Backward-compatible wrapper: propagates a complex hash expression (possibly with multiple bindings)
-// through the operator chain. Delegates to PropagateSingleBinding for each binding in the expression.
-unique_ptr<Expression> PropagatePKThroughProjections(LogicalOperator &plan, LogicalGet &pu_get,
-                                                     unique_ptr<Expression> hash_expr, LogicalAggregate *target_agg) {
-	ColumnBinding invalid(DConstants::INVALID_INDEX, DConstants::INVALID_INDEX);
-
-	// Extract all column references from the expression
-	struct BindingInfo {
-		ColumnBinding binding;
-		LogicalType type;
-	};
-	vector<BindingInfo> bindings;
-	ExpressionIterator::EnumerateExpression(hash_expr, [&](Expression &expr) {
-		if (expr.type == ExpressionType::BOUND_COLUMN_REF) {
-			auto &col_ref = expr.Cast<BoundColumnRefExpression>();
-			bindings.push_back({col_ref.binding, col_ref.return_type});
-		}
-	});
-
-	// Propagate each binding individually and build replacement map
-	auto binding_key = [](const ColumnBinding &b) -> uint64_t {
-		return (static_cast<uint64_t>(b.table_index) << 32) | static_cast<uint64_t>(b.column_index);
-	};
-	std::unordered_map<uint64_t, ColumnBinding> replacement_map;
-
-	for (auto &info : bindings) {
-		auto result = PropagateSingleBinding(plan, pu_get.table_index, info.binding, info.type, target_agg);
-		if (result.table_index == DConstants::INVALID_INDEX) {
-			return nullptr;
-		}
-		replacement_map[binding_key(info.binding)] = result;
-	}
-
-	// Update all bindings in the expression copy
-	auto updated = hash_expr->Copy();
-	ExpressionIterator::EnumerateExpression(updated, [&](Expression &expr) {
-		if (expr.type == ExpressionType::BOUND_COLUMN_REF) {
-			auto &col_ref = expr.Cast<BoundColumnRefExpression>();
-			auto key = binding_key(col_ref.binding);
-			auto it = replacement_map.find(key);
-			if (it != replacement_map.end()) {
-				col_ref.binding = it->second;
-			}
-		}
-	});
-
-	return updated;
 }
 
 } // namespace duckdb

@@ -45,13 +45,6 @@ vector<string> FindFKColumnsToPU(const PACCompatibilityResult &check, const stri
 LogicalGet *FindAccessibleGetInSubtree(unique_ptr<LogicalOperator> &plan, LogicalOperator *subtree_root,
                                        const string &table_name);
 
-// Insert a hash projection above a LogicalGet, propagate the hash binding to a target
-// aggregate, and transform the aggregate's expressions to PAC functions.
-// Returns true on success, false if propagation fails (caller should try alternative path).
-bool InsertHashAndTransformAggregate(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan, LogicalGet &get,
-                                     const vector<string> &key_cols, bool use_rowid, LogicalAggregate *target_agg,
-                                     std::unordered_map<idx_t, ColumnBinding> &hash_cache);
-
 } // namespace duckdb
 
 #endif // PAC_COMPILER_HELPERS_HPP

@@ -9,6 +9,7 @@
 #include "duckdb/optimizer/optimizer_extension.hpp"
 #include "duckdb/planner/logical_operator.hpp"
 #include "metadata/pac_compatibility_check.hpp"
+#include "query_processing/pac_plan_traversal.hpp"
 
 namespace duckdb {
 
@@ -22,16 +23,11 @@ void AddPKColumns(LogicalGet &get, const vector<string> &pks);
 void PopulateGetsFromFKPath(const PACCompatibilityResult &check, vector<string> &gets_present,
                             vector<string> &gets_missing, string &start_table_out, vector<string> &target_pus_out);
 
-// Modify plan when the privacy unit table is present in the plan (case a)
+// Unified aggregate transformation: builds hash expressions from PU/FK tables and
+// transforms aggregates to use PAC functions. Works for both direct-PU and FK-joined plans.
 void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
-                      const vector<string> &pu_table_names, const PACCompatibilityResult &check);
-
-// Modify plan when the privacy unit table is NOT present (case b) - partial implementation
-// fk_path: ordered vector of table names from start -> ... -> privacy_unit (inclusive)
-void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtensionInput &input,
-                         unique_ptr<LogicalOperator> &plan, const vector<string> &gets_missing,
-                         const vector<string> &gets_present, const vector<string> &fk_path,
-                         const vector<string> &privacy_units);
+                      const vector<string> &pu_table_names, const PACCompatibilityResult &check,
+                      const CTETableMap &cte_map);
 
 // Bitslice-style PAC compiler entrypoint
 void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExtensionInput &input,

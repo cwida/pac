@@ -360,19 +360,4 @@ LogicalGet *FindAccessibleGetInSubtree(unique_ptr<LogicalOperator> &plan, Logica
 	return nullptr;
 }
 
-// Insert hash projection, propagate to aggregate, and transform aggregate with PAC functions.
-bool InsertHashAndTransformAggregate(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan, LogicalGet &get,
-                                     const vector<string> &key_cols, bool use_rowid, LogicalAggregate *target_agg,
-                                     std::unordered_map<idx_t, ColumnBinding> &hash_cache) {
-	auto hash_binding = GetOrInsertHashProjection(input, plan, get, key_cols, use_rowid, hash_cache);
-	auto propagated =
-	    PropagateSingleBinding(*plan, hash_binding.table_index, hash_binding, LogicalType::UBIGINT, target_agg);
-	if (propagated.table_index == DConstants::INVALID_INDEX) {
-		return false;
-	}
-	unique_ptr<Expression> hash_input_expr = make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT, propagated);
-	ModifyAggregatesWithPacFunctions(input, target_agg, hash_input_expr, plan);
-	return true;
-}
-
 } // namespace duckdb

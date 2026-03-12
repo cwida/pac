@@ -30,16 +30,4 @@ struct OptimizerExtensionInput;
 ColumnBinding PropagateSingleBinding(LogicalOperator &plan_root, idx_t source_table_index, ColumnBinding source_binding,
                                      const LogicalType &source_type, LogicalAggregate *target_agg);
 
-/**
- * PropagatePKThroughProjections: Backward-compatible wrapper that propagates a complex hash
- * expression (possibly with multiple column bindings) through intermediate operators.
- *
- * Delegates to PropagateSingleBinding for each binding in the expression, then updates
- * the expression's column references with the new bindings.
- *
- * Returns nullptr if propagation fails for any binding.
- */
-unique_ptr<Expression> PropagatePKThroughProjections(LogicalOperator &plan, LogicalGet &pu_get,
-                                                     unique_ptr<Expression> hash_expr, LogicalAggregate *target_agg);
-
 } // namespace duckdb

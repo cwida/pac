@@ -54,6 +54,9 @@ unique_ptr<LogicalOperator> *FindNodeRefByTable(unique_ptr<LogicalOperator> *roo
 // Check if an operator has any leaf data source nodes (base table scans or CTE refs) in its subtree.
 bool HasBaseTableInSubtree(LogicalOperator *op);
 
+// Check if a specific node pointer exists anywhere in the subtree.
+bool HasNodeInSubtree(LogicalOperator *op, LogicalOperator *target);
+
 // Check if an operator has a specific table (by name) in its subtree.
 // Returns true if there's a LogicalGet for the given table name in the subtree.
 bool HasTableInSubtree(LogicalOperator *op, const string &table_name);
@@ -125,7 +128,7 @@ bool AreTableColumnsAccessible(LogicalOperator *from_op, idx_t table_index);
 
 // Find the inner aggregate (child of target_agg) that groups by PU key.
 // Returns the inner aggregate and the column binding of the PU key group column in its output.
-// This is used for the Q13 pattern where inner aggregate groups by PU key and outer aggregate
+// This is used for the PU-key passthrough pattern where inner aggregate groups by PU key and outer aggregate
 // needs to use that group column as the hash input.
 // @param target_agg - The outer aggregate that was selected for transformation
 // @param check - PACCompatibilityResult containing table metadata

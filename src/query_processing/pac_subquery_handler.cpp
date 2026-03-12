@@ -11,6 +11,7 @@
 #include "query_processing/pac_subquery_handler.hpp"
 #include "pac_debug.hpp"
 #include "query_processing/pac_expression_builder.hpp"
+#include "query_processing/pac_plan_traversal.hpp"
 #include "duckdb/planner/operator/logical_join.hpp"
 #include "duckdb/planner/operator/logical_delim_get.hpp"
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
@@ -96,19 +97,6 @@ static ColumnBinding EnsureBindingFlowsThroughRecursive(LogicalOperator *op, idx
 static ColumnBinding EnsureBindingFlowsThrough(LogicalOperator *target_op, idx_t source_table_index,
                                                ColumnBinding source_binding, const LogicalType &source_type) {
 	return EnsureBindingFlowsThroughRecursive(target_op, source_table_index, source_binding, source_type);
-}
-
-// Check if a specific node pointer exists anywhere in the subtree.
-static bool HasNodeInSubtree(LogicalOperator *op, LogicalOperator *target) {
-	if (op == target) {
-		return true;
-	}
-	for (auto &child : op->children) {
-		if (HasNodeInSubtree(child.get(), target)) {
-			return true;
-		}
-	}
-	return false;
 }
 
 // Check if a subtree contains an operator (GET or PROJECTION) with the given table_index.

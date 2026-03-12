@@ -202,7 +202,7 @@ HAVING SUM(o.amount) > 5
 ORDER BY o.grp, o.id
 LIMIT 2;
 ----
-0	6	0
+0	6	124
 0	24	0
 
 # ==============================================================================
@@ -300,9 +300,9 @@ FROM (
 GROUP BY grp
 ORDER BY grp;
 ----
-0	NULL
-1	NULL
-2	NULL
+0	32
+1	24
+2	36
 
 # ==============================================================================
 # Test 14: Extreme depth - Full 4-level chain aggregation

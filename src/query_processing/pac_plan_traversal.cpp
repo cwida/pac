@@ -555,7 +555,7 @@ vector<LogicalAggregate *> FilterTargetAggregates(const vector<LogicalAggregate 
 }
 
 // Check if a specific node pointer exists anywhere in the subtree.
-static bool HasNodeInSubtree(LogicalOperator *op, LogicalOperator *target) {
+bool HasNodeInSubtree(LogicalOperator *op, LogicalOperator *target) {
 	if (op == target) {
 		return true;
 	}
@@ -880,7 +880,7 @@ vector<LogicalAggregate *> FilterTargetAggregatesWithPUKeyCheck(const vector<Log
 
 		// CTE boundary pattern: check if this aggregate reaches target tables only
 		// through CTE_SCAN (not direct scans). If so, find the CTE definition's aggregate
-		// and decide which one to noise based on Q13 pattern logic.
+		// and decide which one to noise based on PU-key passthrough logic.
 		if (!cte_map.empty()) {
 			bool has_direct_target = false;
 			for (auto &table_name : target_table_names) {
@@ -906,7 +906,7 @@ vector<LogicalAggregate *> FilterTargetAggregatesWithPUKeyCheck(const vector<Log
 					if (other_has_direct) {
 						if (AggregateGroupsByPUKey(other_agg, check, privacy_units)) {
 							// CTE definition groups by PU key → can't noise it.
-							// Include outer aggregate instead (Q13 across CTE boundary).
+							// Include outer aggregate instead (PU-key passthrough across CTE boundary).
 							skip_aggregates.insert(other_agg);
 							include_outer_aggregates.insert(agg);
 						} else {

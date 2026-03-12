@@ -61,9 +61,11 @@ unique_ptr<Expression> BindPacAggregate(OptimizerExtensionInput &input, const st
 unique_ptr<Expression> BindBitOrAggregate(OptimizerExtensionInput &input, unique_ptr<Expression> hash_expr,
                                           unique_ptr<Expression> filter_col_expr);
 
-// Modify aggregate expressions to use PAC functions (replaces the aggregate loop logic)
+// Modify aggregate expressions to use PAC functions (replaces the aggregate loop logic).
+// correction: multiplicative factor for multi-PU queries (2^(m-1) where m = number of PUs).
 void ModifyAggregatesWithPacFunctions(OptimizerExtensionInput &input, LogicalAggregate *agg,
-                                      unique_ptr<Expression> &hash_input_expr, unique_ptr<LogicalOperator> &plan);
+                                      unique_ptr<Expression> &hash_input_expr, unique_ptr<LogicalOperator> &plan,
+                                      double correction = 1.0);
 
 } // namespace duckdb
 

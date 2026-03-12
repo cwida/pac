@@ -973,7 +973,8 @@ static void InsertMultiBranchPreAggregation(OptimizerExtensionInput &input, uniq
  *   - Outer: No PU tables -> Regular sum(inner_result), NOT transformed
  */
 void ModifyAggregatesWithPacFunctions(OptimizerExtensionInput &input, LogicalAggregate *agg,
-                                      unique_ptr<Expression> &hash_input_expr, unique_ptr<LogicalOperator> &plan) {
+                                      unique_ptr<Expression> &hash_input_expr, unique_ptr<LogicalOperator> &plan,
+                                      double correction) {
 #if PAC_DEBUG
 	PAC_DEBUG_PRINT("ModifyAggregatesWithPacFunctions: Processing aggregate with " +
 	                std::to_string(agg->expressions.size()) + " expressions");
@@ -1088,8 +1089,12 @@ void ModifyAggregatesWithPacFunctions(OptimizerExtensionInput &input, LogicalAgg
 		}
 
 		string pac_function_name = GetPacAggregateFunctionName(function_name);
-		agg->expressions[i] =
-		    BindPacAggregate(input, pac_function_name, hash_input_expr->Copy(), std::move(value_child));
+		unique_ptr<Expression> correction_expr;
+		if (correction != 1.0) {
+			correction_expr = make_uniq_base<Expression, BoundConstantExpression>(Value::DOUBLE(correction));
+		}
+		agg->expressions[i] = BindPacAggregate(input, pac_function_name, hash_input_expr->Copy(),
+		                                       std::move(value_child), std::move(correction_expr));
 	}
 
 	agg->ResolveOperatorTypes();

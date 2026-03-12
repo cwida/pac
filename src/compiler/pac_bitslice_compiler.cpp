@@ -19,9 +19,9 @@
 #include "utils/pac_helpers.hpp"
 #include "metadata/pac_compatibility_check.hpp"
 #include "compiler/pac_compiler_helpers.hpp"
-#include "query_processing/pac_join_builder.hpp"
 #include "query_processing/pac_projection_propagation.hpp"
 #include "query_processing/pac_subquery_handler.hpp"
+#include "compiler/pac_bitslice_add_fkjoins.hpp"
 #include "categorical/pac_categorical_rewriter.hpp"
 #include "parser/pac_parser.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
@@ -33,138 +33,14 @@
 #include "duckdb/optimizer/optimizer.hpp"
 #include "duckdb/planner/binder.hpp"
 
+#include <cmath>
+
 namespace duckdb {
 
-/**
- * ModifyPlanWithoutPU: Transforms a query plan when the privacy unit (PU) table is NOT scanned directly
- *
- * PURPOSE:
- * When a query doesn't directly scan the PU table (e.g., SELECT FROM lineitem), we need to:
- * 1. Add joins to connect the scanned tables to the PU via foreign key relationships
- * 2. Build hash expressions from the FK columns that reference the PU
- * 3. Propagate these hash expressions to aggregates
- * 4. Transform aggregates to use PAC functions (pac_sum, pac_avg, etc.)
- *
- * EXAMPLE:
- * Query: SELECT SUM(l_quantity) FROM lineitem WHERE l_partkey = 100
- * FK Path: lineitem -> orders -> customer (customer is PU)
- * Missing: orders table (needs to be joined)
- * Result: lineitem JOIN orders -> compute hash(o_custkey) -> pac_sum(l_quantity, hash)
- *
- * ARGUMENTS:
- * @param check - Compatibility check result with:
- *   - table_metadata: Metadata for each table (PKs, FKs)
- *   - scanned_non_pu_tables: Tables actually scanned in the query
- *   - privacy_units: List of PU table names
- * @param input - Optimizer extension input (context, optimizer)
- * @param plan - The logical plan to modify (modified in-place)
- * @param gets_missing - Tables in FK path NOT in original query (need to be added as joins)
- * @param gets_present - Tables in FK path ALREADY in original query
- * @param fk_path - Ordered list from scanned table to PU (e.g., [lineitem, orders, customer])
- * @param privacy_units - List of PU table names (e.g., ["customer"])
- *
- * CORRELATED SUBQUERY HANDLING:
- * When a table appears in BOTH outer query AND inner subquery:
- * - We find ALL instances of the connecting table in the plan
- * - Add join chains to EACH instance independently
- * - Map each aggregate to its "closest" FK table (not crossing subquery boundaries)
- *
- * Example (TPC-H Q17):
- *   SELECT SUM(l_extendedprice) FROM lineitem l1
- *   WHERE l1.l_quantity < (
- *     SELECT AVG(l2.l_quantity) FROM lineitem l2
- *     WHERE l2.l_partkey = l1.l_partkey
- *   )
- * - Outer lineitem -> needs join to orders for outer aggregate
- * - Inner lineitem -> needs separate join to orders for inner aggregate
- * - Each aggregate gets hash from its own orders table instance
- *
- * ALGORITHM:
- * 1. Determine which tables need to be joined (filter gets_missing by FK path)
- * 2. If join_elimination enabled, skip joining PU tables themselves
- * 3. Find "connecting table" - last present table in FK path order (e.g., lineitem)
- * 4. For each instance of connecting table:
- *    a. Create fresh LogicalGet nodes for missing tables
- *    b. Build join chain: connecting_table -> table1 -> table2 -> ...
- *    c. Track table index of FK table (that references PU) for hash generation
- *    d. Replace connecting table with join chain
- * 5. Find all aggregates with FK-linked tables in their subtree
- * 6. For each aggregate:
- *    a. Determine which FK table instance it should use (closest accessible one)
- *    b. Build hash expression from FK columns referencing PU
- *    c. Propagate hash through projections
- *    d. Transform aggregate to PAC aggregate
- *
- * JOIN ELIMINATION OPTIMIZATION:
- * When enabled (pac_join_elimination=true), we skip joining the PU table itself
- * if it's only needed for the foreign key columns (not for PU data).
- * This reduces join overhead when the PU table is large.
- *
- * ACCESSIBILITY CHECKS:
- * We ensure FK table columns are ACCESSIBLE from each aggregate:
- * - Not blocked by MARK/SEMI/ANTI joins (which don't pass right-side columns)
- * - Not in a separate subquery branch (would need DELIM_GET)
- * If FK table is inaccessible, we add a fresh join to bring it into scope.
- */
-
-// Find the first aggregate in a subtree, collecting the path of operators traversed.
-// Stops at DELIM_JOIN/DEPENDENT_JOIN boundaries (correlated subquery boundaries).
-static LogicalAggregate *FindFirstChildAggregateBounded(LogicalOperator *op, vector<LogicalOperator *> &path) {
-	if (!op) {
-		return nullptr;
-	}
-	if (op->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
-		return &op->Cast<LogicalAggregate>();
-	}
-	// Don't traverse into DELIM_JOIN/DEPENDENT_JOIN (correlated subquery boundaries)
-	if (op->type == LogicalOperatorType::LOGICAL_DELIM_JOIN ||
-	    op->type == LogicalOperatorType::LOGICAL_DEPENDENT_JOIN) {
-		return nullptr;
-	}
-	path.push_back(op);
-	for (auto &c : op->children) {
-		if (auto *found = FindFirstChildAggregateBounded(c.get(), path)) {
-			return found;
-		}
-	}
-	path.pop_back();
-	return nullptr;
-}
-
-// Check if two tables share a join subtree (connected by a JOIN, not a CROSS_PRODUCT).
-// Walks from the root to find the smallest common ancestor containing both table indices.
-static bool TablesShareJoinSubtree(LogicalOperator *op, idx_t table_idx_a, idx_t table_idx_b) {
-	if (!op) {
-		return false;
-	}
-
-	bool has_a = HasTableIndexInSubtree(op, table_idx_a);
-	bool has_b = HasTableIndexInSubtree(op, table_idx_b);
-
-	if (has_a && has_b) {
-		// Both tables are in this subtree - check if they're in the SAME child
-		for (auto &child : op->children) {
-			bool child_has_a = HasTableIndexInSubtree(child.get(), table_idx_a);
-			bool child_has_b = HasTableIndexInSubtree(child.get(), table_idx_b);
-
-			if (child_has_a && child_has_b) {
-				// Both in same child - recurse to find tighter common ancestor
-				return TablesShareJoinSubtree(child.get(), table_idx_a, table_idx_b);
-			}
-		}
-		// Tables are in different children of this operator
-		// Check if this is a JOIN that connects them (valid) vs CROSS_PRODUCT (separate branches)
-		if (op->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN ||
-		    op->type == LogicalOperatorType::LOGICAL_DELIM_JOIN || op->type == LogicalOperatorType::LOGICAL_ANY_JOIN) {
-			return true;
-		}
-		return false;
-	}
-	return false;
-}
+// --- Helpers ---
 
 // Check if a table scan is directly reachable from an operator without crossing an aggregate boundary.
-// Returns false if the table is behind a nested aggregate (e.g., Q13 pattern).
+// Returns false if the table is behind a nested aggregate (e.g., PU-key passthrough pattern).
 static bool IsDirectlyReachable(LogicalOperator *from, idx_t table_index, bool is_start = true) {
 	if (!from) {
 		return false;
@@ -187,1323 +63,41 @@ static bool IsDirectlyReachable(LogicalOperator *from, idx_t table_index, bool i
 	return false;
 }
 
-// Helper function to compute required columns for a table in the FK path
-// Returns the columns needed for joining and for the PU FK reference (for hashing)
-static vector<string> GetRequiredColumnsForTable(const PACCompatibilityResult &check, const string &table_name,
-                                                 const vector<string> &fk_path, const vector<string> &privacy_units) {
-	vector<string> required_columns;
-	std::unordered_set<string> added_columns;
+// PU-key passthrough: the inner aggregate exports the PU key in its GROUP BY, so
+// it doesn't need noising itself — the outer aggregate on top gets noised instead.
+// Insert hash deep in the inner aggregate's subtree and propagate through its GROUP BY
+// to the outer (target) aggregate.
+// Returns a hash expression usable at the outer aggregate level, or nullptr on failure.
+static unique_ptr<Expression> HandlePassthroughDeepHash(OptimizerExtensionInput &input,
+                                                        unique_ptr<LogicalOperator> &plan, LogicalAggregate *target_agg,
+                                                        LogicalAggregate *inner_agg, LogicalGet &inner_get,
+                                                        const vector<string> &key_cols,
+                                                        std::unordered_map<idx_t, ColumnBinding> &hash_cache) {
+	auto inner_hash_binding = GetOrInsertHashProjection(input, plan, inner_get, key_cols, false, hash_cache);
 
-	auto it = check.table_metadata.find(table_name);
-	if (it == check.table_metadata.end()) {
-#if PAC_DEBUG
-		PAC_DEBUG_PRINT("GetRequiredColumnsForTable WARNING: No metadata for table " + table_name);
-#endif
-		return {}; // Empty = project all columns (fallback)
+	auto propagated_to_inner = PropagateSingleBinding(*plan, inner_hash_binding.table_index, inner_hash_binding,
+	                                                  LogicalType::UBIGINT, inner_agg);
+	if (propagated_to_inner.table_index == DConstants::INVALID_INDEX) {
+		return nullptr;
 	}
-
-	const auto &meta = it->second;
-
-	// 1. Add PK columns (needed for joins FROM other tables TO this table)
-	for (auto &pk : meta.pks) {
-		if (added_columns.insert(StringUtil::Lower(pk)).second) {
-			required_columns.push_back(pk);
-		}
+	// Add hash as GROUP BY column in the inner aggregate
+	idx_t new_group_idx = inner_agg->groups.size();
+	inner_agg->groups.push_back(make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT, propagated_to_inner));
+	// Also add to grouping_sets so the physical HASH_GROUP_BY includes this column
+	for (auto &gs : inner_agg->grouping_sets) {
+		gs.insert(new_group_idx);
 	}
+	inner_agg->ResolveOperatorTypes();
 
-	// 2. Add FK columns (needed for joins FROM this table TO other tables, and for PU hash)
-	for (auto &fk_pair : meta.fks) {
-		const string &referenced_table = fk_pair.first;
-		const vector<string> &fk_cols = fk_pair.second;
+	ColumnBinding inner_hash_output(inner_agg->group_index, inner_agg->groups.size() - 1);
 
-		// Check if this FK references a table in the FK path or a privacy unit
-		bool is_relevant = false;
-		for (auto &path_table : fk_path) {
-			if (StringUtil::Lower(path_table) == StringUtil::Lower(referenced_table)) {
-				is_relevant = true;
-				break;
-			}
-		}
-		if (!is_relevant) {
-			for (auto &pu : privacy_units) {
-				if (StringUtil::Lower(pu) == StringUtil::Lower(referenced_table)) {
-					is_relevant = true;
-					break;
-				}
-			}
-		}
-
-		if (is_relevant) {
-			for (auto &fk_col : fk_cols) {
-				if (added_columns.insert(StringUtil::Lower(fk_col)).second) {
-					required_columns.push_back(fk_col);
-				}
-			}
-		}
+	// Propagate from inner aggregate output to outer aggregate
+	auto propagated_to_outer = PropagateSingleBinding(*plan, inner_hash_output.table_index, inner_hash_output,
+	                                                  LogicalType::UBIGINT, target_agg);
+	if (propagated_to_outer.table_index == DConstants::INVALID_INDEX) {
+		return nullptr;
 	}
-
-	// 3. Add columns that are REFERENCED BY other tables' FKs (needed for incoming joins)
-	// For example, if lineitem has FK l_orderkey -> orders.o_orderkey, then orders needs o_orderkey
-	string table_name_lower = StringUtil::Lower(table_name);
-	for (auto &path_table : fk_path) {
-		if (StringUtil::Lower(path_table) == table_name_lower) {
-			continue; // Skip self
-		}
-		auto other_it = check.table_metadata.find(path_table);
-		if (other_it == check.table_metadata.end()) {
-			continue;
-		}
-		const auto &other_meta = other_it->second;
-		for (auto &other_fk_pair : other_meta.fks) {
-			// Check if this FK from path_table references our table
-			if (StringUtil::Lower(other_fk_pair.first) == table_name_lower) {
-				// The FK columns from the other table reference columns in our table
-				// We need to find which columns in our table they reference
-				// This info is in PAC LINK metadata (referenced_columns)
-				auto &metadata_mgr = PACMetadataManager::Get();
-				auto *other_pac_metadata = metadata_mgr.GetTableMetadata(path_table);
-				if (other_pac_metadata) {
-					for (auto &link : other_pac_metadata->links) {
-						if (StringUtil::Lower(link.referenced_table) == table_name_lower &&
-						    link.local_columns == other_fk_pair.second && !link.referenced_columns.empty()) {
-							// Add the referenced columns from our table
-							for (auto &ref_col : link.referenced_columns) {
-								if (added_columns.insert(StringUtil::Lower(ref_col)).second) {
-									required_columns.push_back(ref_col);
-								}
-							}
-							break;
-						}
-					}
-				}
-			}
-		}
-	}
-
-#if PAC_DEBUG
-	if (!required_columns.empty()) {
-		string cols_str;
-		for (auto &col : required_columns) {
-			if (!cols_str.empty()) {
-				cols_str += ", ";
-			}
-			cols_str += col;
-		}
-		PAC_DEBUG_PRINT("GetRequiredColumnsForTable: Table " + table_name + " requires columns: [" + cols_str + "]");
-	}
-#endif
-
-	return required_columns;
-}
-
-void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtensionInput &input,
-                         unique_ptr<LogicalOperator> &plan, const vector<string> &gets_missing,
-                         const vector<string> &gets_present, const vector<string> &fk_path,
-                         const vector<string> &privacy_units, const CTETableMap &cte_map) {
-	// Note: all PU tables must have PAC_KEY defined
-
-	// Check if join elimination is enabled
-	bool join_elimination = GetBooleanSetting(input.context, "pac_join_elimination", false);
-
-	// Create the necessary LogicalGets for missing tables
-	// IMPORTANT: We need to preserve the FK path ordering when creating joins
-	// Use fk_path as the canonical ordering, filter to only missing tables
-	std::unordered_set<string> missing_set(gets_missing.begin(), gets_missing.end());
-
-	// If join elimination is enabled, skip the PU tables themselves
-	// We only need the FK-linked table (e.g., orders), not the PU (e.g., customer)
-	if (join_elimination) {
-		for (auto &pu : privacy_units) {
-			missing_set.erase(pu);
-		}
-	}
-
-	// Check if any "missing" tables are actually already present in the plan
-	// This can happen with correlated subqueries where the FK path starts from a subquery table
-	// but the outer query already has the connecting table
-	std::unordered_set<string> actually_present;
-	for (auto &table : missing_set) {
-		if (FindNodeRefByTable(&plan, table) != nullptr) {
-			actually_present.insert(table);
-		}
-	}
-
-	// Remove actually present tables from missing_set
-	for (auto &table : actually_present) {
-		missing_set.erase(table);
-	}
-
-	std::unordered_map<string, unique_ptr<LogicalGet>> get_map;
-	vector<string> ordered_table_names;
-	// Track tables that were marked as missing but are actually present - these can serve as connection points
-	vector<string> actually_present_in_fk_order;
-	auto &binder = input.optimizer.binder;
-
-	// Build ordered_table_names based on fk_path order, only including missing tables
-	for (auto &table : fk_path) {
-		if (missing_set.find(table) != missing_set.end()) {
-			auto it = check.table_metadata.find(table);
-			if (it == check.table_metadata.end()) {
-				throw InvalidInputException("PAC compiler: missing table metadata for missing GET: " + table);
-			}
-			vector<string> pks = it->second.pks;
-			// Get required columns for this table (PKs and relevant FKs)
-			auto required_cols = GetRequiredColumnsForTable(check, table, fk_path, privacy_units);
-			idx_t idx = binder.GenerateTableIndex();
-			auto get = CreateLogicalGet(input.context, plan, table, idx, required_cols);
-			get_map[table] = std::move(get);
-			ordered_table_names.push_back(table);
-		} else if (actually_present.find(table) != actually_present.end()) {
-			// Track the order of already-present tables in the FK path
-			actually_present_in_fk_order.push_back(table);
-		}
-	}
-
-	// Find the unique_ptr reference to the existing table that connects to the missing tables
-	// There are TWO different scenarios:
-	// 1. When there ARE missing tables to join: use the LAST present table in FK path order
-	//    (it's adjacent to the first missing table)
-	// 2. When there are NO missing tables: use the FIRST present table in FK path order
-	//    (it's the leaf table that may appear in subqueries and need joins to the FK table)
-
-	// Determine which present table should be the "connecting table" for adding joins
-	string connecting_table_for_joins;   // First present - for finding nodes that need joins added
-	string connecting_table_for_missing; // Last present - for connecting to missing tables
-
-	if (!fk_path.empty()) {
-		for (auto &table_in_path : fk_path) {
-			bool is_present = false;
-			for (auto &present : gets_present) {
-				if (table_in_path == present) {
-					is_present = true;
-					break;
-				}
-			}
-			if (is_present) {
-				if (connecting_table_for_joins.empty()) {
-					connecting_table_for_joins = table_in_path; // First present table
-				}
-				connecting_table_for_missing = table_in_path; // Keep updating to get last present
-			}
-		}
-	}
-
-	// Fallback: if no connecting table found in FK path, use any present table
-	if (connecting_table_for_joins.empty() && !gets_present.empty()) {
-		connecting_table_for_joins = gets_present[0];
-	}
-	if (connecting_table_for_missing.empty() && !gets_present.empty()) {
-		connecting_table_for_missing = gets_present[0];
-	}
-	if (connecting_table_for_joins.empty() && !check.scanned_non_pu_tables.empty()) {
-		connecting_table_for_joins = check.scanned_non_pu_tables[0];
-	}
-	if (connecting_table_for_missing.empty() && !check.scanned_non_pu_tables.empty()) {
-		connecting_table_for_missing = check.scanned_non_pu_tables[0];
-	}
-
-	// Decide which connecting table to use based on whether there are missing tables
-	// If there are missing tables, we iterate over the LAST present table to add joins to missing tables
-	// If there are NO missing tables, we iterate over the FIRST present table to add FK joins for subqueries
-	string connecting_table = ordered_table_names.empty() ? connecting_table_for_joins : connecting_table_for_missing;
-
-	// Find ALL instances of the connecting table (for correlated subqueries, there may be multiple)
-	// Example: In TPC-H Q17, lineitem appears in both outer query and subquery
-	vector<unique_ptr<LogicalOperator> *> all_connecting_nodes;
-	if (!connecting_table.empty()) {
-		FindAllNodesByTable(&plan, connecting_table, all_connecting_nodes);
-	}
-
-	// If no connecting nodes found, we may be in a case where the query scans a leaf table
-	// that's not directly in gets_present but is in the FK chain
-	if (all_connecting_nodes.empty() && !gets_present.empty()) {
-		// Try to find any present table in the plan
-		for (auto &present : gets_present) {
-			FindAllNodesByTable(&plan, present, all_connecting_nodes);
-			if (!all_connecting_nodes.empty()) {
-				connecting_table = present;
-				break;
-			}
-		}
-	}
-
-	if (all_connecting_nodes.empty() && !connecting_table.empty()) {
-		throw InvalidInputException("PAC compiler: could not find any LogicalGet for table " + connecting_table);
-	}
-
-	if (all_connecting_nodes.empty()) {
-		throw InvalidInputException("PAC compiler: could not find any connecting table in the plan");
-	}
-
-	// For each instance of the connecting table, add the join chain
-	// Store the mapping from each instance to its corresponding FK table (e.g., orders) for hash generation
-	// This is critical for correlated subqueries: each instance gets its own FK table join
-	std::unordered_map<idx_t, idx_t> connecting_table_to_orders_table;
-
-	// First, find the FK table that has FK to PU (e.g., orders -> customer)
-	// This is the table whose FK columns we'll hash
-	string fk_table_with_pu_reference;
-	for (auto &table : fk_path) {
-		if (!FindFKColumnsToPU(check, table, privacy_units).empty()) {
-			fk_table_with_pu_reference = table;
-			break;
-		}
-	}
-
-	// Iterate over each instance of the connecting table and add joins
-	for (auto *target_ref : all_connecting_nodes) {
-		// Get the table index of this instance
-		auto &target_op = (*target_ref)->Cast<LogicalGet>();
-		idx_t connecting_table_idx = target_op.table_index;
-
-		// Check if this connecting table instance is inside a DELIM_JOIN subquery branch
-		// If so, we MAY need to add a join to the FK table - BUT only if the FK table
-		// is not already directly accessible in the outer query WITHOUT going through
-		// a join with the connecting table
-		bool is_in_subquery = IsInDelimJoinSubqueryBranch(&plan, target_ref->get());
-
-		// Determine which tables need to be joined for THIS instance
-		vector<string> tables_to_join_for_instance = ordered_table_names;
-
-		// SUBQUERY SPECIAL CASE:
-		// For subquery instances, check if we need to add a join to the FK table
-		// even though it's "present" in outer query
-		if (is_in_subquery && !fk_table_with_pu_reference.empty() &&
-		    std::find(ordered_table_names.begin(), ordered_table_names.end(), fk_table_with_pu_reference) ==
-		        ordered_table_names.end()) {
-			// The FK table is not in the join list (because it's "present" in outer query)
-			//
-			// We should ONLY skip adding the join if:
-			// 1. The FK table is in the outer query AND
-			// 2. The connecting table is NOT in the outer query (meaning outer query scans FK table directly)
-			//
-			// If BOTH the FK table AND connecting table are in the outer query, the subquery
-			// still needs its own FK join because:
-			// - The outer query has: connecting_table JOIN fk_table
-			// - The subquery has: connecting_table (correlated with outer connecting_table)
-			// - The subquery needs its own fk_table join to get the FK columns for each row
-
-			// IMPORTANT: If the connecting table IS the FK table, we don't need to add a join
-			// (we can't join a table to itself via FK relationship)
-			if (connecting_table == fk_table_with_pu_reference) {
-				// The connecting table already IS the FK table - no join needed
-				// Just map it to itself for hash generation
-				connecting_table_to_orders_table[connecting_table_idx] = connecting_table_idx;
-#if PAC_DEBUG
-				PAC_DEBUG_PRINT("ModifyPlanWithoutPU: Connecting table #" + std::to_string(connecting_table_idx) +
-				                " is already the FK table (" + fk_table_with_pu_reference + "), no join needed");
-#endif
-			} else {
-				vector<unique_ptr<LogicalOperator> *> fk_nodes;
-				FindAllNodesByTable(&plan, fk_table_with_pu_reference, fk_nodes);
-
-				bool fk_in_outer_query = false;
-				for (auto *fk_node : fk_nodes) {
-					if (!IsInDelimJoinSubqueryBranch(&plan, fk_node->get())) {
-						fk_in_outer_query = true;
-						break;
-					}
-				}
-
-				// Check if the connecting table is ALSO in the outer query
-				bool connecting_table_in_outer = false;
-				for (auto *conn_node : all_connecting_nodes) {
-					if (!IsInDelimJoinSubqueryBranch(&plan, conn_node->get())) {
-						connecting_table_in_outer = true;
-						break;
-					}
-				}
-
-				// Only skip adding FK join if:
-				// - FK table is in outer query AND
-				// - Connecting table is NOT in outer query (outer scans FK table directly)
-				// This means the subquery can access FK columns via DELIM_GET
-				bool can_use_delim_get = fk_in_outer_query && !connecting_table_in_outer;
-
-				if (!can_use_delim_get) {
-					// Need to add FK join for this subquery instance
-					tables_to_join_for_instance.push_back(fk_table_with_pu_reference);
-#if PAC_DEBUG
-					PAC_DEBUG_PRINT("ModifyPlanWithoutPU: Adding " + fk_table_with_pu_reference +
-					                " join for subquery instance #" + std::to_string(connecting_table_idx));
-#endif
-				}
-#if PAC_DEBUG
-				else {
-					PAC_DEBUG_PRINT("ModifyPlanWithoutPU: FK table " + fk_table_with_pu_reference +
-					                " accessible via DELIM_GET for subquery instance #" +
-					                std::to_string(connecting_table_idx));
-				}
-#endif
-			}
-		}
-
-		// Only create joins if there are tables to join for this instance
-		if (!tables_to_join_for_instance.empty()) {
-			unique_ptr<LogicalOperator> existing_node = (*target_ref)->Copy(input.context);
-
-			// Create fresh LogicalGet nodes for this instance
-			std::unordered_map<string, unique_ptr<LogicalGet>> local_get_map;
-
-			for (auto &table : tables_to_join_for_instance) {
-				auto it = check.table_metadata.find(table);
-				if (it == check.table_metadata.end()) {
-					throw InvalidInputException("PAC compiler: missing table metadata for table: " + table);
-				}
-				vector<string> pks = it->second.pks;
-				// Get required columns for this table (PKs and relevant FKs)
-				auto required_cols = GetRequiredColumnsForTable(check, table, fk_path, privacy_units);
-				idx_t local_idx = binder.GenerateTableIndex();
-				auto get = CreateLogicalGet(input.context, plan, table, local_idx, required_cols);
-
-				// Remember the table index of the FK table for this instance
-				if (table == fk_table_with_pu_reference) {
-					connecting_table_to_orders_table[connecting_table_idx] = local_idx;
-				}
-
-				local_get_map[table] = std::move(get);
-			}
-			unique_ptr<LogicalOperator> final_join = ChainJoinsFromGetMap(
-			    check, input.context, std::move(existing_node), local_get_map, tables_to_join_for_instance);
-			// Replace this instance with the join chain
-			ReplaceNode(plan, *target_ref, final_join, &binder);
-		} else {
-			// No tables to join - the FK-linked table (e.g., orders) must already be in the plan
-			// and this instance can access it directly (not in a subquery branch)
-			// Find it and map the connecting table to it
-			// Search BOTH gets_present AND actually_present tables (tables marked missing but found in plan)
-			// IMPORTANT: We must find an FK table that is in the SAME SUBTREE as the connecting table,
-			// not just any accessible FK table. This is crucial for queries with multiple branches
-			// (e.g., CROSS_PRODUCT with different aggregates in each branch).
-			vector<string> all_present_tables;
-			all_present_tables.insert(all_present_tables.end(), gets_present.begin(), gets_present.end());
-			all_present_tables.insert(all_present_tables.end(), actually_present.begin(), actually_present.end());
-
-			bool found_accessible_fk_table = false;
-
-			// First, find the common ancestor of this connecting table in the plan
-			// We need to find an FK table that shares a subtree with this connecting table
-			for (auto &present_table : all_present_tables) {
-				// Check if this present table has an FK to the PU
-				if (!FindFKColumnsToPU(check, present_table, privacy_units).empty()) {
-					// This is the table we need for hashing - find its table index
-					vector<unique_ptr<LogicalOperator> *> fk_table_nodes;
-					FindAllNodesByTable(&plan, present_table, fk_table_nodes);
-					if (fk_table_nodes.empty()) {
-						continue;
-					}
-					// Find an FK table instance that is in the same subtree as the connecting table
-					// This is done by checking if BOTH tables are reachable from some common ancestor
-					for (auto *fk_node : fk_table_nodes) {
-						auto &fk_table_get = fk_node->get()->Cast<LogicalGet>();
-						idx_t fk_table_idx = fk_table_get.table_index;
-
-						// IMPORTANT: If the FK table IS the connecting table (same index),
-						// they trivially share a subtree - just map it to itself
-						if (fk_table_idx == connecting_table_idx) {
-							if (AreTableColumnsAccessible(plan.get(), fk_table_idx)) {
-								connecting_table_to_orders_table[connecting_table_idx] = fk_table_idx;
-#if PAC_DEBUG
-								PAC_DEBUG_PRINT("ModifyPlanWithoutPU: Connecting table #" +
-								                std::to_string(connecting_table_idx) +
-								                " IS the FK table - mapping to itself");
-#endif
-								found_accessible_fk_table = true;
-								break;
-							}
-							continue;
-						}
-
-						// Check if this FK table is in the same subtree as the connecting table
-						// by finding a common ancestor that has both table indices in its subtree
-						bool shares_subtree = TablesShareJoinSubtree(plan.get(), connecting_table_idx, fk_table_idx);
-
-						// Also verify the FK table's columns are accessible (not blocked by MARK/SEMI/ANTI)
-						if (shares_subtree && AreTableColumnsAccessible(plan.get(), fk_table_idx)) {
-							// Map connecting table to this FK table instance
-							connecting_table_to_orders_table[connecting_table_idx] = fk_table_idx;
-#if PAC_DEBUG
-							PAC_DEBUG_PRINT("ModifyPlanWithoutPU: Mapped connecting table #" +
-							                std::to_string(connecting_table_idx) + " to FK table " + present_table +
-							                " #" + std::to_string(fk_table_idx) + " for hashing (same subtree)");
-#endif
-							found_accessible_fk_table = true;
-							break;
-						}
-#if PAC_DEBUG
-						else {
-							PAC_DEBUG_PRINT(
-							    "ModifyPlanWithoutPU: FK table " + present_table + " #" + std::to_string(fk_table_idx) +
-							    " is NOT in same subtree as connecting table #" + std::to_string(connecting_table_idx));
-						}
-#endif
-					}
-					if (found_accessible_fk_table) {
-						break;
-					}
-				}
-			}
-
-			// If no accessible FK table was found, we need to add a join to bring in the FK table
-			// on the accessible (left) side of the query
-			if (!found_accessible_fk_table && !fk_table_with_pu_reference.empty()) {
-				// We need to join through ALL intermediate tables in the FK chain
-				// to reach the FK table with PU reference.
-				// Example: shipments -> order_items -> orders (FK to users)
-				// We can't just join shipments directly to orders - we need order_items in between.
-
-				// Find the connecting table's position in the FK path
-				string connecting_table_name;
-				auto table_ptr = target_op.GetTable();
-				if (table_ptr) {
-					connecting_table_name = table_ptr->name;
-				}
-
-				// IMPORTANT: If the connecting table IS the FK table with PU reference,
-				// we need to check if its columns are actually accessible.
-				// If blocked by SEMI/ANTI join, we need to find an accessible table and add a join from there.
-				if (connecting_table_name == fk_table_with_pu_reference) {
-					// Check if this table's columns are accessible
-					if (AreTableColumnsAccessible(plan.get(), connecting_table_idx)) {
-						// Columns are accessible - no join needed
-						connecting_table_to_orders_table[connecting_table_idx] = connecting_table_idx;
-#if PAC_DEBUG
-						PAC_DEBUG_PRINT(
-						    "ModifyPlanWithoutPU: Connecting table #" + std::to_string(connecting_table_idx) + " (" +
-						    connecting_table_name +
-						    ") IS the FK table with PU reference and columns are accessible, no join needed");
-#endif
-						continue; // Skip to next connecting table instance
-					}
-#if PAC_DEBUG
-					PAC_DEBUG_PRINT("ModifyPlanWithoutPU: Connecting table #" + std::to_string(connecting_table_idx) +
-					                " (" + connecting_table_name +
-					                ") IS the FK table but columns are NOT accessible (blocked by SEMI/ANTI join)");
-#endif
-					// Columns are NOT accessible - we need to find an accessible table that has
-					// a PAC LINK (FK) to the blocked FK table, and add a join from there.
-					// Search in ALL scanned tables for tables that have FK to the blocked table.
-					bool found_accessible_alternative = false;
-
-					// Build list of all scanned tables to search
-					vector<string> all_scanned_tables;
-					all_scanned_tables.insert(all_scanned_tables.end(), gets_present.begin(), gets_present.end());
-					all_scanned_tables.insert(all_scanned_tables.end(), check.scanned_non_pu_tables.begin(),
-					                          check.scanned_non_pu_tables.end());
-
-					for (auto &present_table : all_scanned_tables) {
-						if (present_table == fk_table_with_pu_reference) {
-							continue; // Skip the blocked table itself
-						}
-
-						// Check if this present table has an FK to the blocked FK table
-						auto it = check.table_metadata.find(present_table);
-						if (it == check.table_metadata.end()) {
-							continue;
-						}
-
-						bool has_fk_to_blocked = false;
-						for (auto &fk : it->second.fks) {
-							if (fk.first == fk_table_with_pu_reference) {
-								has_fk_to_blocked = true;
-								break;
-							}
-						}
-
-						if (!has_fk_to_blocked) {
-							continue;
-						}
-
-						// Found a table with FK to the blocked table - check if it's accessible
-						vector<unique_ptr<LogicalOperator> *> table_nodes;
-						FindAllNodesByTable(&plan, present_table, table_nodes);
-
-						for (auto *table_node : table_nodes) {
-							auto &table_get = table_node->get()->Cast<LogicalGet>();
-							if (AreTableColumnsAccessible(plan.get(), table_get.table_index)) {
-								// Found an accessible table with FK to the blocked FK table
-								// Add a join from this table to the FK table
-#if PAC_DEBUG
-								PAC_DEBUG_PRINT("ModifyPlanWithoutPU: Found accessible table " + present_table + " #" +
-								                std::to_string(table_get.table_index) +
-								                " with FK to blocked table - adding join to " +
-								                fk_table_with_pu_reference);
-#endif
-								unique_ptr<LogicalOperator> current_node = (*table_node)->Copy(input.context);
-								auto local_idx = binder.GenerateTableIndex();
-
-								// Create a join to the FK table
-								// Get required columns for this table (PKs and relevant FKs)
-								auto required_cols = GetRequiredColumnsForTable(check, fk_table_with_pu_reference,
-								                                                fk_path, privacy_units);
-								auto new_get = CreateLogicalGet(input.context, plan, fk_table_with_pu_reference,
-								                                local_idx, required_cols);
-								idx_t fk_table_idx = local_idx;
-
-								auto join = CreateLogicalJoin(check, input.context, std::move(current_node),
-								                              std::move(new_get));
-
-								// Map the accessible table to the new FK table instance
-								connecting_table_to_orders_table[table_get.table_index] = fk_table_idx;
-
-								ReplaceNode(plan, *table_node, join, &binder);
-								found_accessible_alternative = true;
-								break;
-							}
-						}
-
-						if (found_accessible_alternative) {
-							break;
-						}
-					}
-
-					if (found_accessible_alternative) {
-						continue; // Move to next connecting table instance
-					}
-
-					// If still not found, this connecting table instance simply cannot be used
-					// for PAC transformation - skip it (don't throw an exception, as other
-					// code paths may handle this aggregate differently)
-#if PAC_DEBUG
-					PAC_DEBUG_PRINT("ModifyPlanWithoutPU: No accessible alternative found for blocked FK table " +
-					                fk_table_with_pu_reference + " - skipping this connecting table instance");
-#endif
-					continue;
-				}
-
-				// Build list of tables we need to join to reach fk_table_with_pu_reference
-				vector<string> tables_to_add;
-				bool found_connecting = false;
-				bool found_fk_table = false;
-
-				for (auto &table_in_path : fk_path) {
-					if (table_in_path == connecting_table_name) {
-						found_connecting = true;
-						continue; // Skip the connecting table itself
-					}
-					if (found_connecting && !found_fk_table) {
-						tables_to_add.push_back(table_in_path);
-						if (table_in_path == fk_table_with_pu_reference) {
-							found_fk_table = true;
-						}
-					}
-				}
-
-#if PAC_DEBUG
-				PAC_DEBUG_PRINT("ModifyPlanWithoutPU: No accessible FK table found, adding join chain for " +
-				                std::to_string(tables_to_add.size()) + " tables to connecting table #" +
-				                std::to_string(connecting_table_idx));
-				for (auto &t : tables_to_add) {
-					PAC_DEBUG_PRINT("  - " + t);
-				}
-#endif
-
-				if (tables_to_add.empty()) {
-					continue;
-				}
-
-				// IMPORTANT: Before adding the join chain to this connecting table,
-				// check if its columns are actually accessible from the plan root.
-				// If the connecting table is in the right branch of a SEMI/ANTI join,
-				// any columns we add via joins won't be able to propagate to the aggregate.
-				// In that case, we need to find an accessible table and add the FULL join chain there.
-				if (!AreTableColumnsAccessible(plan.get(), connecting_table_idx)) {
-#if PAC_DEBUG
-					PAC_DEBUG_PRINT("ModifyPlanWithoutPU: Connecting table #" + std::to_string(connecting_table_idx) +
-					                " (" + connecting_table_name +
-					                ") columns are NOT accessible - looking for accessible alternative");
-#endif
-					// Find an accessible table in the FK path and add the full join chain from there
-					bool found_accessible_alternative = false;
-
-					// Search all scanned tables for one that is accessible and has an FK path to the PU
-					// IMPORTANT: We must check ALL FK paths, not just the single fk_path parameter,
-					// because accessible tables might have their own FK paths (e.g., shipments -> order_items -> orders
-					// -> users)
-					for (auto &scanned_table : check.scanned_non_pu_tables) {
-						// Skip the connecting table itself - we already know it's not accessible
-						if (scanned_table == connecting_table_name) {
-							continue;
-						}
-
-						// Check if this table has its own FK path to the PU
-						auto scanned_fk_path_it = check.fk_paths.find(scanned_table);
-						if (scanned_fk_path_it == check.fk_paths.end() || scanned_fk_path_it->second.empty()) {
-							continue; // This table has no FK path to PU
-						}
-						const vector<string> &scanned_fk_path = scanned_fk_path_it->second;
-
-						// Find all instances of this table and check if any is accessible
-						vector<unique_ptr<LogicalOperator> *> table_nodes;
-						FindAllNodesByTable(&plan, scanned_table, table_nodes);
-
-						for (auto *table_node : table_nodes) {
-							auto &table_get = table_node->get()->Cast<LogicalGet>();
-							// Skip if this is actually the same node as our connecting table
-							if (table_get.table_index == connecting_table_idx) {
-								continue;
-							}
-							if (AreTableColumnsAccessible(plan.get(), table_get.table_index)) {
-								// Found an accessible table with its own FK path
-								// Build the full join chain from this table to the FK table with PU reference
-								vector<string> full_tables_to_add;
-								bool found_start = false;
-								bool found_end = false;
-
-								// Use this table's own FK path to build the join chain
-								for (auto &path_table : scanned_fk_path) {
-									if (path_table == scanned_table) {
-										found_start = true;
-										continue; // Skip the starting table itself
-									}
-									if (found_start && !found_end) {
-										full_tables_to_add.push_back(path_table);
-										if (path_table == fk_table_with_pu_reference) {
-											found_end = true;
-										}
-									}
-								}
-
-								if (full_tables_to_add.empty()) {
-									continue;
-								}
-
-#if PAC_DEBUG
-								PAC_DEBUG_PRINT("ModifyPlanWithoutPU: Found accessible table " + scanned_table + " #" +
-								                std::to_string(table_get.table_index) + " - adding full join chain:");
-								for (auto &t : full_tables_to_add) {
-									PAC_DEBUG_PRINT("  - " + t);
-								}
-#endif
-								// Create the full join chain
-								unique_ptr<LogicalOperator> current_node = (*table_node)->Copy(input.context);
-								idx_t fk_table_idx = DConstants::INVALID_INDEX;
-
-								for (auto &table_to_add : full_tables_to_add) {
-									auto it = check.table_metadata.find(table_to_add);
-									if (it == check.table_metadata.end()) {
-										throw InvalidInputException("PAC compiler: missing table metadata for table: " +
-										                            table_to_add);
-									}
-
-									auto local_idx = binder.GenerateTableIndex();
-									auto required_cols =
-									    GetRequiredColumnsForTable(check, table_to_add, fk_path, privacy_units);
-									auto table_get_new =
-									    CreateLogicalGet(input.context, plan, table_to_add, local_idx, required_cols);
-
-									if (table_to_add == fk_table_with_pu_reference) {
-										fk_table_idx = local_idx;
-									}
-
-									auto join = CreateLogicalJoin(check, input.context, std::move(current_node),
-									                              std::move(table_get_new));
-									current_node = std::move(join);
-								}
-
-								if (fk_table_idx != DConstants::INVALID_INDEX) {
-									connecting_table_to_orders_table[table_get.table_index] = fk_table_idx;
-								}
-
-								ReplaceNode(plan, *table_node, current_node, &binder);
-								found_accessible_alternative = true;
-								break;
-							}
-						}
-
-						if (found_accessible_alternative) {
-							continue; // Move to next connecting table instance
-						}
-					}
-
-					if (found_accessible_alternative) {
-						continue; // Move to next connecting table instance
-					}
-
-#if PAC_DEBUG
-					PAC_DEBUG_PRINT("ModifyPlanWithoutPU: No accessible alternative found - skipping this instance");
-#endif
-					continue;
-				}
-
-				// Create joins for all intermediate tables
-				// IMPORTANT: Use tables_to_add (NOT tables_to_join_for_instance) - this contains the path
-				// from connecting_table to fk_table_with_pu_reference that we computed above
-				unique_ptr<LogicalOperator> existing_node = (*target_ref)->Copy(input.context);
-
-				// Create fresh LogicalGet nodes for this instance
-				std::unordered_map<string, unique_ptr<LogicalGet>> local_get_map;
-
-				for (auto &table : tables_to_add) {
-					auto it = check.table_metadata.find(table);
-					if (it == check.table_metadata.end()) {
-						throw InvalidInputException("PAC compiler: missing table metadata for table: " + table);
-					}
-					vector<string> pks = it->second.pks;
-					// Get required columns for this table (PKs and relevant FKs)
-					auto required_cols = GetRequiredColumnsForTable(check, table, fk_path, privacy_units);
-					auto local_idx = binder.GenerateTableIndex();
-					auto get = CreateLogicalGet(input.context, plan, table, local_idx, required_cols);
-
-					// Remember the table index of the FK table for this instance
-					if (table == fk_table_with_pu_reference) {
-						connecting_table_to_orders_table[connecting_table_idx] = local_idx;
-					}
-
-					local_get_map[table] = std::move(get);
-				}
-				unique_ptr<LogicalOperator> final_join =
-				    ChainJoinsFromGetMap(check, input.context, std::move(existing_node), local_get_map, tables_to_add);
-				// Replace this instance with the join chain
-				ReplaceNode(plan, *target_ref, final_join, &binder);
-			}
-		}
-	}
-
-#if PAC_DEBUG
-	plan->Print();
-#endif
-
-	// Now find all aggregates and modify them with PAC functions
-	// Each aggregate needs a hash expression based on the FK table in its subtree
-	vector<LogicalAggregate *> all_aggregates;
-	FindAllAggregates(plan, all_aggregates);
-
-	if (all_aggregates.empty()) {
-		throw InternalException("PAC Compiler: no aggregate nodes found in plan");
-	}
-
-	// For correlated subqueries, the FK-linked table (e.g., lineitem) may appear in multiple contexts
-	// Filter aggregates to only those that have FK-linked tables in their subtree
-	std::unordered_set<string> fk_linked_tables(gets_present.begin(), gets_present.end());
-
-	vector<string> fk_linked_tables_vec(fk_linked_tables.begin(), fk_linked_tables.end());
-	// Sort for deterministic behavior across platforms (unordered_set iteration order is not guaranteed)
-	std::sort(fk_linked_tables_vec.begin(), fk_linked_tables_vec.end());
-
-	// Use the extended filter that handles the edge case where inner aggregate groups by PU key
-	// (e.g., GROUP BY c_custkey where customer is the PU). In this case, we noise the outer
-	// aggregate instead of the inner one.
-	vector<LogicalAggregate *> target_aggregates =
-	    FilterTargetAggregatesWithPUKeyCheck(all_aggregates, fk_linked_tables_vec, check, privacy_units, cte_map);
-
-	if (target_aggregates.empty()) {
-		throw InvalidInputException("PAC Compiler: no aggregate nodes with FK-linked tables found in plan");
-	}
-
-#if PAC_DEBUG
-	PAC_DEBUG_PRINT("ModifyPlanWithoutPU: Found " + std::to_string(target_aggregates.size()) +
-	                " aggregates with FK-linked tables");
-#endif
-
-	// For each target aggregate, find which FK table it has access to and build hash expression
-	// IMPORTANT: We need to find the "closest" FK table instance for each aggregate
-	// to handle correlated subqueries correctly
-	std::unordered_map<idx_t, ColumnBinding> hash_cache;
-	for (auto *target_agg : target_aggregates) {
-		// === Q13 PATTERN: outer aggregate over inner aggregate that groups by link key ===
-		// When the FK table (e.g., orders) is NOT directly reachable from the target aggregate
-		// (it's behind an inner aggregate), we need to:
-		// 1. Insert hash projection in the inner aggregate's subtree
-		// 2. Propagate the hash through the inner aggregate's GROUP BY
-		// 3. Then propagate from inner aggregate's output to the outer aggregate
-		if (!fk_table_with_pu_reference.empty()) {
-			// Check if the FK table is reachable but NOT directly (i.e., behind an inner aggregate)
-			bool has_fk_table_in_subtree = HasTableInSubtree(target_agg, fk_table_with_pu_reference);
-			bool fk_table_directly_reachable = false;
-			if (has_fk_table_in_subtree) {
-				auto *fk_get = FindTableScanInSubtree(target_agg, fk_table_with_pu_reference);
-				if (fk_get) {
-					fk_table_directly_reachable = IsDirectlyReachable(target_agg, fk_get->table_index);
-				}
-			}
-
-			if (has_fk_table_in_subtree && !fk_table_directly_reachable) {
-				// FK table is behind an inner aggregate — Q13 pattern
-				// Find the inner aggregate
-				LogicalAggregate *inner_agg = nullptr;
-				vector<LogicalOperator *> path_to_inner;
-
-				for (auto &child : target_agg->children) {
-					path_to_inner.clear();
-					inner_agg = FindFirstChildAggregateBounded(child.get(), path_to_inner);
-					if (inner_agg) {
-						break;
-					}
-				}
-
-				if (inner_agg && AggregateGroupsByPUKey(inner_agg, check, privacy_units)) {
-					// Inner aggregate groups by a protected column (link key) — confirmed Q13 pattern
-					auto *fk_get = FindTableScanInSubtree(inner_agg, fk_table_with_pu_reference);
-					if (fk_get) {
-						// Get FK columns that reference the PU
-						auto fk_cols = FindFKColumnsToPU(check, fk_table_with_pu_reference, privacy_units);
-
-						if (!fk_cols.empty()) {
-							// Step 1: Insert hash projection above the FK table scan
-							auto hash_binding =
-							    GetOrInsertHashProjection(input, plan, *fk_get, fk_cols, false, hash_cache);
-
-							// Step 2: Propagate hash to the inner aggregate
-							auto propagated_to_inner = PropagateSingleBinding(
-							    *plan, hash_binding.table_index, hash_binding, LogicalType::UBIGINT, inner_agg);
-
-							if (propagated_to_inner.table_index != DConstants::INVALID_INDEX) {
-								// Step 3: Add hash as a GROUP BY column in the inner aggregate
-								// This is safe because the hash is functionally determined by o.id
-								// (which is already in the GROUP BY)
-								auto hash_group_col =
-								    make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT, propagated_to_inner);
-								inner_agg->groups.push_back(std::move(hash_group_col));
-								inner_agg->ResolveOperatorTypes();
-
-								// Step 4: Get hash binding from inner aggregate's output
-								// Group columns are output first, so the new group is at the end
-								ColumnBinding inner_hash_binding(inner_agg->group_index, inner_agg->groups.size() - 1);
-
-								// Step 5: Propagate from inner aggregate output to outer aggregate
-								// Trace through projections between inner and outer
-								ColumnBinding current_binding = inner_hash_binding;
-								for (auto it2 = path_to_inner.rbegin(); it2 != path_to_inner.rend(); ++it2) {
-									LogicalOperator *op = *it2;
-									if (op->type == LogicalOperatorType::LOGICAL_PROJECTION) {
-										auto &proj = op->Cast<LogicalProjection>();
-										bool found = false;
-										for (idx_t expr_idx = 0; expr_idx < proj.expressions.size(); expr_idx++) {
-											auto &expr = proj.expressions[expr_idx];
-											if (expr->type == ExpressionType::BOUND_COLUMN_REF) {
-												auto &proj_col_ref = expr->Cast<BoundColumnRefExpression>();
-												if (proj_col_ref.binding == current_binding) {
-													current_binding = ColumnBinding(proj.table_index, expr_idx);
-													found = true;
-													break;
-												}
-											}
-										}
-										if (!found) {
-											// Hash column not yet projected — add it to the projection
-											auto new_col_ref = make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT,
-											                                                       current_binding);
-											proj.expressions.push_back(std::move(new_col_ref));
-											current_binding =
-											    ColumnBinding(proj.table_index, proj.expressions.size() - 1);
-										}
-									}
-									// For FILTER and other pass-through operators, bindings pass through unchanged
-								}
-
-								// Step 6: Transform outer aggregate with PAC functions
-								unique_ptr<Expression> hash_ref =
-								    make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT, current_binding);
-								ModifyAggregatesWithPacFunctions(input, target_agg, hash_ref, plan);
-
-#if PAC_DEBUG
-								PAC_DEBUG_PRINT("ModifyPlanWithoutPU: Q13 pattern handled — hash propagated "
-								                "through inner aggregate to outer aggregate");
-#endif
-								continue; // Move to next target aggregate
-							}
-						}
-					}
-				}
-			}
-		}
-
-		// Find which connecting table (lineitem) this aggregate has in its DIRECT path
-		// (not in a nested subquery), and use the corresponding FK table (orders)
-		idx_t orders_table_idx = DConstants::INVALID_INDEX;
-
-		// We need to find the "closest" connecting table to this aggregate
-		// For nested queries, the outer aggregate might contain both inner and outer tables
-		// So we need to find which connecting table is in the aggregate's direct path
-		// Strategy: check which connecting table indices exist, and use the one that's NOT in a DELIM_GET
-		// IMPORTANT: Also check that the table's columns are actually accessible (not blocked by MARK/SEMI/ANTI joins)
-
-		// First, collect all connecting table indices that appear in the aggregate's subtree
-		// AND whose columns are actually accessible (not in right side of MARK/SEMI/ANTI join)
-		// IMPORTANT: We must also verify that the MAPPED orders table is in the aggregate's subtree,
-		// not just the connecting table. This is crucial for CROSS_PRODUCT queries where the
-		// connecting table and orders table might be in different branches.
-		vector<idx_t> candidate_conn_tables;
-		for (auto &kv : connecting_table_to_orders_table) {
-			idx_t conn_table_idx = kv.first;
-			idx_t orders_idx = kv.second;
-
-			// Check if BOTH the connecting table AND the orders table are in the aggregate's subtree
-			if (HasTableIndexInSubtree(target_agg, conn_table_idx) && HasTableIndexInSubtree(target_agg, orders_idx)) {
-				// Also check that both tables' columns are accessible (not blocked by MARK/SEMI/ANTI joins)
-				if (AreTableColumnsAccessible(target_agg, conn_table_idx) &&
-				    AreTableColumnsAccessible(target_agg, orders_idx)) {
-					candidate_conn_tables.push_back(conn_table_idx);
-				}
-			}
-		}
-
-#if PAC_DEBUG
-		PAC_DEBUG_PRINT("ModifyPlanWithoutPU: Aggregate has " + std::to_string(candidate_conn_tables.size()) +
-		                " candidate connecting tables");
-#endif
-
-		// If no candidate connecting tables found, the scanned table itself must have an FK to PU
-		// This happens when we query a leaf table that's far from the PU via FK chain
-		// OR when we have a correlated subquery that accesses the outer table via DELIM_GET
-		bool handled_via_direct_fk = false;
-		if (candidate_conn_tables.empty()) {
-			// First, check if this aggregate can access an already-present FK table via DELIM_GET
-			// This happens in correlated subqueries where the outer query has the FK table
-			// and the inner subquery accesses it via DELIM_GET
-			// Search BOTH gets_present AND actually_present tables
-			vector<string> all_searchable_tables;
-			all_searchable_tables.insert(all_searchable_tables.end(), gets_present.begin(), gets_present.end());
-			all_searchable_tables.insert(all_searchable_tables.end(), actually_present.begin(), actually_present.end());
-
-			for (auto &present_table : all_searchable_tables) {
-				// Check if this table has FK to PU
-				auto fk_cols = FindFKColumnsToPU(check, present_table, privacy_units);
-				if (!fk_cols.empty()) {
-					// This present table has FK to PU - find an accessible instance in the aggregate's subtree
-					auto *accessible_get = FindAccessibleGetInSubtree(plan, target_agg, present_table);
-					if (accessible_get) {
-						if (InsertHashAndTransformAggregate(input, plan, *accessible_get, fk_cols, false, target_agg,
-						                                    hash_cache)) {
-#if PAC_DEBUG
-							PAC_DEBUG_PRINT("ModifyPlanWithoutPU: FK table #" +
-							                std::to_string(accessible_get->table_index) +
-							                " hash expression propagated");
-#endif
-							handled_via_direct_fk = true;
-							break;
-						}
-					}
-				}
-			}
-
-			// If not handled via direct FK table access, check for deep FK chains
-			if (!handled_via_direct_fk) {
-				// Find the scanned table in this aggregate's subtree that has FK to any table in the FK path
-				// This handles deep FK chains where the leaf table doesn't directly reference the PU
-				for (auto &present_table : gets_present) {
-					if (HasTableInSubtree(target_agg, present_table)) {
-						auto it = check.table_metadata.find(present_table);
-						if (it != check.table_metadata.end()) {
-							// Look for FK to any table in the FK path, not just PUs
-							bool has_fk_in_path = false;
-							vector<string> fk_cols;
-							string fk_target;
-
-							for (auto &fk : it->second.fks) {
-								// Check if this FK references any table in the FK path
-								for (auto &path_table : fk_path) {
-									if (fk.first == path_table) {
-										has_fk_in_path = true;
-										fk_cols = fk.second;
-										fk_target = fk.first;
-										break;
-									}
-								}
-								if (has_fk_in_path) {
-									break;
-								}
-							}
-
-							if (has_fk_in_path) {
-								// This table is in the FK chain - we need to find the hash source table
-								// that has FK to PU and is accessible within this aggregate's subtree
-
-								// Find the last table in the FK path that has an FK to a PU
-								string hash_source_table;
-								vector<string> hash_source_fk_cols;
-
-								for (size_t i = fk_path.size(); i > 0; i--) {
-									auto cols = FindFKColumnsToPU(check, fk_path[i - 1], privacy_units);
-									if (!cols.empty()) {
-										hash_source_table = fk_path[i - 1];
-										hash_source_fk_cols = cols;
-										break;
-									}
-								}
-
-								if (!hash_source_table.empty()) {
-									// Find an accessible instance in the aggregate's subtree
-									auto *accessible_get =
-									    FindAccessibleGetInSubtree(plan, target_agg, hash_source_table);
-
-									if (accessible_get) {
-										if (InsertHashAndTransformAggregate(input, plan, *accessible_get,
-										                                    hash_source_fk_cols, false, target_agg,
-										                                    hash_cache)) {
-											handled_via_direct_fk = true;
-											break;
-										}
-									} else {
-										// The hash source table exists but is not in the aggregate's subtree
-										vector<unique_ptr<LogicalOperator> *> hash_source_nodes;
-										FindAllNodesByTable(&plan, hash_source_table, hash_source_nodes);
-										if (!hash_source_nodes.empty()) {
-											// This happens in correlated subqueries where the FK table is in the outer
-											// query. We need to add the FK column(s) to the DELIM_JOIN correlation.
-											auto &hash_source_get = hash_source_nodes[0]->get()->Cast<LogicalGet>();
-
-											vector<DelimColumnResult> delim_results;
-											for (auto &hash_fk_col : hash_source_fk_cols) {
-												auto delim_result = AddColumnToDelimJoin(plan, hash_source_get,
-												                                         hash_fk_col, target_agg);
-												if (!delim_result.IsValid()) {
-													break;
-												}
-												delim_results.push_back(delim_result);
-											}
-
-											if (delim_results.size() == hash_source_fk_cols.size()) {
-												vector<unique_ptr<Expression>> fk_col_exprs;
-												for (auto &dr : delim_results) {
-													fk_col_exprs.push_back(
-													    make_uniq<BoundColumnRefExpression>(dr.type, dr.binding));
-												}
-												unique_ptr<Expression> hash_input_expr =
-												    BuildXorHash(input, std::move(fk_col_exprs));
-												ModifyAggregatesWithPacFunctions(input, target_agg, hash_input_expr,
-												                                 plan);
-												handled_via_direct_fk = true;
-												break;
-											}
-										}
-									}
-								}
-							}
-						}
-					}
-				}
-			}
-		}
-
-		// Skip to next aggregate if we already handled this one via direct FK
-		if (handled_via_direct_fk) {
-			continue;
-		}
-
-		// Also skip if there are no candidate connecting tables (safety check)
-		// This should not happen if the above logic is correct, but ensures we don't proceed with empty candidates
-		if (candidate_conn_tables.empty()) {
-#if PAC_DEBUG
-			PAC_DEBUG_PRINT("ModifyPlanWithoutPU: Skipping aggregate with no candidate connecting tables");
-#endif
-			continue;
-		}
-
-		// If there's only one candidate, use it
-		if (candidate_conn_tables.size() == 1) {
-			orders_table_idx = connecting_table_to_orders_table[candidate_conn_tables[0]];
-		} else {
-			// Multiple candidates - collect all possible orders table indices
-			// We'll try each one and use the first where propagation actually succeeds
-			vector<idx_t> candidate_orders_tables;
-			for (auto conn_table_idx : candidate_conn_tables) {
-				idx_t ord_table_idx = connecting_table_to_orders_table[conn_table_idx];
-				candidate_orders_tables.push_back(ord_table_idx);
-			}
-			// Sort by table index (smaller indices first - outer query tables)
-			std::sort(candidate_orders_tables.begin(), candidate_orders_tables.end());
-			// Remove duplicates
-			candidate_orders_tables.erase(std::unique(candidate_orders_tables.begin(), candidate_orders_tables.end()),
-			                              candidate_orders_tables.end());
-
-#if PAC_DEBUG
-			PAC_DEBUG_PRINT("ModifyPlanWithoutPU: Trying " + std::to_string(candidate_orders_tables.size()) +
-			                " candidate orders tables for aggregate");
-#endif
-
-			// Try each candidate until propagation succeeds
-			bool found_working_table = false;
-			for (auto test_ord_idx : candidate_orders_tables) {
-				vector<unique_ptr<LogicalOperator> *> test_nodes;
-				FindAllNodesByTableIndex(&plan, test_ord_idx, test_nodes);
-				if (test_nodes.empty()) {
-					continue;
-				}
-
-				auto &test_get = test_nodes[0]->get()->Cast<LogicalGet>();
-
-				// Get FK columns for this table
-				auto test_table_ptr = test_get.GetTable();
-				auto test_fk_cols =
-				    test_table_ptr ? FindFKColumnsToPU(check, test_table_ptr->name, privacy_units) : vector<string> {};
-				if (test_fk_cols.empty()) {
-					continue;
-				}
-
-				// Try to insert hash projection and propagate
-				if (InsertHashAndTransformAggregate(input, plan, test_get, test_fk_cols, false, target_agg,
-				                                    hash_cache)) {
-#if PAC_DEBUG
-					PAC_DEBUG_PRINT("ModifyPlanWithoutPU: Propagation succeeded for orders table #" +
-					                std::to_string(test_ord_idx));
-#endif
-					found_working_table = true;
-					break;
-				}
-#if PAC_DEBUG
-				PAC_DEBUG_PRINT("ModifyPlanWithoutPU: Propagation failed for orders table #" +
-				                std::to_string(test_ord_idx) + ", trying next candidate");
-#endif
-			}
-
-			if (found_working_table) {
-				continue; // Move to next aggregate - this one is handled
-			}
-
-			// No candidate worked - use first one (will likely fail in the code below)
-			orders_table_idx = candidate_orders_tables.empty() ? DConstants::INVALID_INDEX : candidate_orders_tables[0];
-		}
-
-		if (orders_table_idx == DConstants::INVALID_INDEX) {
-			throw InternalException("PAC Compiler: could not find orders table for aggregate");
-		}
-
-		// IMPORTANT: Check if the selected orders table is actually accessible from this aggregate's subtree
-		// If not (e.g., it's in the outer query of a correlated subquery), we need to use AddColumnToDelimJoin
-		bool orders_in_aggregate_subtree = HasTableIndexInSubtree(target_agg, orders_table_idx);
-
-		if (!orders_in_aggregate_subtree) {
-			// The selected orders table is not in this aggregate's subtree
-			// This can happen when the connecting_table_to_orders_table mapping points to a table
-			// in a different branch (e.g., correlated subquery vs uncorrelated subquery)
-			//
-			// First, try to find ANY FK table (table with FK to PU) directly in this aggregate's subtree
-			// This handles uncorrelated subqueries that have their own FK table instance
-			bool found_direct_fk = false;
-
-			for (auto &present_table : gets_present) {
-				auto fk_cols = FindFKColumnsToPU(check, present_table, privacy_units);
-				if (fk_cols.empty()) {
-					continue;
-				}
-
-				// Find an accessible instance in the aggregate's subtree
-				auto *accessible_get = FindAccessibleGetInSubtree(plan, target_agg, present_table);
-				if (accessible_get) {
-#if PAC_DEBUG
-					PAC_DEBUG_PRINT("ModifyPlanWithoutPU: Found FK table " + present_table + " #" +
-					                std::to_string(accessible_get->table_index) + " directly in aggregate subtree");
-#endif
-					InsertHashAndTransformAggregate(input, plan, *accessible_get, fk_cols, false, target_agg,
-					                                hash_cache);
-					found_direct_fk = true;
-					break;
-				}
-			}
-
-			if (found_direct_fk) {
-				continue; // Move to next aggregate
-			}
-
-			// If still not found, fall back to AddColumnToDelimJoin for correlated subqueries
-#if PAC_DEBUG
-			PAC_DEBUG_PRINT("ModifyPlanWithoutPU: Orders table #" + std::to_string(orders_table_idx) +
-			                " not in aggregate subtree, using AddColumnToDelimJoin");
-#endif
-			// Find the orders table LogicalGet
-			vector<unique_ptr<LogicalOperator> *> orders_nodes;
-			FindAllNodesByTableIndex(&plan, orders_table_idx, orders_nodes);
-
-			if (orders_nodes.empty()) {
-				throw InternalException("PAC Compiler: could not find orders LogicalGet with index " +
-				                        std::to_string(orders_table_idx));
-			}
-
-			auto &orders_get = orders_nodes[0]->get()->Cast<LogicalGet>();
-
-			// Get FK columns from this table
-			auto orders_table_ptr = orders_get.GetTable();
-			string fk_table_name = orders_table_ptr ? orders_table_ptr->name : "";
-			auto fk_cols =
-			    fk_table_name.empty() ? vector<string> {} : FindFKColumnsToPU(check, fk_table_name, privacy_units);
-
-			if (fk_cols.empty()) {
-				throw InternalException("PAC Compiler: no FK found from " + fk_table_name + " to any PU");
-			}
-
-			// Add pre-computed hash via DELIM_JOIN
-			auto hash_binding = GetOrInsertHashProjection(input, plan, orders_get, fk_cols, false, hash_cache);
-			auto delim_result =
-			    AddBindingToDelimJoin(plan, hash_binding.table_index, hash_binding, LogicalType::UBIGINT, target_agg);
-			if (!delim_result.IsValid()) {
-				throw InternalException("PAC Compiler: failed to add hash to DELIM_JOIN for " + fk_table_name);
-			}
-			unique_ptr<Expression> hash_input_expr =
-			    make_uniq<BoundColumnRefExpression>(delim_result.type, delim_result.binding);
-			ModifyAggregatesWithPacFunctions(input, target_agg, hash_input_expr, plan);
-			continue; // Move to next aggregate
-		}
-
-#if PAC_DEBUG
-		PAC_DEBUG_PRINT("ModifyPlanWithoutPU: Selected orders table #" + std::to_string(orders_table_idx) +
-		                " for aggregate");
-#endif
-
-		// Find the orders table LogicalGet with this index
-		vector<unique_ptr<LogicalOperator> *> orders_nodes;
-		FindAllNodesByTableIndex(&plan, orders_table_idx, orders_nodes);
-
-		if (orders_nodes.empty()) {
-			throw InternalException("PAC Compiler: could not find orders LogicalGet with index " +
-			                        std::to_string(orders_table_idx));
-		}
-
-		auto &orders_get = orders_nodes[0]->get()->Cast<LogicalGet>();
-
-		// Build hash expression from the FK-linked table's FK to the PU
-		auto orders_table_ptr = orders_get.GetTable();
-		string fk_table_name = orders_table_ptr ? orders_table_ptr->name : "";
-		auto fk_cols =
-		    fk_table_name.empty() ? vector<string> {} : FindFKColumnsToPU(check, fk_table_name, privacy_units);
-
-		if (fk_cols.empty()) {
-			throw InternalException("PAC Compiler: no FK found from " + fk_table_name + " to any PU");
-		}
-
-		// Insert hash projection and propagate
-		auto hash_binding = GetOrInsertHashProjection(input, plan, orders_get, fk_cols, false, hash_cache);
-		auto propagated =
-		    PropagateSingleBinding(*plan, hash_binding.table_index, hash_binding, LogicalType::UBIGINT, target_agg);
-
-		unique_ptr<Expression> hash_input_expr;
-		if (propagated.table_index != DConstants::INVALID_INDEX) {
-			hash_input_expr = make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT, propagated);
-		}
-
-		// If propagation failed (e.g., blocked by DELIM_JOIN), try AddBindingToDelimJoin
-		if (!hash_input_expr) {
-#if PAC_DEBUG
-			PAC_DEBUG_PRINT("ModifyPlanWithoutPU: Direct propagation failed for orders table #" +
-			                std::to_string(orders_table_idx) + ", trying DELIM_JOIN fallback");
-#endif
-			auto delim_result =
-			    AddBindingToDelimJoin(plan, hash_binding.table_index, hash_binding, LogicalType::UBIGINT, target_agg);
-			if (delim_result.IsValid()) {
-				hash_input_expr = make_uniq<BoundColumnRefExpression>(delim_result.type, delim_result.binding);
-			}
-		}
-
-		// Skip if still no hash expression - this can happen for nested aggregates that operate
-		// on already-aggregated data (e.g., avg(total) over a GROUP BY sum). These aggregates
-		// don't need PAC transformation because they consume already-protected data.
-		if (!hash_input_expr) {
-#if PAC_DEBUG
-			PAC_DEBUG_PRINT("ModifyPlanWithoutPU: Skipping aggregate - no direct path to orders table #" +
-			                std::to_string(orders_table_idx) + " (likely a nested aggregate on aggregated data)");
-#endif
-			continue;
-		}
-
-#if PAC_DEBUG
-		PAC_DEBUG_PRINT("ModifyPlanWithoutPU: Built hash expression for aggregate using orders table #" +
-		                std::to_string(orders_table_idx));
-#endif
-
-		// Modify this aggregate with PAC functions
-		ModifyAggregatesWithPacFunctions(input, target_agg, hash_input_expr, plan);
-	}
+	return make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT, propagated_to_outer);
 }
 
 /**
@@ -1612,7 +206,6 @@ static CTEHashMatch FindCTEHashSource(LogicalOperator *op, const string &pu_tabl
 			if (cte_tables.count(pu_table_name) > 0 && CTERefExposesColumns(ref, pu_pks)) {
 				return CTEHashMatch(&ref, pu_pks);
 			}
-
 			// Path 2: CTE contains FK-linked table → use FK columns
 			// Sort FK path keys for deterministic behavior across platforms
 			vector<string> sorted_fk_cte_keys;
@@ -1629,7 +222,6 @@ static CTEHashMatch FindCTEHashSource(LogicalOperator *op, const string &pu_tabl
 				}
 				return a < b;
 			});
-
 			for (auto &fk_table : sorted_fk_cte_keys) {
 				auto &fk_path = check.fk_paths.at(fk_table);
 				if (fk_path.empty() || fk_path.back() != pu_table_name) {
@@ -1654,7 +246,6 @@ static CTEHashMatch FindCTEHashSource(LogicalOperator *op, const string &pu_tabl
 			}
 		}
 	}
-
 	for (auto &child : op->children) {
 		bool child_in_delim = inside_delim_join || (op->type == LogicalOperatorType::LOGICAL_DELIM_JOIN);
 		auto match = FindCTEHashSource(child.get(), pu_table_name, pu_pks, cte_map, check, child_in_delim);
@@ -1675,7 +266,6 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 	if (all_aggregates.empty()) {
 		throw InternalException("PAC Compiler: no aggregate nodes found in plan");
 	}
-
 	// Build a list of all tables that should trigger PAC transformation:
 	// 1. Privacy unit tables themselves
 	// 2. Tables that are FK-linked to privacy unit tables
@@ -1687,7 +277,6 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 		relevant_tables.push_back(pu);
 		relevant_tables_set.insert(pu);
 	}
-
 	// Add FK-linked tables from the compatibility check results
 	// Sort FK path keys for deterministic behavior across platforms
 	vector<string> sorted_fk_path_keys;
@@ -1711,14 +300,6 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 			}
 		}
 	}
-
-#if PAC_DEBUG
-	PAC_DEBUG_PRINT("ModifyPlanWithPU: relevant tables for PAC transformation:");
-	for (auto &t : relevant_tables) {
-		PAC_DEBUG_PRINT("  " + t);
-	}
-#endif
-
 	// Use the extended filter that handles the edge case where inner aggregate groups by PU key
 	// (e.g., GROUP BY c_custkey where customer is the PU). In this case, we noise the outer
 	// aggregate instead of the inner one.
@@ -1726,15 +307,8 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 	    FilterTargetAggregatesWithPUKeyCheck(all_aggregates, relevant_tables, check, pu_table_names, cte_map);
 
 	if (target_aggregates.empty()) {
-		PAC_DEBUG_PRINT("WARNING: PAC Compiler: no aggregate nodes with privacy unit tables found in plan - skipping "
-		                "PAC compilation");
-		return;
+		throw InvalidInputException("PAC Compiler: no aggregate nodes with relevant tables found in plan");
 	}
-
-#if PAC_DEBUG
-	PAC_DEBUG_PRINT("ModifyPlanWithPU: Found " + std::to_string(target_aggregates.size()) +
-	                " aggregates with privacy unit tables");
-#endif
 
 	// Cache for hash projections: get.table_index → hash column binding
 	std::unordered_map<idx_t, ColumnBinding> hash_cache;
@@ -1769,13 +343,6 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 				// The PU table is in the subtree AND its columns are accessible
 				auto &get = *get_ptr;
 
-#if PAC_DEBUG
-				PAC_DEBUG_PRINT("ModifyPlanWithPU: Processing table " + pu_table_name + " #" +
-				                std::to_string(get.table_index) +
-				                " for aggregate, column_ids.size=" + std::to_string(get.GetColumnIds().size()) +
-				                ", projection_ids.size=" + std::to_string(get.projection_ids.size()));
-#endif
-
 				// Get PAC_KEY columns (required for all PU tables)
 				vector<string> pks;
 
@@ -1789,35 +356,20 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 				}
 
 				// Check if the PU table is directly reachable (not behind a nested aggregate).
-				// If not directly reachable, this is a Q13 pattern where an inner aggregate
-				// groups by PU key — we use the inner aggregate's group column output instead.
+				// PU-key passthrough: the table is behind an inner aggregate that groups
+				// by PU key — insert hash deep and propagate through the inner's GROUP BY.
 				if (!IsDirectlyReachable(target_agg, get.table_index)) {
 					ColumnBinding pk_binding;
 					auto *inner_agg = FindInnerAggregateWithPUKeyGroup(target_agg, check, pu_table_names, pk_binding);
 					if (inner_agg) {
-#if PAC_DEBUG
-						PAC_DEBUG_PRINT("ModifyPlanWithPU: Using inner aggregate's PU key group column [" +
-						                std::to_string(pk_binding.table_index) + "." +
-						                std::to_string(pk_binding.column_index) + "] as hash input");
-#endif
-						LogicalType pk_type = LogicalType::BIGINT; // safe default
-						for (auto &child : target_agg->children) {
-							auto child_bindings = child->GetColumnBindings();
-							for (idx_t bi = 0; bi < child_bindings.size(); bi++) {
-								if (child_bindings[bi] == pk_binding && bi < child->types.size()) {
-									pk_type = child->types[bi];
-									break;
-								}
+						auto *inner_get = FindTableScanInSubtree(inner_agg, pu_table_name);
+						if (inner_get) {
+							auto hash_expr = HandlePassthroughDeepHash(input, plan, target_agg, inner_agg, *inner_get,
+							                                           pks, hash_cache);
+							if (hash_expr) {
+								hash_exprs.push_back(std::move(hash_expr));
 							}
 						}
-						auto pk_col = make_uniq<BoundColumnRefExpression>(pk_type, pk_binding);
-						auto bound_hash = input.optimizer.BindScalarFunction("hash", std::move(pk_col));
-						hash_exprs.push_back(std::move(bound_hash));
-					} else {
-#if PAC_DEBUG
-						PAC_DEBUG_PRINT("ModifyPlanWithPU: Skipping PU table " + pu_table_name +
-						                " - not directly reachable and no Q13 pattern found");
-#endif
 					}
 					continue;
 				}
@@ -1827,98 +379,109 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 				auto propagated = PropagateSingleBinding(*plan, hash_binding.table_index, hash_binding,
 				                                         LogicalType::UBIGINT, target_agg);
 				if (propagated.table_index == DConstants::INVALID_INDEX) {
-#if PAC_DEBUG
-					PAC_DEBUG_PRINT("ModifyPlanWithPU: Skipping PU table " + pu_table_name +
-					                " - propagation failed (likely blocked by semi/anti join)");
-#endif
+					// Try DELIM_JOIN fallback before giving up
+					auto delim_result = AddBindingToDelimJoin(plan, hash_binding.table_index, hash_binding,
+					                                          LogicalType::UBIGINT, target_agg);
+					if (delim_result.IsValid()) {
+						propagated = delim_result.binding;
+					}
+				}
+				if (propagated.table_index == DConstants::INVALID_INDEX) {
 					continue;
 				}
 				auto hash_ref = make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT, propagated);
 				hash_exprs.push_back(std::move(hash_ref));
 			} else {
-				// FK-linked table case: find FK columns that reference the PU
-				// Check which FK-linked tables are in this aggregate's subtree
-				// Sort FK path keys by path length (shortest first) so we prefer
-				// the most direct FK reference to the PU (e.g., orders->customer
-				// before lineitem->orders->customer). Break ties alphabetically.
-				vector<string> sorted_fk_keys;
-				for (auto &kv : check.fk_paths) {
-					sorted_fk_keys.push_back(kv.first);
-				}
-				std::sort(sorted_fk_keys.begin(), sorted_fk_keys.end(), [&check](const string &a, const string &b) {
-					auto a_it = check.fk_paths.find(a);
-					auto b_it = check.fk_paths.find(b);
-					size_t a_len = (a_it != check.fk_paths.end()) ? a_it->second.size() : 0;
-					size_t b_len = (b_it != check.fk_paths.end()) ? b_it->second.size() : 0;
-					if (a_len != b_len) {
-						return a_len < b_len;
-					}
-					return a < b;
-				});
+				// FK-linked table case: find the deepest accessible table in the FK path
+				// that has a direct FK to the PU (or closest to PU).
+				// For deep chains (shipments -> order_items -> orders -> users),
+				// prefer hashing orders.user_id (direct FK to PU) over shipments.item_id.
+				bool found_fk_hash = false;
 
-				for (auto &fk_table : sorted_fk_keys) {
-					auto &path = check.fk_paths.at(fk_table);
+				for (auto &kv : check.fk_paths) {
+					auto &path = kv.second;
 
 					// Skip if this FK path doesn't lead to the current PU
 					if (path.empty() || path.back() != pu_table_name) {
 						continue;
 					}
-
-					// Check if the FK table is in this aggregate's subtree
-					if (!HasTableInSubtree(target_agg, fk_table)) {
+					// Check if any table in this path is in the aggregate's subtree
+					if (!HasTableInSubtree(target_agg, kv.first)) {
 						continue;
 					}
-
-					// Find the FK columns from fk_table that reference the next table in the path
-					// The path is ordered: [fk_table, intermediate_table(s), pu_table]
-					// We need the FK columns from fk_table that reference the next table in the path
-
-					// Get metadata for the FK table
-					auto fk_it = check.table_metadata.find(fk_table);
-					if (fk_it == check.table_metadata.end()) {
-						continue;
-					}
-
-					// Find the FK that references the PU (possibly through intermediate tables)
-					// For now, let's find the FK that ultimately leads to the PU
-					string next_table_in_path = path.size() > 1 ? path[1] : pu_table_name;
-
-					vector<string> fk_cols;
-					for (auto &fk : fk_it->second.fks) {
-						if (fk.first == next_table_in_path) {
-							fk_cols = fk.second;
-							break;
+					// Walk path from closest-to-PU toward the source, looking for
+					// an accessible table with FK to the PU (or the next table toward PU).
+					// path = [source, ..., penultimate, pu_table]
+					// Try tables from penultimate back to source.
+					for (int pi = static_cast<int>(path.size()) - 2; pi >= 0; pi--) {
+						const string &candidate = path[pi];
+						auto cand_meta_it = check.table_metadata.find(candidate);
+						if (cand_meta_it == check.table_metadata.end()) {
+							continue;
 						}
+
+						// Find FK from candidate to the next table in path toward PU
+						const string &next_in_path = path[pi + 1];
+						vector<string> fk_cols;
+						for (auto &fk : cand_meta_it->second.fks) {
+							if (fk.first == next_in_path) {
+								fk_cols = fk.second;
+								break;
+							}
+						}
+						if (fk_cols.empty()) {
+							continue;
+						}
+						// Check if this table is accessible in the aggregate's subtree
+						auto *fk_get_ptr = FindAccessibleGetInSubtree(plan, target_agg, candidate);
+						if (!fk_get_ptr) {
+							continue;
+						}
+						// PU-key passthrough: if the FK table is behind an inner aggregate,
+						// insert hash deep and propagate through the inner's GROUP BY.
+						if (!IsDirectlyReachable(target_agg, fk_get_ptr->table_index)) {
+							ColumnBinding pk_binding;
+							auto *inner_agg =
+							    FindInnerAggregateWithPUKeyGroup(target_agg, check, pu_table_names, pk_binding);
+							if (inner_agg) {
+								auto *inner_get = FindTableScanInSubtree(inner_agg, candidate);
+								if (inner_get) {
+									auto hash_expr = HandlePassthroughDeepHash(input, plan, target_agg, inner_agg,
+									                                           *inner_get, fk_cols, hash_cache);
+									if (hash_expr) {
+										hash_exprs.push_back(std::move(hash_expr));
+										found_fk_hash = true;
+										break;
+									}
+								}
+							}
+							continue;
+						}
+						// Direct path: insert hash projection and propagate
+						auto fk_hash_binding =
+						    GetOrInsertHashProjection(input, plan, *fk_get_ptr, fk_cols, false, hash_cache);
+						auto fk_propagated = PropagateSingleBinding(*plan, fk_hash_binding.table_index, fk_hash_binding,
+						                                            LogicalType::UBIGINT, target_agg);
+
+						// If propagation failed, try DELIM_JOIN fallback
+						if (fk_propagated.table_index == DConstants::INVALID_INDEX) {
+							auto delim_result = AddBindingToDelimJoin(
+							    plan, fk_hash_binding.table_index, fk_hash_binding, LogicalType::UBIGINT, target_agg);
+							if (delim_result.IsValid()) {
+								fk_propagated = delim_result.binding;
+							}
+						}
+						if (fk_propagated.table_index == DConstants::INVALID_INDEX) {
+							continue;
+						}
+						auto fk_hash_ref = make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT, fk_propagated);
+						hash_exprs.push_back(std::move(fk_hash_ref));
+						found_fk_hash = true;
+						break; // Found a working table in this path
 					}
-
-					if (fk_cols.empty()) {
-						continue;
+					if (found_fk_hash) {
+						break; // Only process one FK path per PU per aggregate
 					}
-
-					// Find the LogicalGet for the FK table in this aggregate's subtree
-					auto *fk_get_ptr = FindAccessibleGetInSubtree(plan, target_agg, fk_table);
-					if (!fk_get_ptr) {
-						continue;
-					}
-
-					// Insert hash projection above FK get and propagate
-					auto fk_hash_binding =
-					    GetOrInsertHashProjection(input, plan, *fk_get_ptr, fk_cols, false, hash_cache);
-					auto fk_propagated = PropagateSingleBinding(*plan, fk_hash_binding.table_index, fk_hash_binding,
-					                                            LogicalType::UBIGINT, target_agg);
-
-					// Skip if propagation failed (e.g., blocked by RIGHT_SEMI/RIGHT_ANTI join)
-					if (fk_propagated.table_index == DConstants::INVALID_INDEX) {
-#if PAC_DEBUG
-						PAC_DEBUG_PRINT("ModifyPlanWithPU: Skipping FK table " + fk_table +
-						                " - propagation failed (likely blocked by semi/anti join)");
-#endif
-						continue;
-					}
-
-					auto fk_hash_ref = make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT, fk_propagated);
-					hash_exprs.push_back(std::move(fk_hash_ref));
-					break; // Only process one FK path per PU per aggregate
 				}
 			}
 		}
@@ -1927,9 +490,6 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 		// try the CTE path: find CTE_SCAN nodes that transitively reference PU tables
 		// (directly or through FK chains) and expose the relevant key columns
 		if (hash_exprs.empty() && !cte_map.empty()) {
-#if PAC_DEBUG
-			PAC_DEBUG_PRINT("ModifyPlanWithPU: no hash via direct/FK path, trying CTE path");
-#endif
 			for (auto &pu_table_name : pu_table_names) {
 				vector<string> pu_pks;
 				auto it = check.table_metadata.find(pu_table_name);
@@ -1942,18 +502,8 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 
 				auto match = FindCTEHashSource(target_agg, pu_table_name, pu_pks, cte_map, check);
 				if (!match) {
-#if PAC_DEBUG
-					PAC_DEBUG_PRINT("ModifyPlanWithPU: no CTE_SCAN found exposing PU/FK key for " + pu_table_name);
-#endif
 					continue;
 				}
-
-#if PAC_DEBUG
-				PAC_DEBUG_PRINT("ModifyPlanWithPU: found CTE_SCAN #" + std::to_string(match.cte_ref->table_index) +
-				                " (cte_index=" + std::to_string(match.cte_ref->cte_index) + ") with hash columns for " +
-				                pu_table_name);
-#endif
-
 				ColumnBinding hash_binding;
 				auto cte_cache_it = cte_hash_cache.find(match.cte_ref->table_index);
 				if (cte_cache_it != cte_hash_cache.end()) {
@@ -1971,45 +521,33 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 
 				// If propagation failed (e.g., blocked by DELIM_JOIN), try AddBindingToDelimJoin
 				if (propagated.table_index == DConstants::INVALID_INDEX) {
-#if PAC_DEBUG
-					PAC_DEBUG_PRINT("ModifyPlanWithPU: CTE hash propagation failed for " + pu_table_name +
-					                ", trying DELIM_JOIN fallback");
-#endif
 					auto delim_result = AddBindingToDelimJoin(plan, hash_binding.table_index, hash_binding,
 					                                          LogicalType::UBIGINT, target_agg);
 					if (delim_result.IsValid()) {
 						propagated = delim_result.binding;
 					}
 				}
-
 				if (propagated.table_index == DConstants::INVALID_INDEX) {
-#if PAC_DEBUG
-					PAC_DEBUG_PRINT("ModifyPlanWithPU: CTE hash propagation failed for " + pu_table_name);
-#endif
 					continue;
 				}
-
 				auto hash_ref = make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT, propagated);
 				hash_exprs.push_back(std::move(hash_ref));
-#if PAC_DEBUG
-				PAC_DEBUG_PRINT("ModifyPlanWithPU: successfully built hash via CTE path for " + pu_table_name);
-#endif
 			}
 		}
 
 		// Skip if no hash expressions were built for this aggregate
 		if (hash_exprs.empty()) {
-#if PAC_DEBUG
-			PAC_DEBUG_PRINT("ModifyPlanWithPU: no hash expressions built for target aggregate, skipping");
-#endif
 			continue;
 		}
+
+		// Compute correction factor for multi-PU: 2^(m-1) where m = number of PU hashes
+		double correction = (hash_exprs.size() > 1) ? std::pow(2.0, static_cast<double>(hash_exprs.size() - 1)) : 1.0;
 
 		// Combine all hash expressions with AND
 		auto combined_hash_expr = BuildAndFromHashes(input, hash_exprs);
 
 		// Modify this aggregate with PAC functions
-		ModifyAggregatesWithPacFunctions(input, target_agg, combined_hash_expr, plan);
+		ModifyAggregatesWithPacFunctions(input, target_agg, combined_hash_expr, plan, correction);
 	}
 }
 
@@ -2027,7 +565,6 @@ void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExten
 	PAC_DEBUG_PRINT("Scanned PU tables: " + std::to_string(check.scanned_pu_tables.size()));
 	PAC_DEBUG_PRINT("Scanned non-PU tables: " + std::to_string(check.scanned_non_pu_tables.size()));
 #endif
-
 	// Resolve operator types on the raw plan so that .types vectors are populated.
 	// In the pre-optimizer phase, ResolveOperatorTypes hasn't run yet.
 	plan->ResolveOperatorTypes();
@@ -2087,18 +624,12 @@ void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExten
 		}
 		pu_present_in_tree = pu_via_cte;
 	}
-
 #if PAC_DEBUG
 	PAC_DEBUG_PRINT("=== PLAN BEFORE PAC TRANSFORMATION ===");
 	plan->Print();
 #endif
-
-	if (pu_present_in_tree) {
-		// Case a) PU reachable: scanned directly, via CTE, or via CTE+FK chain
-		auto &pu_names = pu_via_cte ? privacy_units : check.scanned_pu_tables;
-		ModifyPlanWithPU(input, plan, pu_names, check, cte_map);
-	} else if (!check.fk_paths.empty()) {
-		// Case b) PU not reachable from plan: follow FK paths and join missing tables
+	if (!pu_present_in_tree && !check.fk_paths.empty()) {
+		// Phase 1: PU not reachable — add FK joins so plan has all tables needed
 		string start_table;
 		vector<string> target_pus;
 		vector<string> gets_present, gets_missing;
@@ -2112,10 +643,14 @@ void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExten
 		// Deduplicate missing tables
 		std::unordered_set<string> missing_set(gets_missing.begin(), gets_missing.end());
 		vector<string> unique_gets_missing(missing_set.begin(), missing_set.end());
-		// Sort for deterministic behavior across platforms (unordered_set iteration order is not guaranteed)
 		std::sort(unique_gets_missing.begin(), unique_gets_missing.end());
 
-		ModifyPlanWithoutPU(check, input, plan, unique_gets_missing, gets_present, it->second, privacy_units, cte_map);
+		AddMissingFKJoins(check, input, plan, unique_gets_missing, gets_present, it->second, privacy_units, cte_map);
+	}
+	// Phase 2: always transform aggregates via unified path
+	{
+		auto &pu_names = (pu_present_in_tree && !pu_via_cte) ? check.scanned_pu_tables : privacy_units;
+		ModifyPlanWithPU(input, plan, pu_names, check, cte_map);
 	}
 
 	// ============================================================================
@@ -2127,18 +662,9 @@ void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExten
 	if (GetBooleanSetting(input.context, "pac_categorical", true)) {
 		RewriteCategoricalQuery(input, plan);
 	}
-
 #if PAC_DEBUG
 	PAC_DEBUG_PRINT("=== PAC-OPTIMIZED PLAN ===");
 	plan->Print();
-	PAC_DEBUG_PRINT("=== END PAC-OPTIMIZED PLAN ===");
-#endif
-
-	// NOTE: DuckDB's built-in optimizers (join ordering, filter pushdown, column lifetime,
-	// compressed materialization) run AFTER this pre-optimizer phase, so they automatically
-	// handle the PAC-transformed plan.
-
-#if PAC_DEBUG
 	PAC_DEBUG_PRINT("=== PAC COMPILATION END ===");
 #endif
 }
