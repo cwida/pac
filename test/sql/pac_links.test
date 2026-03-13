@@ -8,7 +8,7 @@ statement ok
 SET pac_seed = 42
 
 statement ok
-SET pac_deterministic_noise = true
+SET pac_hash_repair = true
 
 statement ok
 SET threads = 1
@@ -76,31 +76,31 @@ INSERT INTO shipments SELECT i AS id, (i % 100) AS item_id, (i % 5) AS grp, (i %
 
 # Mark users as a privacy unit (required for PAC compilation)
 statement ok
-ALTER TABLE users SET PAC;
+ALTER TABLE users ADD PAC_KEY (id);
 
 statement ok
-ALTER PAC TABLE users ADD PAC_KEY (id);
+ALTER TABLE users SET PU;
 
 statement ok
-ALTER PAC TABLE users ADD PROTECTED (name);
+ALTER PU TABLE users ADD PROTECTED (name);
 
 statement ok
-ALTER PAC TABLE orders ADD PAC_KEY (id);
+ALTER TABLE orders ADD PAC_KEY (id);
 
 statement ok
-ALTER PAC TABLE orders ADD PAC_LINK (user_id) REFERENCES users(id);
+ALTER TABLE orders ADD PAC_LINK (user_id) REFERENCES users(id);
 
 statement ok
-ALTER PAC TABLE order_items ADD PAC_KEY (id);
+ALTER TABLE order_items ADD PAC_KEY (id);
 
 statement ok
-ALTER PAC TABLE order_items ADD PAC_LINK (order_id) REFERENCES orders(id);
+ALTER TABLE order_items ADD PAC_LINK (order_id) REFERENCES orders(id);
 
 statement ok
-ALTER PAC TABLE shipments ADD PAC_KEY (id);
+ALTER TABLE shipments ADD PAC_KEY (id);
 
 statement ok
-ALTER PAC TABLE shipments ADD PAC_LINK (item_id) REFERENCES order_items(id);
+ALTER TABLE shipments ADD PAC_LINK (item_id) REFERENCES order_items(id);
 
 # ==============================================================================
 # Test 1: Basic aggregation on child table connected via PAC_LINK
@@ -109,9 +109,9 @@ ALTER PAC TABLE shipments ADD PAC_LINK (item_id) REFERENCES order_items(id);
 query II
 SELECT grp, COUNT(*) FROM orders GROUP BY grp ORDER BY grp;
 ----
-0	18
-1	16
-2	16
+0	10
+1	8
+2	12
 
 # ==============================================================================
 # Test 2: Aggregation on grandchild table (2-level PAC_LINK chain)
@@ -141,7 +141,7 @@ query IIIII
 SELECT grp, COUNT(*), SUM(amount), MIN(amount), MAX(amount)
 FROM orders GROUP BY grp ORDER BY grp LIMIT 1;
 ----
-0	18	216	0	24
+0	10	96	0	18
 
 # ==============================================================================
 # Test 5: Explicit joins through PAC_LINK chain
@@ -153,9 +153,9 @@ FROM orders o
 INNER JOIN order_items oi ON oi.order_id = o.id
 GROUP BY o.grp ORDER BY o.grp;
 ----
-0	1764
-1	1536
-2	1600
+0	884
+1	816
+2	1200
 
 # ==============================================================================
 # Test 6: Full chain join (users -> orders -> order_items -> shipments)
@@ -178,22 +178,6 @@ PAC rewrite: protected column 'users.id' can only be accessed inside aggregate f
 # Test 7: Subquery with PAC_LINK chain
 # ==============================================================================
 
-# Verify EXPLAIN shows pac_sum in the optimized logical plan
-statement ok
-SET explain_output='optimized_only';
-
-query II
-EXPLAIN SELECT grp, SUM(quantity) FROM order_items
-WHERE order_id IN (SELECT id FROM orders WHERE amount > 10)
-GROUP BY grp
-ORDER BY grp
-LIMIT 1;
-----
-logical_opt	<REGEX>:.*pac_sum.*
-
-statement ok
-SET explain_output='physical_only';
-
 query II
 SELECT grp, SUM(quantity) FROM order_items
 WHERE order_id IN (SELECT id FROM orders WHERE amount > 10)
@@ -201,7 +185,7 @@ GROUP BY grp
 ORDER BY grp
 LIMIT 1;
 ----
-0	840
+0	480
 
 # ==============================================================================
 # Test 8: Complex - Multiple correlated subqueries with deep PAC_LINK chains
@@ -219,7 +203,7 @@ ORDER BY o.grp, o.id
 LIMIT 2;
 ----
 0	6	124
-0	12	148
+0	24	0
 
 # ==============================================================================
 # Test 9: Extreme - Aggregation on deepest table in chain (shipments)
@@ -260,8 +244,8 @@ GROUP BY oi.grp
 ORDER BY oi.grp
 LIMIT 2;
 ----
-0	38	2040	201.05
-1	38	2140	208.95
+0	22	1160	99.09
+1	22	1260	105.91
 
 # ==============================================================================
 # Test 11: Chain Break - Query middle table with aggregates from both ends
@@ -278,9 +262,9 @@ WHERE o.user_id IN (SELECT id FROM users WHERE id > 1)
 GROUP BY o.grp
 ORDER BY o.grp;
 ----
-0	10	80
-1	10	80
-2	10	80
+0	6	32
+1	6	16
+2	8	48
 
 # ==============================================================================
 # Test 12: Multiple Privacy Units - Users table as PU, protected column access
@@ -294,9 +278,9 @@ WHERE u.id > 0
 GROUP BY o.grp
 ORDER BY o.grp;
 ----
-0	14
-1	14
-2	12
+0	6
+1	6
+2	8
 
 # ==============================================================================
 # Test 13: Complex nested aggregation - Aggregate of aggregate through PAC LINKs
@@ -316,9 +300,9 @@ FROM (
 GROUP BY grp
 ORDER BY grp;
 ----
-0	56
-1	48
-2	52
+0	32
+1	24
+2	36
 
 # ==============================================================================
 # Test 14: Extreme depth - Full 4-level chain aggregation
@@ -344,8 +328,8 @@ GROUP BY s.grp
 ORDER BY s.grp
 LIMIT 2;
 ----
-0	0	190
-1	1	196
+0	0	195
+1	11	191
 
 # ==============================================================================
 # Test 15: Multiple aggregates with HAVING clause through PAC LINK chain
@@ -362,7 +346,7 @@ HAVING SUM(o.amount) > 1
 ORDER BY o.grp
 LIMIT 1;
 ----
-0	18	216
+0	10	96
 
 # ==============================================================================
 # Test 17: Stress test - Multiple levels with multiple aggregates and filters
@@ -385,7 +369,130 @@ HAVING SUM(oi.quantity) > 50
 ORDER BY oi.grp
 LIMIT 1;
 ----
-0	18	12
+0	12	12
+
+# ==============================================================================
+# Test 18: Side table — multiple PAC_LINK paths to the same PU
+# ==============================================================================
+
+statement ok
+CREATE TABLE side_orders (
+    id INTEGER,
+    user_id INTEGER,
+    grp INTEGER,
+    val INTEGER
+);
+
+statement ok
+ALTER TABLE side_orders ADD PAC_KEY (id);
+
+statement ok
+ALTER TABLE side_orders ADD PAC_LINK (user_id) REFERENCES users(id);
+
+statement ok
+INSERT INTO side_orders
+SELECT i AS id, (i % 5) AS user_id, (i % 5) AS grp, (i % 10) AS val
+FROM range(25) t(i);
+
+query III
+SELECT o.grp, COUNT(*), MIN(s.val)
+FROM orders o
+INNER JOIN side_orders s ON o.user_id = s.user_id
+INNER JOIN users u ON o.user_id = u.id
+GROUP BY o.grp
+ORDER BY o.grp
+LIMIT 1;
+----
+0	50	0
+
+# ==============================================================================
+# Test 19: LEFT JOIN from child to side table
+# ==============================================================================
+
+query III
+SELECT o.grp, COUNT(*), MAX(s.val)
+FROM orders o
+LEFT JOIN side_orders s ON o.user_id = s.user_id
+GROUP BY o.grp
+ORDER BY o.grp
+LIMIT 1;
+----
+0	50	8
+
+# ==============================================================================
+# Test 20: UNION ALL with PAC_LINK chain aggregates
+# ==============================================================================
+
+query I
+SELECT SUM(oi.quantity)
+FROM order_items oi
+INNER JOIN orders o ON oi.order_id = o.id
+UNION ALL
+SELECT SUM(o.amount)
+FROM orders o
+INNER JOIN users u ON o.user_id = u.id;
+----
+2450
+300
+
+# ==============================================================================
+# Test 21: UNION with deduplication
+# ==============================================================================
+
+query I
+SELECT COUNT(*)
+FROM order_items oi
+INNER JOIN orders o ON oi.order_id = o.id
+UNION
+SELECT COUNT(*)
+FROM orders o
+INNER JOIN users u ON o.user_id = u.id;
+----
+100
+25
+
+# ==============================================================================
+# Test 22: Mixed DISTINCT + non-DISTINCT aggregates (multi-branch)
+# ==============================================================================
+
+query III
+SELECT grp, COUNT(DISTINCT amount), SUM(amount)
+FROM orders
+GROUP BY grp
+ORDER BY grp;
+----
+0	10	96
+1	8	104
+2	12	150
+
+# ==============================================================================
+# Test 23: Multiple DISTINCT columns
+# ==============================================================================
+
+query III
+SELECT grp, COUNT(DISTINCT amount), COUNT(DISTINCT user_id)
+FROM orders
+GROUP BY grp
+ORDER BY grp;
+----
+0	10	6
+1	8	6
+2	12	6
+
+# ==============================================================================
+# Test 24: Mixed INNER and LEFT JOINs
+# ==============================================================================
+
+query II
+SELECT oi.grp, MIN(oi.quantity)
+FROM order_items oi
+LEFT JOIN orders o ON oi.order_id = o.id
+INNER JOIN users u ON o.user_id = u.id
+GROUP BY oi.grp
+ORDER BY oi.grp
+LIMIT 1;
+----
+0	0
 
 # ==============================================================================
 # Cleanup

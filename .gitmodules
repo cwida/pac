@@ -6,3 +6,6 @@
 	path = extension-ci-tools
 	url = https://github.com/duckdb/extension-ci-tools
 	branch = main
+[submodule "benchmark/sqlstorm/SQLStorm"]
+	path = benchmark/sqlstorm/SQLStorm
+	url = https://github.com/SQL-Storm/SQLStorm.git

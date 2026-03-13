@@ -20,19 +20,19 @@ cmake --build build/release --target pac_tpch_compiler_benchmark
 ## Running
 
 ```bash
-# Basic usage
-./build/release/pac_tpch_compiler_benchmark --sf 1
+# Basic usage (SF 1.0)
+./build/release/extension/pac/pac_tpch_compiler_benchmark 1
 
 # Different scale factors
-./build/release/pac_tpch_compiler_benchmark --sf 0.1
-./build/release/pac_tpch_compiler_benchmark --sf 10
+./build/release/extension/pac/pac_tpch_compiler_benchmark 01   # SF 0.1
+./build/release/extension/pac/pac_tpch_compiler_benchmark 10   # SF 10.0
 ```
 
 ## Command Line Options
 
-| Option | Description | Default |
-|--------|-------------|---------|
-| `--sf <factor>` | TPC-H scale factor | Required |
+| Argument | Description | Default |
+|----------|-------------|---------|
+| `scale_factor` | TPC-H scale factor as positional argument. Uses special parsing: `01` means 0.1, `1` means 1.0, `10` means 10.0. | Required |
 
 ## What It Tests
 
@@ -71,7 +71,7 @@ For each TPC-H query, the benchmark:
 
 | Directory | Description |
 |-----------|-------------|
-| `benchmark/tpch_pac_queries/` | Manually written PAC queries for comparison |
-| `benchmark/tpch_pac_naive_queries/` | Naive PAC implementations |
-| `benchmark/tpch_pac_simple_hash_queries/` | Simple hash PAC implementations |
+| `benchmark/tpch/tpch_pac_queries/` | Manually written PAC queries for comparison |
+| `benchmark/tpch/tpch_pac_naive_queries/` | Naive PAC implementations |
+| `benchmark/tpch/tpch_pac_simple_hash_queries/` | Simple hash PAC implementations |
 

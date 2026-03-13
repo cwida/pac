@@ -30,30 +30,31 @@ endif()
 set(EXTENSION_SOURCES
     src/core/pac_extension.cpp
     src/core/pac_optimizer.cpp
-    src/core/pac_privacy_unit.cpp
     src/metadata/pac_compatibility_check.cpp
     src/metadata/pac_metadata_manager.cpp
     src/metadata/pac_metadata_serialization.cpp
     src/aggregates/pac_aggregate.cpp
-    src/aggregates/pac_aggregate_hash.cpp
     src/aggregates/pac_count.cpp
-    src/aggregates/pac_min_max.cpp
+src/aggregates/pac_min_max.cpp
     src/aggregates/pac_sum.cpp
-    src/aggregates/pac_avg.cpp
     src/compiler/pac_bitslice_compiler.cpp
     src/compiler/pac_compiler_helpers.cpp
+    src/query_processing/pac_avg_rewriter.cpp
     src/query_processing/pac_expression_builder.cpp
     src/query_processing/pac_plan_traversal.cpp
     src/query_processing/pac_projection_propagation.cpp
-    src/query_processing/pac_join_builder.cpp
     src/query_processing/pac_fk_resolver.cpp
+    src/compiler/pac_bitslice_add_fkjoins.cpp
     src/query_processing/pac_subquery_handler.cpp
     src/parser/pac_parser.cpp
     src/parser/pac_parser_helpers.cpp
     src/categorical/pac_categorical.cpp
+    src/categorical/pac_categorical_detection.cpp
+    src/categorical/pac_categorical_lambdas.cpp
     src/categorical/pac_categorical_rewriter.cpp
     src/diff/pac_utility_diff.cpp
     src/diff/pac_utility_summary.cpp
+    src/query_processing/pac_topk_rewriter.cpp
     src/utils/pac_helpers.cpp)
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
@@ -66,6 +67,20 @@ install(
 
 # Test runners and benchmarks - only build for native platforms, not WASM or Windows
 # (Windows lacks unistd.h and other POSIX features used by the benchmark code)
+set(PAC_LINK_LIBS
+    duckdb_static
+    duckdb_generated_extension_loader
+    ${EXTENSION_NAME}
+    core_functions_extension
+    parquet_extension
+    duckdb_static)
+
+# jemalloc is only built on Linux 64-bit; link it when the extension was loaded
+# (can't use if(TARGET ...) here because the target isn't defined yet at this point)
+if(DUCKDB_EXTENSION_JEMALLOC_SHOULD_LINK)
+    list(APPEND PAC_LINK_LIBS jemalloc_extension)
+endif()
+
 if(NOT EMSCRIPTEN AND NOT WIN32)
     # Build a single unified test executable that invokes all tests via src/test/test_runner.cpp
     add_executable(pac_test_runner
@@ -74,17 +89,21 @@ if(NOT EMSCRIPTEN AND NOT WIN32)
         src/test/test_schema_metadata.cpp
         src/test/test_compiler_functions.cpp
         src/test/test_pac_parser.cpp)
-    target_link_libraries(pac_test_runner ${EXTENSION_NAME})
+    target_link_libraries(pac_test_runner ${PAC_LINK_LIBS})
 
     # TPCH + PAC benchmark runner
-    add_executable(pac_tpch_benchmark benchmark/pac_tpch_benchmark.cpp)
-    target_link_libraries(pac_tpch_benchmark ${EXTENSION_NAME})
+    add_executable(pac_tpch_benchmark benchmark/tpch/pac_tpch_benchmark.cpp)
+    target_link_libraries(pac_tpch_benchmark ${PAC_LINK_LIBS})
 
     # TPCH Compiler benchmark runner (compares PAC vs regular TPC-H)
-    add_executable(pac_tpch_compiler_benchmark benchmark/pac_tpch_compiler_benchmark.cpp)
-    target_link_libraries(pac_tpch_compiler_benchmark ${EXTENSION_NAME})
+    add_executable(pac_tpch_compiler_benchmark benchmark/tpch/pac_tpch_compiler_benchmark.cpp)
+    target_link_libraries(pac_tpch_compiler_benchmark ${PAC_LINK_LIBS})
 
     # ClickHouse/ClickBench benchmark runner
-    add_executable(pac_clickhouse_benchmark benchmark/pac_clickhouse_benchmark.cpp)
-    target_link_libraries(pac_clickhouse_benchmark ${EXTENSION_NAME})
+    add_executable(pac_clickhouse_benchmark benchmark/clickbench/pac_clickhouse_benchmark.cpp)
+    target_link_libraries(pac_clickhouse_benchmark ${PAC_LINK_LIBS})
+
+    # SQLStorm benchmark runner
+    add_executable(pac_sqlstorm_benchmark benchmark/sqlstorm/pac_sqlstorm_benchmark.cpp)
+    target_link_libraries(pac_sqlstorm_benchmark ${PAC_LINK_LIBS})
 endif()

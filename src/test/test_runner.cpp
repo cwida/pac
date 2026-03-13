@@ -25,7 +25,7 @@ int main() {
 		std::cerr << "✓ Compiler function tests passed\n";
 	}
 
-	// Test 2: Schema Metadata (FindPrimaryKey, FindForeignKeys, FindForeignKeyBetween)
+	// Test 2: Schema Metadata (FindPacKey, FindPacLinks, FindPacLinkPath)
 	std::cerr << "\n[2/4] Running schema metadata tests...\n";
 	code = duckdb::RunSchemaMetadataTests();
 	if (code != 0) {
@@ -45,7 +45,7 @@ int main() {
 		std::cerr << "✓ Plan traversal tests passed\n";
 	}
 
-	// Test 4: PAC Parser (CREATE PAC TABLE, ALTER PAC TABLE, metadata management)
+	// Test 4: PAC Parser (CREATE PU TABLE, ALTER PU TABLE, metadata management)
 	std::cerr << "\n[4/4] Running PAC parser tests...\n";
 	try {
 		duckdb::TestPACParser::RunAllTests();

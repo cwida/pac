@@ -1,6 +1,11 @@
 {
-  "name": "pac",
-  "version-string": "1.0.0",
-  "dependencies": []
+        "dependencies": [],
+        "vcpkg-configuration": {
+                "overlay-ports": [
+                        "./extension-ci-tools/vcpkg_ports"
+                ],
+                "overlay-triplets": [
+                        "./extension-ci-tools/toolchains"
+                ]
+        }
 }
-

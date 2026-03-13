@@ -18,13 +18,9 @@
 // - pac_lt(value, counters) -> UBIGINT : Returns mask where bit i = 1 if value < counters[i]
 // - pac_gte(value, counters) -> UBIGINT : Returns mask where bit i = 1 if value >= counters[i]
 // - pac_lte(value, counters) -> UBIGINT : Returns mask where bit i = 1 if value <= counters[i]
-// - pac_select(list<bool>) -> UBIGINT : Convert boolean list to bitmask
+// - pac_select(hash, list<bool>) -> UBIGINT : Convert booleans to mask, combined with hash subsampling
 // - pac_filter(mask) -> BOOLEAN : Probabilistically filter based on popcount(mask)/64
 // - pac_filter(list<bool>) -> BOOLEAN : Convert to mask, then filter
-//
-// Mask operations:
-// - AND: mask1 & mask2 (both conditions true)
-// - OR:  mask1 | mask2 (either condition true)
 // - NOT: ~mask (negate condition)
 //
 // Created by ila on 1/22/26.
@@ -40,6 +36,11 @@ namespace duckdb {
 
 // Register all PAC categorical functions with the extension loader
 void RegisterPacCategoricalFunctions(ExtensionLoader &loader);
+
+// Add a PAC list aggregate overload (LIST<DOUBLE> → LIST<DOUBLE>) to an existing function set.
+// Used to merge the list variant into the same AggregateFunctionSet as the counters variant.
+// aggr_type: "sum", "count", "min", or "max"
+void AddPacListAggregateOverload(AggregateFunctionSet &set, const string &aggr_type);
 
 // ============================================================================
 // PAC_COUNTERS aggregate: Returns all 64 counters as a LIST for categorical queries
@@ -59,10 +60,11 @@ void RegisterPacCategoricalFunctions(ExtensionLoader &loader);
 // pac_eq(value, counters) -> mask where bit i = 1 if value == counters[i] (approx equality for floats)
 
 // ============================================================================
-// PAC_SELECT: Convert list<bool> to bitmask
+// PAC_SELECT: Convert list<bool> to bitmask, combined with hash subsampling
 // ============================================================================
-// pac_select(list<bool>) -> UBIGINT
-// Converts a list of booleans to a 64-bit mask (true=1, false/NULL=0)
+// pac_select(UBIGINT hash, list<bool>) -> UBIGINT
+// Converts booleans to a mask and combines with the privacy-unit hash.
+// Output is query_hash-compatible for downstream pac aggregates.
 
 // ============================================================================
 // PAC_FILTER: Final probabilistic selection based on mask

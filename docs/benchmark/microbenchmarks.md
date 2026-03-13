@@ -37,12 +37,12 @@ The suite builds multiple DuckDB binaries with different optimization flags:
 | Variant | Flags | Description |
 |---------|-------|-------------|
 | `default` | (none) | All optimizations enabled |
-| `count_nonbanked` | `-DPAC_COUNT_NONBANKED` | Disable banked counting |
-| `sumavg_noncascading` | `-DPAC_SUMAVG_NONCASCADING` | Disable sum/avg cascading |
-| `sumavg_nonlazy` | `-DPAC_SUMAVG_NONLAZY` | Pre-allocate all levels |
-| `minmax_nonbanked` | `-DPAC_MINMAX_NONBANKED` | Disable banked min/max |
-| `minmax_noboundopt` | `-DPAC_MINMAX_NOBOUNDOPT` | Disable bound optimization |
-| `minmax_nonlazy` | `-DPAC_MINMAX_NONLAZY` | Pre-allocate all levels |
+| `nobuffering` | `-DPAC_NOBUFFERING` | Disable input buffering (lazy allocation) |
+| `nocascading` | `-DPAC_NOCASCADING` | Pre-allocate all accumulator levels |
+| `nosimd` | `-DPAC_NOSIMD` | SIMD-unfriendly kernels, auto-vectorization disabled |
+| `noboundopt` | `-DPAC_NOBOUNDOPT` | Disable bound optimization (min/max only) |
+| `signedsum` | `-DPAC_SIGNEDSUM` | Disable separate negative counter handling |
+| `exactsum` | `-DPAC_EXACTSUM` | Exact cascading instead of approximate sum |
 
 ## Benchmarks
 
@@ -114,4 +114,62 @@ CSV columns:
 WARMUP_RUNS=1    # Warmup iterations (default: 1)
 BENCH_RUNS=3     # Benchmark iterations (default: 3)
 FORCE_REBUILD=1  # Force rebuild binaries
+```
+
+## Reproducibility
+
+### EC2 Instances
+
+| Instance | CPU | RAM | Storage |
+|----------|-----|-----|---------|
+| i8gd.4xlarge | 16x Graviton4 2.7GHz | 32GB | 950GB SSD |
+| c8i.4xlarge | 16x Granite Rapids 3.9GHz | 32GB | EBS io2 90GB |
+| c8a.4xlarge | 16x EPYC 9R45 4.5GHz | 32GB | EBS io2 90GB |
+
+Use Ubuntu 24 as the OS.
+
+### Graviton instance SSD setup
+```bash
+sudo parted /dev/nvme0n1 -- mklabel gpt
+sudo parted /dev/nvme0n1 -- mkpart primary ext4 0% 200GB
+sudo mkfs.ext4 /dev/nvme0n1p1
+sudo mkdir -p /mnt/instance-store
+sudo mount /dev/nvme0n1p1 /mnt/instance-store
+cd /mnt/instance-store/
+chmod 777 .
+```
+
+### Build toolchain (all instances)
+```bash
+sudo apt update
+sudo apt install -y clang cmake ninja-build python3
+export CC=clang
+export CXX=clang++
+git clone --depth 1 https://github.com/llvm/llvm-project.git
+cd llvm-project
+cmake -S llvm -B build -G Ninja \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DLLVM_ENABLE_PROJECTS="clang;lld" \
+    -DLLVM_TARGETS_TO_BUILD="X86"  # or "AArch64" for Graviton
+ninja -C build clang lld
+```
+
+### Run benchmarks
+```bash
+git clone --recurse-submodules https://github.com/cwida/pac.git
+cd pac/benchmark/pac_microbench
+./build_variants.sh
+./create_test_db.sh
+nohup ./run_all.sh &
+# Results in results/ directory. Experiments take ~6 hours, ~$3/machine.
+```
+
+### Analysis scripts
+```
+benchmark/pac_microbench/plot_simd_improvements.py
+benchmark/pac_microbench/plot_count_optimizations.py
+benchmark/pac_microbench/plot_minmax_optimizations.py
+benchmark/pac_microbench/plot_sum_optimizations.py
+benchmark/pac_microbench/approx_sum_stability.sql    # run with duckdb_default and duckdb_exactsum
+benchmark/pac_microbench/bionmial.sql                # generates output for plot_hash_distribution.py
 ```

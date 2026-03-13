@@ -16,19 +16,22 @@ require pac
 # ============================================================================
 
 statement ok
-CREATE TABLE customers (
-    c_custkey INTEGER PRIMARY KEY,
+CREATE PU TABLE customers (
+    c_custkey INTEGER,
     c_name VARCHAR,
-    c_nationkey INTEGER
+    c_nationkey INTEGER,
+    PAC_KEY (c_custkey)
 );
 
 statement ok
 CREATE TABLE orders (
-    o_orderkey INTEGER PRIMARY KEY,
+    o_orderkey INTEGER,
     o_custkey INTEGER,
-    o_orderdate DATE,
-    FOREIGN KEY (o_custkey) REFERENCES customers(c_custkey)
+    o_orderdate DATE
 );
+
+statement ok
+ALTER TABLE orders ADD PAC_KEY (o_orderkey), ADD PAC_LINK (o_custkey) REFERENCES customers(c_custkey);
 
 statement ok
 CREATE TABLE lineitem (
@@ -37,23 +40,30 @@ CREATE TABLE lineitem (
     l_suppkey INTEGER,
     l_extendedprice DOUBLE,
     l_discount DOUBLE,
-    l_quantity INTEGER,
-    PRIMARY KEY (l_orderkey, l_linenumber),
-    FOREIGN KEY (l_orderkey) REFERENCES orders(o_orderkey)
+    l_quantity INTEGER
 );
 
 statement ok
+ALTER TABLE lineitem ADD PAC_KEY (l_orderkey, l_linenumber), ADD PAC_LINK (l_orderkey) REFERENCES orders(o_orderkey);
+
+statement ok
 CREATE TABLE suppliers (
-    s_suppkey INTEGER PRIMARY KEY,
+    s_suppkey INTEGER,
     s_name VARCHAR,
     s_nationkey INTEGER
 );
 
 statement ok
+ALTER TABLE suppliers ADD PAC_KEY (s_suppkey);
+
+statement ok
 CREATE TABLE nations (
-    n_nationkey INTEGER PRIMARY KEY,
+    n_nationkey INTEGER,
     n_name VARCHAR
 );
+
+statement ok
+ALTER TABLE nations ADD PAC_KEY (n_nationkey);
 
 # ============================================================================
 # Test Data
@@ -106,13 +116,10 @@ INSERT INTO lineitem VALUES
 # ============================================================================
 
 statement ok
-ALTER TABLE customers SET PAC;
-
-statement ok
 SET pac_seed = 42;
 
 statement ok
-SET pac_deterministic_noise = true;
+SET pac_hash_repair = true
 
 statement ok
 SET threads = 1;
@@ -123,7 +130,7 @@ SET pac_mi = 0;
 # ============================================================================
 # Test 1: Simple ratio of two sums (Q08-like pattern)
 # sum(CASE WHEN nation='BRAZIL' THEN volume ELSE 0 END) / sum(volume)
-# Verify the rewriter uses pac_sum_counters, list_zip, list_transform, and pac_noised
+# Verify the rewriter uses pac_sum, list_zip, list_transform, and pac_noised
 # ============================================================================
 
 query I nosort explain_test1
@@ -139,7 +146,7 @@ WHERE l.l_orderkey = o.o_orderkey
 GROUP BY s.s_nationkey
 ORDER BY s.s_nationkey;
 ----
-pac_sum_counters
+pac_sum
 list_zip
 list_transform
 pac_noised
@@ -174,7 +181,7 @@ WHERE l.l_orderkey = o.o_orderkey
 GROUP BY order_month
 ORDER BY order_month;
 ----
-pac_sum_counters
+pac_sum
 list_zip
 list_transform
 pac_noised
@@ -206,7 +213,7 @@ WHERE l.l_orderkey = o.o_orderkey
 GROUP BY l.l_suppkey
 ORDER BY l.l_suppkey;
 ----
-pac_sum_counters
+pac_sum
 list_zip
 list_transform
 pac_noised
@@ -237,7 +244,7 @@ WHERE l.l_orderkey = o.o_orderkey
 GROUP BY l.l_suppkey
 ORDER BY l.l_suppkey;
 ----
-pac_sum_counters
+pac_sum
 list_transform
 pac_noised
 
@@ -267,7 +274,7 @@ WHERE l.l_orderkey = o.o_orderkey
 GROUP BY l.l_suppkey
 ORDER BY l.l_suppkey;
 ----
-pac_sum_counters
+pac_sum
 list_zip
 list_transform
 pac_noised

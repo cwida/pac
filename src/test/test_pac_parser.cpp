@@ -134,8 +134,8 @@ void TestPACParser::TestFilePersistence() {
 }
 
 void TestPACParser::TestCreatePACTableParsing() {
-	// Test basic CREATE PAC TABLE
-	string sql1 = "CREATE PAC TABLE users (id INTEGER, name VARCHAR, PAC_KEY (id))";
+	// Test basic CREATE PU TABLE
+	string sql1 = "CREATE PU TABLE users (id INTEGER, name VARCHAR, PAC_KEY (id))";
 	PACTableMetadata metadata1;
 	string stripped1;
 	bool result1 = PACParserExtension::ParseCreatePACTable(sql1, stripped1, metadata1);
@@ -145,13 +145,16 @@ void TestPACParser::TestCreatePACTableParsing() {
 	TEST_ASSERT(metadata1.primary_key_columns[0] == "id", "PK column should be id");
 	TEST_ASSERT(stripped1.find("CREATE TABLE") != string::npos, "Stripped SQL should contain CREATE TABLE");
 	TEST_ASSERT(stripped1.find("PAC_KEY") == string::npos, "Stripped SQL should not contain PAC KEY");
-	// Test with PAC LINK
-	string sql2 = "CREATE PAC TABLE orders (id INTEGER, user_id INTEGER, PAC LINK (user_id) REFERENCES users(id))";
+	// Test with PAC_KEY and PAC_LINK
+	string sql2 =
+	    "CREATE PU TABLE orders (id INTEGER, user_id INTEGER, PAC_KEY (id), PAC_LINK (user_id) REFERENCES users(id))";
 	PACTableMetadata metadata2;
 	string stripped2;
 	bool result2 = PACParserExtension::ParseCreatePACTable(sql2, stripped2, metadata2);
 	TEST_ASSERT(result2, "Parse should succeed");
 	TEST_ASSERT(metadata2.table_name == "orders", "Table name should be orders");
+	TEST_ASSERT(metadata2.primary_key_columns.size() == 1, "Should have 1 PK column");
+	TEST_ASSERT(metadata2.primary_key_columns[0] == "id", "PK column should be id");
 	TEST_ASSERT(metadata2.links.size() == 1, "Should have 1 link");
 	TEST_ASSERT(metadata2.links[0].local_columns.size() == 1, "Link should have 1 local column");
 	TEST_ASSERT(metadata2.links[0].local_columns[0] == "user_id", "Link local column should be user_id");
@@ -159,17 +162,18 @@ void TestPACParser::TestCreatePACTableParsing() {
 	TEST_ASSERT(metadata2.links[0].referenced_columns.size() == 1, "Link should have 1 referenced column");
 	TEST_ASSERT(metadata2.links[0].referenced_columns[0] == "id", "Link referenced column should be id");
 	// Test with PROTECTED
-	string sql3 = "CREATE PAC TABLE sensitive (id INTEGER, ssn VARCHAR, PROTECTED (ssn))";
+	string sql3 = "CREATE PU TABLE sensitive (id INTEGER, ssn VARCHAR, PAC_KEY (id), PROTECTED (ssn))";
 	PACTableMetadata metadata3;
 	string stripped3;
 	bool result3 = PACParserExtension::ParseCreatePACTable(sql3, stripped3, metadata3);
 	TEST_ASSERT(result3, "Parse should succeed");
 	TEST_ASSERT(metadata3.table_name == "sensitive", "Table name should be sensitive");
+	TEST_ASSERT(metadata3.primary_key_columns.size() == 1, "Should have 1 PK column");
 	TEST_ASSERT(metadata3.protected_columns.size() == 1, "Should have 1 protected column");
 	TEST_ASSERT(metadata3.protected_columns[0] == "ssn", "Protected column should be ssn");
 	// Test with multiple clauses
-	string sql4 = "CREATE PAC TABLE employees (emp_id INTEGER, dept_id INTEGER, salary INTEGER, "
-	              "PAC_KEY (emp_id), PAC LINK (dept_id) REFERENCES departments(id), "
+	string sql4 = "CREATE PU TABLE employees (emp_id INTEGER, dept_id INTEGER, salary INTEGER, "
+	              "PAC_KEY (emp_id), PAC_LINK (dept_id) REFERENCES departments(id), "
 	              "PROTECTED (salary))";
 	PACTableMetadata metadata4;
 	string stripped4;
@@ -184,12 +188,13 @@ void TestPACParser::TestCreatePACTableParsing() {
 void TestPACParser::TestAlterTablePACParsing() {
 	auto &manager = PACMetadataManager::Get();
 	manager.Clear();
-	// First create a table with initial metadata
+	// First create a PU table with initial metadata
 	PACTableMetadata initial("products");
 	initial.primary_key_columns = {"product_id"};
+	initial.is_privacy_unit = true;
 	manager.AddOrUpdateTable("products", initial);
-	// Test ALTER PAC TABLE ADD PAC LINK
-	string sql1 = "ALTER PAC TABLE products ADD PAC LINK (category_id) REFERENCES categories(id)";
+	// Test ALTER PU TABLE ADD PAC LINK
+	string sql1 = "ALTER PU TABLE products ADD PAC_LINK (category_id) REFERENCES categories(id)";
 	PACTableMetadata metadata1;
 	string stripped1;
 	bool result1 = PACParserExtension::ParseAlterTableAddPAC(sql1, stripped1, metadata1);
@@ -199,8 +204,8 @@ void TestPACParser::TestAlterTablePACParsing() {
 	TEST_ASSERT(metadata1.links.size() == 1, "Should have 1 link");
 	TEST_ASSERT(metadata1.links[0].local_columns.size() == 1, "Link should have 1 local column");
 	TEST_ASSERT(metadata1.links[0].local_columns[0] == "category_id", "Link local column should be category_id");
-	// Test ALTER PAC TABLE ADD PROTECTED
-	string sql2 = "ALTER PAC TABLE products ADD PROTECTED (price, cost)";
+	// Test ALTER PU TABLE ADD PROTECTED
+	string sql2 = "ALTER PU TABLE products ADD PROTECTED (price, cost)";
 	PACTableMetadata metadata2;
 	string stripped2;
 	bool result2 = PACParserExtension::ParseAlterTableAddPAC(sql2, stripped2, metadata2);
@@ -215,7 +220,7 @@ void TestPACParser::TestCompositeKeyParsing() {
 	manager.Clear();
 
 	// Test single-column FK (should still work)
-	string sql1 = "ALTER PAC TABLE orders ADD PAC LINK (customer_id) REFERENCES customers(id)";
+	string sql1 = "ALTER TABLE orders ADD PAC_LINK (customer_id) REFERENCES customers(id)";
 	PACTableMetadata metadata1;
 	string stripped1;
 	bool result1 = PACParserExtension::ParseAlterTableAddPAC(sql1, stripped1, metadata1);
@@ -230,7 +235,7 @@ void TestPACParser::TestCompositeKeyParsing() {
 
 	// Test composite FK (two columns)
 	string sql2 =
-	    "ALTER PAC TABLE lineitem ADD PAC LINK (l_partkey, l_suppkey) REFERENCES partsupp(ps_partkey, ps_suppkey)";
+	    "ALTER TABLE lineitem ADD PAC_LINK (l_partkey, l_suppkey) REFERENCES partsupp(ps_partkey, ps_suppkey)";
 	PACTableMetadata metadata2;
 	string stripped2;
 	bool result2 = PACParserExtension::ParseAlterTableAddPAC(sql2, stripped2, metadata2);
@@ -248,7 +253,7 @@ void TestPACParser::TestCompositeKeyParsing() {
 	            "Second referenced column should be ps_suppkey");
 
 	// Test composite FK with spaces (three columns)
-	string sql3 = "ALTER PAC TABLE complex ADD PAC LINK (col1, col2, col3) REFERENCES target(ref1, ref2, ref3)";
+	string sql3 = "ALTER TABLE complex ADD PAC_LINK (col1, col2, col3) REFERENCES target(ref1, ref2, ref3)";
 	PACTableMetadata metadata3;
 	string stripped3;
 	bool result3 = PACParserExtension::ParseAlterTableAddPAC(sql3, stripped3, metadata3);
@@ -264,13 +269,13 @@ void TestPACParser::TestCompositeKeyParsing() {
 	TEST_ASSERT(metadata3.links[0].referenced_columns[1] == "ref2", "Second referenced column should be ref2");
 	TEST_ASSERT(metadata3.links[0].referenced_columns[2] == "ref3", "Third referenced column should be ref3");
 
-	// Test CREATE PAC TABLE with composite FK
-	string sql4 = "CREATE PAC TABLE items (item_id INTEGER, part_id INTEGER, supplier_id INTEGER, "
-	              "PAC LINK (part_id, supplier_id) REFERENCES partsupplier(ps_part, ps_supplier))";
+	// Test CREATE PU TABLE with composite FK
+	string sql4 = "CREATE PU TABLE items (item_id INTEGER, part_id INTEGER, supplier_id INTEGER, "
+	              "PAC_KEY (item_id), PAC_LINK (part_id, supplier_id) REFERENCES partsupplier(ps_part, ps_supplier))";
 	PACTableMetadata metadata4;
 	string stripped4;
 	bool result4 = PACParserExtension::ParseCreatePACTable(sql4, stripped4, metadata4);
-	TEST_ASSERT(result4, "CREATE PAC TABLE with composite FK should succeed");
+	TEST_ASSERT(result4, "CREATE PU TABLE with composite FK should succeed");
 	TEST_ASSERT(metadata4.table_name == "items", "Table name should be items");
 	TEST_ASSERT(metadata4.links.size() == 1, "Should have 1 link");
 	TEST_ASSERT(metadata4.links[0].local_columns.size() == 2, "Link should have 2 local columns");
@@ -310,9 +315,9 @@ void TestPACParser::TestCompositeKeyParsing() {
 
 void TestPACParser::TestRegexPatterns() {
 	// Test ExtractTableName with various formats
-	string sql1 = "CREATE PAC TABLE users (id INTEGER)";
+	string sql1 = "CREATE PU TABLE users (id INTEGER)";
 	string table1 = PACParserExtension::ExtractTableName(sql1, true);
-	TEST_ASSERT(table1 == "users", "Should extract table name from CREATE PAC TABLE");
+	TEST_ASSERT(table1 == "users", "Should extract table name from CREATE PU TABLE");
 
 	string sql2 = "CREATE TABLE IF NOT EXISTS products (id INTEGER)";
 	string table2 = PACParserExtension::ExtractTableName(sql2, true);
@@ -338,7 +343,7 @@ void TestPACParser::TestRegexPatterns() {
 
 	// Test ExtractPACLink
 	PACLink link1;
-	bool link_result1 = PACParserExtension::ExtractPACLink("PAC LINK (user_id) REFERENCES users(id)", link1);
+	bool link_result1 = PACParserExtension::ExtractPACLink("PAC_LINK (user_id) REFERENCES users(id)", link1);
 	TEST_ASSERT(link_result1, "Should extract single-column link");
 	TEST_ASSERT(link1.local_columns.size() == 1, "Link should have 1 local column");
 	TEST_ASSERT(link1.local_columns[0] == "user_id", "Local column should be user_id");
@@ -348,7 +353,7 @@ void TestPACParser::TestRegexPatterns() {
 
 	PACLink link2;
 	bool link_result2 = PACParserExtension::ExtractPACLink(
-	    "PAC LINK (part_id, supplier_id) REFERENCES partsupplier(ps_part, ps_supplier)", link2);
+	    "PAC_LINK (part_id, supplier_id) REFERENCES partsupplier(ps_part, ps_supplier)", link2);
 	TEST_ASSERT(link_result2, "Should extract composite link");
 	TEST_ASSERT(link2.local_columns.size() == 2, "Link should have 2 local columns");
 	TEST_ASSERT(link2.referenced_columns.size() == 2, "Link should have 2 referenced columns");
@@ -369,8 +374,8 @@ void TestPACParser::TestRegexPatterns() {
 	TEST_ASSERT(protected2[2] == "email", "Third protected column should be email");
 
 	// Test StripPACClauses
-	string sql_with_pac = "CREATE PAC TABLE test (id INTEGER, user_id INTEGER, salary INTEGER, "
-	                      "PAC_KEY (id), PAC LINK (user_id) REFERENCES users(id), PROTECTED (salary))";
+	string sql_with_pac = "CREATE PU TABLE test (id INTEGER, user_id INTEGER, salary INTEGER, "
+	                      "PAC_KEY (id), PAC_LINK (user_id) REFERENCES users(id), PROTECTED (salary))";
 	string stripped = PACParserExtension::StripPACClauses(sql_with_pac);
 	TEST_ASSERT(stripped.find("PAC_KEY") == string::npos, "Stripped SQL should not contain PAC KEY");
 	TEST_ASSERT(stripped.find("PAC_LINK") == string::npos, "Stripped SQL should not contain PAC LINK");
@@ -410,7 +415,7 @@ void TestPACParser::TestDropPACConstraints() {
 	                current->protected_columns.end(),
 	            "col2 should still exist");
 
-	// Test removing PAC LINK (single column)
+	// Test removing PAC_LINK (single column)
 	TEST_ASSERT(current->links.size() == 2, "Should have 2 links initially");
 
 	PACTableMetadata updated2 = *current;

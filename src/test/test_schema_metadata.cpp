@@ -1,4 +1,4 @@
-// Test runner for schema metadata functions (FindPrimaryKey, FindForeignKeys, FindForeignKeyBetween)
+// Test runner for schema metadata functions (FindPacKey, FindPacLinks, FindPacLinkPath)
 
 #include <iostream>
 
@@ -6,6 +6,7 @@
 #include "duckdb/main/connection.hpp"
 #include "../include/utils/pac_helpers.hpp"
 #include "include/test_schema_metadata.hpp"
+#include "parser/pac_parser.hpp"
 
 namespace duckdb {
 
@@ -35,14 +36,17 @@ int RunSchemaMetadataTests() {
 	Connection con(db);
 	con.BeginTransaction();
 
+	auto &manager = PACMetadataManager::Get();
+	manager.Clear();
+
 	int failures = 0;
 
 	try {
-		std::cerr << "=== Testing FindPrimaryKey ===\n";
+		std::cerr << "=== Testing FindPacKey ===\n";
 
 		// Test 1: no primary key
 		con.Query("CREATE TABLE IF NOT EXISTS t_no_pk(a INTEGER, b INTEGER);");
-		auto pk1 = FindPrimaryKey(*con.context, "t_no_pk");
+		auto pk1 = FindPacKey(*con.context, "t_no_pk");
 		if (!pk1.empty()) {
 			std::cerr << "FAIL: expected no PK for t_no_pk\n";
 			failures++;
@@ -50,9 +54,14 @@ int RunSchemaMetadataTests() {
 			std::cerr << "PASS: t_no_pk has no PK\n";
 		}
 
-		// Test 2: single-column primary key
-		con.Query("CREATE TABLE IF NOT EXISTS t_single_pk(id INTEGER PRIMARY KEY, val INTEGER);");
-		auto pk2 = FindPrimaryKey(*con.context, "t_single_pk");
+		// Test 2: single-column primary key (via PAC metadata)
+		con.Query("CREATE TABLE IF NOT EXISTS t_single_pk(id INTEGER, val INTEGER);");
+		{
+			PACTableMetadata meta("t_single_pk");
+			meta.primary_key_columns = {"id"};
+			manager.AddOrUpdateTable("t_single_pk", meta);
+		}
+		auto pk2 = FindPacKey(*con.context, "t_single_pk");
 		vector<string> expect2 = {"id"};
 		if (!EqualVectors(pk2, expect2)) {
 			std::cerr << "FAIL: expected PK [id] for t_single_pk\n";
@@ -61,9 +70,14 @@ int RunSchemaMetadataTests() {
 			std::cerr << "PASS: t_single_pk PK==[id]\n";
 		}
 
-		// Test 3: multi-column primary key
-		con.Query("CREATE TABLE IF NOT EXISTS t_multi_pk(a INTEGER, b INTEGER, c INTEGER, PRIMARY KEY(a, b));");
-		auto pk3 = FindPrimaryKey(*con.context, "t_multi_pk");
+		// Test 3: multi-column primary key (via PAC metadata)
+		con.Query("CREATE TABLE IF NOT EXISTS t_multi_pk(a INTEGER, b INTEGER, c INTEGER);");
+		{
+			PACTableMetadata meta("t_multi_pk");
+			meta.primary_key_columns = {"a", "b"};
+			manager.AddOrUpdateTable("t_multi_pk", meta);
+		}
+		auto pk3 = FindPacKey(*con.context, "t_multi_pk");
 		vector<string> expect3 = {"a", "b"};
 		if (!EqualVectors(pk3, expect3)) {
 			std::cerr << "FAIL: expected PK [a,b] for t_multi_pk\n";
@@ -72,10 +86,15 @@ int RunSchemaMetadataTests() {
 			std::cerr << "PASS: t_multi_pk PK==[a,b]\n";
 		}
 
-		// Test 4: schema-qualified lookup
+		// Test 4: schema-qualified lookup (via PAC metadata with unqualified name)
 		con.Query("CREATE SCHEMA IF NOT EXISTS myschema;");
-		con.Query("CREATE TABLE IF NOT EXISTS myschema.t_schema_pk(x INTEGER PRIMARY KEY, y INTEGER);");
-		auto pk4 = FindPrimaryKey(*con.context, string("myschema.t_schema_pk"));
+		con.Query("CREATE TABLE IF NOT EXISTS myschema.t_schema_pk(x INTEGER, y INTEGER);");
+		{
+			PACTableMetadata meta("t_schema_pk");
+			meta.primary_key_columns = {"x"};
+			manager.AddOrUpdateTable("t_schema_pk", meta);
+		}
+		auto pk4 = FindPacKey(*con.context, string("myschema.t_schema_pk"));
 		vector<string> expect4 = {"x"};
 		if (!EqualVectors(pk4, expect4)) {
 			std::cerr << "FAIL: expected PK [x] for myschema.t_schema_pk\n";
@@ -85,8 +104,13 @@ int RunSchemaMetadataTests() {
 		}
 
 		// Test 5: string (TEXT) primary key should be ignored
-		con.Query("CREATE TABLE IF NOT EXISTS t_string_pk(id TEXT PRIMARY KEY, val INTEGER);");
-		auto pk5 = FindPrimaryKey(*con.context, "t_string_pk");
+		con.Query("CREATE TABLE IF NOT EXISTS t_string_pk(id TEXT, val INTEGER);");
+		{
+			PACTableMetadata meta("t_string_pk");
+			meta.primary_key_columns = {"id"};
+			manager.AddOrUpdateTable("t_string_pk", meta);
+		}
+		auto pk5 = FindPacKey(*con.context, "t_string_pk");
 		if (!pk5.empty()) {
 			std::cerr << "FAIL: expected no PK for t_string_pk (TEXT PK should be ignored)\n";
 			failures++;
@@ -95,8 +119,13 @@ int RunSchemaMetadataTests() {
 		}
 
 		// Test 6: composite primary key with mixed types should be treated as no PK
-		con.Query("CREATE TABLE IF NOT EXISTS t_mixed_pk(a INTEGER, b TEXT, PRIMARY KEY(a, b));");
-		auto pk6 = FindPrimaryKey(*con.context, "t_mixed_pk");
+		con.Query("CREATE TABLE IF NOT EXISTS t_mixed_pk(a INTEGER, b TEXT);");
+		{
+			PACTableMetadata meta("t_mixed_pk");
+			meta.primary_key_columns = {"a", "b"};
+			manager.AddOrUpdateTable("t_mixed_pk", meta);
+		}
+		auto pk6 = FindPacKey(*con.context, "t_mixed_pk");
 		if (!pk6.empty()) {
 			std::cerr << "FAIL: expected no PK for t_mixed_pk\n";
 			failures++;
@@ -104,19 +133,33 @@ int RunSchemaMetadataTests() {
 			std::cerr << "PASS: t_mixed_pk composite mixed-type PK correctly treated as no PK\n";
 		}
 
-		std::cerr << "\n=== Testing FindForeignKeyBetween ===\n";
+		std::cerr << "\n=== Testing FindPacLinkPath ===\n";
 
-		// Test 7: transitive FK detection (t_a -> t_b -> t_c)
-		con.Query("CREATE TABLE IF NOT EXISTS t_c(id INTEGER PRIMARY KEY, val INTEGER);");
-		con.Query("CREATE TABLE IF NOT EXISTS t_b(id INTEGER PRIMARY KEY, cid INTEGER, FOREIGN KEY(cid) REFERENCES "
-		          "t_c(id));");
-		con.Query("CREATE TABLE IF NOT EXISTS t_a(id INTEGER PRIMARY KEY, bid INTEGER, FOREIGN KEY(bid) REFERENCES "
-		          "t_b(id));");
+		// Test 7: transitive FK detection via PAC_LINK (t_a -> t_b -> t_c)
+		con.Query("CREATE TABLE IF NOT EXISTS t_c(id INTEGER, val INTEGER);");
+		con.Query("CREATE TABLE IF NOT EXISTS t_b(id INTEGER, cid INTEGER);");
+		con.Query("CREATE TABLE IF NOT EXISTS t_a(id INTEGER, bid INTEGER);");
 		con.Query("CREATE TABLE IF NOT EXISTS t_unrelated(x INTEGER);");
+		{
+			PACTableMetadata meta_c("t_c");
+			meta_c.primary_key_columns = {"id"};
+			meta_c.is_privacy_unit = true;
+			manager.AddOrUpdateTable("t_c", meta_c);
+
+			PACTableMetadata meta_b("t_b");
+			meta_b.primary_key_columns = {"id"};
+			meta_b.links.push_back(PACLink("cid", "t_c", "id"));
+			manager.AddOrUpdateTable("t_b", meta_b);
+
+			PACTableMetadata meta_a("t_a");
+			meta_a.primary_key_columns = {"id"};
+			meta_a.links.push_back(PACLink("bid", "t_b", "id"));
+			manager.AddOrUpdateTable("t_a", meta_a);
+		}
 
 		auto privacy_units = vector<string> {"t_c"};
 		auto table_names = vector<string> {"t_a", "t_b", "t_unrelated"};
-		auto paths = FindForeignKeyBetween(*con.context, privacy_units, table_names);
+		auto paths = FindPacLinkPath(*con.context, privacy_units, table_names);
 
 		// Expect t_a -> [t_a, t_b, t_c]
 		auto it_a = paths.find("t_a");
@@ -127,7 +170,11 @@ int RunSchemaMetadataTests() {
 			auto &path = it_a->second;
 			if (path.size() != 3 || Basename(path[0]) != "t_a" || Basename(path[1]) != "t_b" ||
 			    Basename(path[2]) != "t_c") {
-				std::cerr << "FAIL: unexpected path for t_a\n";
+				std::cerr << "FAIL: unexpected path for t_a: [";
+				for (auto &p : path) {
+					std::cerr << p << " ";
+				}
+				std::cerr << "]\n";
 				failures++;
 			} else {
 				std::cerr << "PASS: t_a -> t_b -> t_c detected\n";
@@ -142,7 +189,11 @@ int RunSchemaMetadataTests() {
 		} else {
 			auto &path = it_b->second;
 			if (path.size() != 2 || Basename(path[0]) != "t_b" || Basename(path[1]) != "t_c") {
-				std::cerr << "FAIL: unexpected path for t_b\n";
+				std::cerr << "FAIL: unexpected path for t_b: [";
+				for (auto &p : path) {
+					std::cerr << p << " ";
+				}
+				std::cerr << "]\n";
 				failures++;
 			} else {
 				std::cerr << "PASS: t_b -> t_c detected\n";
@@ -157,18 +208,36 @@ int RunSchemaMetadataTests() {
 			std::cerr << "PASS: no path for t_unrelated\n";
 		}
 
-		// Test 8: long FK chain
-		con.Query("CREATE TABLE IF NOT EXISTS t_c_long(id INTEGER PRIMARY KEY);");
-		con.Query("CREATE TABLE IF NOT EXISTS t_long_2(id INTEGER PRIMARY KEY, cid INTEGER, FOREIGN KEY(cid) "
-		          "REFERENCES t_c_long(id));");
-		con.Query("CREATE TABLE IF NOT EXISTS t_long_1(id INTEGER PRIMARY KEY, n2 INTEGER, FOREIGN KEY(n2) REFERENCES "
-		          "t_long_2(id));");
-		con.Query("CREATE TABLE IF NOT EXISTS t_long_0(id INTEGER PRIMARY KEY, n1 INTEGER, FOREIGN KEY(n1) REFERENCES "
-		          "t_long_1(id));");
+		// Test 8: long FK chain via PAC_LINK
+		con.Query("CREATE TABLE IF NOT EXISTS t_c_long(id INTEGER);");
+		con.Query("CREATE TABLE IF NOT EXISTS t_long_2(id INTEGER, cid INTEGER);");
+		con.Query("CREATE TABLE IF NOT EXISTS t_long_1(id INTEGER, n2 INTEGER);");
+		con.Query("CREATE TABLE IF NOT EXISTS t_long_0(id INTEGER, n1 INTEGER);");
+		{
+			PACTableMetadata meta_cl("t_c_long");
+			meta_cl.primary_key_columns = {"id"};
+			meta_cl.is_privacy_unit = true;
+			manager.AddOrUpdateTable("t_c_long", meta_cl);
+
+			PACTableMetadata meta_l2("t_long_2");
+			meta_l2.primary_key_columns = {"id"};
+			meta_l2.links.push_back(PACLink("cid", "t_c_long", "id"));
+			manager.AddOrUpdateTable("t_long_2", meta_l2);
+
+			PACTableMetadata meta_l1("t_long_1");
+			meta_l1.primary_key_columns = {"id"};
+			meta_l1.links.push_back(PACLink("n2", "t_long_2", "id"));
+			manager.AddOrUpdateTable("t_long_1", meta_l1);
+
+			PACTableMetadata meta_l0("t_long_0");
+			meta_l0.primary_key_columns = {"id"};
+			meta_l0.links.push_back(PACLink("n1", "t_long_1", "id"));
+			manager.AddOrUpdateTable("t_long_0", meta_l0);
+		}
 
 		auto privacy_long = vector<string> {"t_c_long"};
 		auto start_long = vector<string> {"t_long_0"};
-		auto paths_long = FindForeignKeyBetween(*con.context, privacy_long, start_long);
+		auto paths_long = FindPacLinkPath(*con.context, privacy_long, start_long);
 		auto it_long = paths_long.find("t_long_0");
 
 		if (it_long == paths_long.end()) {
@@ -185,10 +254,10 @@ int RunSchemaMetadataTests() {
 		}
 
 		// Test 9: no FK path exists
-		con.Query("CREATE TABLE IF NOT EXISTS t_unrelated2(id INTEGER PRIMARY KEY);");
+		con.Query("CREATE TABLE IF NOT EXISTS t_unrelated2(id INTEGER);");
 		auto privacy_none = vector<string> {"t_c"};
 		auto starts_none = vector<string> {"t_unrelated2"};
-		auto paths_none = FindForeignKeyBetween(*con.context, privacy_none, starts_none);
+		auto paths_none = FindPacLinkPath(*con.context, privacy_none, starts_none);
 
 		if (paths_none.find("t_unrelated2") != paths_none.end()) {
 			std::cerr << "FAIL: unexpected path found for t_unrelated2\n";
@@ -199,11 +268,13 @@ int RunSchemaMetadataTests() {
 
 	} catch (std::exception &ex) {
 		con.Rollback();
+		manager.Clear();
 		std::cerr << "Exception during tests: " << ex.what() << "\n";
 		return 2;
 	}
 
 	con.Rollback();
+	manager.Clear();
 
 	if (failures == 0) {
 		std::cerr << "\n=== ALL SCHEMA METADATA TESTS PASSED ===\n";

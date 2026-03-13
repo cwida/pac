@@ -104,7 +104,6 @@ static vector<string> ExtractColumnNames(LogicalOperator *node) {
 
 void ApplyUtilityDiff(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
                       unique_ptr<LogicalOperator> ref_plan, idx_t num_key_cols, const string &output_path) {
-
 #if PAC_DEBUG
 	PAC_DEBUG_PRINT("ApplyUtilityDiff: num_key_cols=" + std::to_string(num_key_cols));
 #endif

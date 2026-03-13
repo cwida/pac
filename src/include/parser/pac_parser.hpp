@@ -38,7 +38,7 @@ struct PACTableMetadata {
 	vector<string> primary_key_columns;
 	vector<PACLink> links;
 	vector<string> protected_columns;
-	bool is_privacy_unit = false; // True if created with CREATE PAC TABLE or SET PAC
+	bool is_privacy_unit = false; // True if created with CREATE PU TABLE or SET PAC
 
 	PACTableMetadata() = default;
 	explicit PACTableMetadata(string name) : table_name(std::move(name)) {
@@ -67,7 +67,7 @@ struct PACParseData : public ParserExtensionParseData {
 	}
 };
 
-// PAC Parser Extension - handles CREATE PAC TABLE and ALTER TABLE ... ADD PAC ...
+// PAC Parser Extension - handles CREATE PU TABLE and ALTER TABLE ... ADD PAC ...
 class PACParserExtension : public ParserExtension {
 public:
 	PACParserExtension() {
@@ -79,13 +79,13 @@ public:
 	static ParserExtensionPlanResult PACPlanFunction(ParserExtensionInfo *info, ClientContext &context,
 	                                                 unique_ptr<ParserExtensionParseData> parse_data);
 
-	// Parse CREATE PAC TABLE syntax
+	// Parse CREATE PU TABLE syntax
 	static bool ParseCreatePACTable(const string &query, string &stripped_sql, PACTableMetadata &metadata);
 
 	// Parse ALTER TABLE ... ADD PAC ... syntax
 	static bool ParseAlterTableAddPAC(const string &query, string &stripped_sql, PACTableMetadata &metadata);
 
-	// Parse ALTER PAC TABLE ... DROP PAC LINK/PROTECTED ... syntax
+	// Parse ALTER PU TABLE ... DROP PAC LINK/PROTECTED ... syntax
 	static bool ParseAlterTableDropPAC(const string &query, string &stripped_sql, PACTableMetadata &metadata);
 
 	// Extract PAC PRIMARY KEY from CREATE statement

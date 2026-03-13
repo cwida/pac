@@ -1,4 +1,5 @@
 #include "aggregates/pac_min_max.hpp"
+#include "categorical/pac_categorical.hpp"
 
 namespace duckdb {
 
@@ -21,7 +22,6 @@ using MinMaxState = PacMinMaxStateWrapper<T, IS_MAX>;
 template <typename T, bool IS_MAX>
 static void PacMinMaxUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, data_ptr_t state_p, idx_t count) {
 	auto &agg = *reinterpret_cast<MinMaxState<T, IS_MAX> *>(state_p);
-	uint64_t query_hash = aggr.bind_data->Cast<PacBindData>().query_hash;
 
 	UnifiedVectorFormat hash_data, value_data;
 	inputs[0].ToUnifiedFormat(count, hash_data);
@@ -34,7 +34,7 @@ static void PacMinMaxUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, da
 		auto v_idx = value_data.sel->get_index(i);
 		if (hash_data.validity.RowIsValid(h_idx) && value_data.validity.RowIsValid(v_idx)) {
 			// min/max do not use buffering for global aggregates (without GROUP BY) because it was  slower
-			PacMinMaxUpdateOne<T, IS_MAX>(agg, hashes[h_idx] ^ query_hash, values[v_idx], aggr.allocator);
+			PacMinMaxUpdateOne<T, IS_MAX>(agg, hashes[h_idx], values[v_idx], aggr.allocator);
 		}
 	}
 }
@@ -42,7 +42,6 @@ static void PacMinMaxUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, da
 // Grouped (scatter) update
 template <typename T, bool IS_MAX>
 static void PacMinMaxScatterUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states, idx_t count) {
-	uint64_t query_hash = aggr.bind_data->Cast<PacBindData>().query_hash;
 	UnifiedVectorFormat hash_data, value_data, sdata;
 	inputs[0].ToUnifiedFormat(count, hash_data);
 	inputs[1].ToUnifiedFormat(count, value_data);
@@ -58,9 +57,9 @@ static void PacMinMaxScatterUpdate(Vector inputs[], AggregateInputData &aggr, id
 		if (hash_data.validity.RowIsValid(h_idx) && value_data.validity.RowIsValid(v_idx)) {
 			auto state = state_ptrs[sdata.sel->get_index(i)];
 #ifdef PAC_NOBUFFERING
-			PacMinMaxUpdateOne<T, IS_MAX>(*state, hashes[h_idx] ^ query_hash, values[v_idx], aggr.allocator);
+			PacMinMaxUpdateOne<T, IS_MAX>(*state, hashes[h_idx], values[v_idx], aggr.allocator);
 #else
-			PacMinMaxBufferOrUpdateOne<T, IS_MAX>(*state, hashes[h_idx] ^ query_hash, values[v_idx], aggr.allocator);
+			PacMinMaxBufferOrUpdateOne<T, IS_MAX>(*state, hashes[h_idx], values[v_idx], aggr.allocator);
 #endif
 		}
 	}
@@ -94,10 +93,10 @@ static void PacMinMaxFinalize(Vector &states, AggregateInputData &input, Vector 
 	auto data = FlatVector::GetData<T>(result);
 	auto &result_mask = FlatVector::Validity(result);
 
-	uint64_t seed = input.bind_data ? input.bind_data->Cast<PacBindData>().seed : std::random_device {}();
 	double mi = input.bind_data ? input.bind_data->Cast<PacBindData>().mi : 0.0;
 	double correction = input.bind_data ? input.bind_data->Cast<PacBindData>().correction : 1.0;
 	uint64_t query_hash = input.bind_data ? input.bind_data->Cast<PacBindData>().query_hash : 0;
+	auto pstate = input.bind_data ? input.bind_data->Cast<PacBindData>().pstate : nullptr;
 
 	for (idx_t i = 0; i < count; i++) {
 #ifndef PAC_NOBUFFERING
@@ -107,9 +106,7 @@ static void PacMinMaxFinalize(Vector &states, AggregateInputData &input, Vector 
 		auto *s = state_ptrs[i]->GetState();
 		// Check if we should return NULL based on key_hash
 		uint64_t key_hash = s ? s->key_hash : 0;
-		// Use per-group deterministic RNG seeded by both pac_seed and key_hash
-		// This ensures each group gets the same noise regardless of processing order
-		std::mt19937_64 gen(seed ^ key_hash);
+		std::mt19937_64 gen(input.bind_data->Cast<PacBindData>().seed);
 		// mi controls noise mode, correction reduces NULL probability (but does NOT scale min/max values)
 		if (PacNoiseInNull(key_hash, mi, correction, gen)) {
 			result_mask.SetInvalid(offset + i);
@@ -121,10 +118,11 @@ static void PacMinMaxFinalize(Vector &states, AggregateInputData &input, Vector 
 		} else {
 			memset(buf, 0, sizeof(buf));
 		}
-		CheckPacSampleDiversity(key_hash, buf, s ? s->update_count : 0, IS_MAX ? "pac_max" : "pac_min",
+		CheckPacSampleDiversity(key_hash, buf, s ? s->update_count : 0, IS_MAX ? "pac_noised_max" : "pac_noised_min",
 		                        input.bind_data->Cast<PacBindData>());
 		// Pass mi for noise, 1.0 as correction (no value scaling for min/max)
-		data[offset + i] = FromDouble<T>(PacNoisySampleFrom64Counters(buf, mi, 1.0, gen, true, ~key_hash, query_hash));
+		data[offset + i] =
+		    FromDouble<T>(PacNoisySampleFrom64Counters(buf, mi, 1.0, gen, ~key_hash, query_hash, pstate));
 	}
 }
 
@@ -185,7 +183,7 @@ static unique_ptr<FunctionData> PacMinMaxBind(ClientContext &ctx, AggregateFunct
 	}
 #undef BIND_TYPE
 
-	return MakePacBindData(ctx, args, 2, IS_MAX ? "pac_max" : "pac_min");
+	return MakePacBindData(ctx, args, 2, IS_MAX ? "pac_noised_max" : "pac_noised_min");
 }
 
 // ============================================================================
@@ -206,8 +204,6 @@ static void PacMinMaxFinalizeCounters(Vector &states, AggregateInputData &input,
 	ListVector::SetListSize(result, total_elements);
 
 	auto child_data = FlatVector::GetData<PAC_FLOAT>(child_vec);
-	auto &child_validity = FlatVector::Validity(child_vec);
-	auto &result_validity = FlatVector::Validity(result);
 
 	for (idx_t i = 0; i < count; i++) {
 #ifndef PAC_NOBUFFERING
@@ -221,11 +217,8 @@ static void PacMinMaxFinalizeCounters(Vector &states, AggregateInputData &input,
 		list_entries[offset + i].length = 64;
 
 		if (!s || !s->initialized) {
-			result_validity.SetInvalid(offset + i); // return NULL (no values seen)
-			// Still need to mark child elements as invalid for proper list structure
-			for (idx_t j = 0; j < 64; j++) {
-				child_validity.SetInvalid(i * 64 + j);
-			}
+			// No values seen: output 64 zeros
+			memset(child_data + i * 64, 0, 64 * sizeof(PAC_FLOAT));
 			continue;
 		}
 
@@ -242,13 +235,13 @@ static void PacMinMaxFinalizeCounters(Vector &states, AggregateInputData &input,
 				// Counter was updated - return the value (no scaling for min/max)
 				dst[j] = ToDouble(s->extremes[swar_pos]);
 			} else {
-				// Counter was never updated - return NULL
+				// Counter was never updated - return 0
 				D_ASSERT(s->extremes[swar_pos] ==
 				         (IS_MAX ? std::numeric_limits<T>::lowest() : std::numeric_limits<T>::max()));
-				child_validity.SetInvalid(child_idx);
+				dst[j] = 0.0;
 			}
 		}
-		CheckPacSampleDiversity(key_hash, dst, s->update_count, IS_MAX ? "pac_max" : "pac_min",
+		CheckPacSampleDiversity(key_hash, dst, s->update_count, IS_MAX ? "pac_noised_max" : "pac_noised_min",
 		                        input.bind_data->Cast<PacBindData>());
 	}
 }
@@ -293,7 +286,7 @@ static unique_ptr<FunctionData> PacMinMaxCountersBind(ClientContext &ctx, Aggreg
 	}
 #undef BIND_COUNTERS_TYPE
 
-	return MakePacBindData(ctx, args, 2, IS_MAX ? "pac_max_counters" : "pac_min_counters");
+	return MakePacBindData(ctx, args, 2, IS_MAX ? "pac_max" : "pac_min");
 }
 
 // ============================================================================
@@ -301,13 +294,14 @@ static unique_ptr<FunctionData> PacMinMaxCountersBind(ClientContext &ctx, Aggreg
 // ============================================================================
 
 void RegisterPacMinFunctions(ExtensionLoader &loader) {
-	AggregateFunctionSet fcn_set("pac_min");
+	AggregateFunctionSet fcn_set("pac_noised_min");
 
-	fcn_set.AddFunction(AggregateFunction("pac_min", {LogicalType::UBIGINT, LogicalType::ANY}, LogicalType::ANY,
+	fcn_set.AddFunction(AggregateFunction("pac_noised_min", {LogicalType::UBIGINT, LogicalType::ANY}, LogicalType::ANY,
 	                                      nullptr, nullptr, nullptr, nullptr, nullptr,
 	                                      FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr, PacMinMaxBind<false>));
 
-	fcn_set.AddFunction(AggregateFunction("pac_min", {LogicalType::UBIGINT, LogicalType::ANY, LogicalType::DOUBLE},
+	fcn_set.AddFunction(AggregateFunction("pac_noised_min",
+	                                      {LogicalType::UBIGINT, LogicalType::ANY, LogicalType::DOUBLE},
 	                                      LogicalType::ANY, nullptr, nullptr, nullptr, nullptr, nullptr,
 	                                      FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr, PacMinMaxBind<false>));
 
@@ -315,37 +309,43 @@ void RegisterPacMinFunctions(ExtensionLoader &loader) {
 }
 
 void RegisterPacMaxFunctions(ExtensionLoader &loader) {
-	AggregateFunctionSet fcn_set("pac_max");
+	AggregateFunctionSet fcn_set("pac_noised_max");
 
-	fcn_set.AddFunction(AggregateFunction("pac_max", {LogicalType::UBIGINT, LogicalType::ANY}, LogicalType::ANY,
+	fcn_set.AddFunction(AggregateFunction("pac_noised_max", {LogicalType::UBIGINT, LogicalType::ANY}, LogicalType::ANY,
 	                                      nullptr, nullptr, nullptr, nullptr, nullptr,
 	                                      FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr, PacMinMaxBind<true>));
 
-	fcn_set.AddFunction(AggregateFunction("pac_max", {LogicalType::UBIGINT, LogicalType::ANY, LogicalType::DOUBLE},
-	                                      LogicalType::ANY, nullptr, nullptr, nullptr, nullptr, nullptr,
-	                                      FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr, PacMinMaxBind<true>));
+	fcn_set.AddFunction(AggregateFunction(
+	    "pac_noised_max", {LogicalType::UBIGINT, LogicalType::ANY, LogicalType::DOUBLE}, LogicalType::ANY, nullptr,
+	    nullptr, nullptr, nullptr, nullptr, FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr, PacMinMaxBind<true>));
 
 	loader.RegisterFunction(fcn_set);
 }
 
 void RegisterPacMinCountersFunctions(ExtensionLoader &loader) {
 	auto list_double_type = LogicalType::LIST(PacFloatLogicalType());
-	AggregateFunctionSet fcn_set("pac_min_counters");
+	AggregateFunctionSet fcn_set("pac_min");
 
 	fcn_set.AddFunction(AggregateFunction(
-	    "pac_min_counters", {LogicalType::UBIGINT, LogicalType::ANY}, list_double_type, nullptr, nullptr, nullptr,
-	    nullptr, nullptr, FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr, PacMinMaxCountersBind<false>));
+	    "pac_min", {LogicalType::UBIGINT, LogicalType::ANY}, list_double_type, nullptr, nullptr, nullptr, nullptr,
+	    nullptr, FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr, PacMinMaxCountersBind<false>));
+
+	// Add list aggregate overload (LIST<DOUBLE> → LIST<DOUBLE>) for subquery/categorical contexts
+	AddPacListAggregateOverload(fcn_set, "min");
 
 	loader.RegisterFunction(fcn_set);
 }
 
 void RegisterPacMaxCountersFunctions(ExtensionLoader &loader) {
 	auto list_double_type = LogicalType::LIST(PacFloatLogicalType());
-	AggregateFunctionSet fcn_set("pac_max_counters");
+	AggregateFunctionSet fcn_set("pac_max");
 
 	fcn_set.AddFunction(AggregateFunction(
-	    "pac_max_counters", {LogicalType::UBIGINT, LogicalType::ANY}, list_double_type, nullptr, nullptr, nullptr,
-	    nullptr, nullptr, FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr, PacMinMaxCountersBind<true>));
+	    "pac_max", {LogicalType::UBIGINT, LogicalType::ANY}, list_double_type, nullptr, nullptr, nullptr, nullptr,
+	    nullptr, FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr, PacMinMaxCountersBind<true>));
+
+	// Add list aggregate overload (LIST<DOUBLE> → LIST<DOUBLE>) for subquery/categorical contexts
+	AddPacListAggregateOverload(fcn_set, "max");
 
 	loader.RegisterFunction(fcn_set);
 }

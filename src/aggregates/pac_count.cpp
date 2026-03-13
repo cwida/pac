@@ -1,5 +1,6 @@
 #include <locale>
 #include "aggregates/pac_count.hpp"
+#include "categorical/pac_categorical.hpp"
 
 namespace duckdb {
 
@@ -13,7 +14,7 @@ static unique_ptr<FunctionData> PacCountBind(ClientContext &ctx, AggregateFuncti
 			corr_idx = args.size() - 1;
 		}
 	}
-	return MakePacBindData(ctx, args, corr_idx, "pac_count");
+	return MakePacBindData(ctx, args, corr_idx, "pac_noised_count");
 }
 
 // State types: simple (non-scatter) always uses PacCountState directly
@@ -35,7 +36,6 @@ static void PacCountInitialize(const AggregateFunction &, data_ptr_t state_ptr) 
 
 void PacCountUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, data_ptr_t state_ptr, idx_t count) {
 	ScatterState &agg = *reinterpret_cast<ScatterState *>(state_ptr);
-	uint64_t query_hash = aggr.bind_data->Cast<PacBindData>().query_hash;
 	UnifiedVectorFormat idata;
 	inputs[0].ToUnifiedFormat(count, idata);
 	auto input_data = UnifiedVectorFormat::GetData<uint64_t>(idata);
@@ -43,9 +43,9 @@ void PacCountUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, data_ptr_t
 		auto idx = idata.sel->get_index(i);
 		if (idata.validity.RowIsValid(idx)) {
 #if defined(PAC_NOBUFFERING) || defined(PAC_NOCASCADING)
-			PacCountUpdateOne(agg, input_data[idx] ^ query_hash, aggr.allocator);
+			PacCountUpdateOne(agg, input_data[idx], aggr.allocator);
 #else
-			PacCountBufferOrUpdateOne(agg, input_data[idx] ^ query_hash, aggr.allocator);
+			PacCountBufferOrUpdateOne(agg, input_data[idx], aggr.allocator);
 #endif
 		}
 	}
@@ -53,7 +53,6 @@ void PacCountUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, data_ptr_t
 
 void PacCountColumnUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, data_ptr_t state_ptr, idx_t count) {
 	ScatterState &agg = *reinterpret_cast<ScatterState *>(state_ptr);
-	uint64_t query_hash = aggr.bind_data->Cast<PacBindData>().query_hash;
 	UnifiedVectorFormat hash_data, col_data;
 	inputs[0].ToUnifiedFormat(count, hash_data);
 	inputs[1].ToUnifiedFormat(count, col_data);
@@ -63,16 +62,15 @@ void PacCountColumnUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, data
 		auto c_idx = col_data.sel->get_index(i);
 		if (hash_data.validity.RowIsValid(h_idx) && col_data.validity.RowIsValid(c_idx)) {
 #if defined(PAC_NOBUFFERING) || defined(PAC_NOCASCADING)
-			PacCountUpdateOne(agg, hashes[h_idx] ^ query_hash, aggr.allocator);
+			PacCountUpdateOne(agg, hashes[h_idx], aggr.allocator);
 #else
-			PacCountBufferOrUpdateOne(agg, hashes[h_idx] ^ query_hash, aggr.allocator);
+			PacCountBufferOrUpdateOne(agg, hashes[h_idx], aggr.allocator);
 #endif
 		}
 	}
 }
 
 void PacCountScatterUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states, idx_t count) {
-	uint64_t query_hash = aggr.bind_data->Cast<PacBindData>().query_hash;
 	UnifiedVectorFormat idata, sdata;
 	inputs[0].ToUnifiedFormat(count, idata);
 	states.ToUnifiedFormat(count, sdata);
@@ -82,16 +80,15 @@ void PacCountScatterUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, Vec
 		auto idx = idata.sel->get_index(i);
 		if (idata.validity.RowIsValid(idx)) { // to protect against very many groups, thus uses buffering
 #if defined(PAC_NOBUFFERING) || defined(PAC_NOCASCADING)
-			PacCountUpdateOne(*state_p[sdata.sel->get_index(i)], input_data[idx] ^ query_hash, aggr.allocator);
+			PacCountUpdateOne(*state_p[sdata.sel->get_index(i)], input_data[idx], aggr.allocator);
 #else
-			PacCountBufferOrUpdateOne(*state_p[sdata.sel->get_index(i)], input_data[idx] ^ query_hash, aggr.allocator);
+			PacCountBufferOrUpdateOne(*state_p[sdata.sel->get_index(i)], input_data[idx], aggr.allocator);
 #endif
 		}
 	}
 }
 
 void PacCountColumnScatterUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states, idx_t count) {
-	uint64_t query_hash = aggr.bind_data->Cast<PacBindData>().query_hash;
 	UnifiedVectorFormat hash_data, col_data, sdata;
 	inputs[0].ToUnifiedFormat(count, hash_data);
 	inputs[1].ToUnifiedFormat(count, col_data);
@@ -104,9 +101,9 @@ void PacCountColumnScatterUpdate(Vector inputs[], AggregateInputData &aggr, idx_
 		if (hash_data.validity.RowIsValid(h_idx) && col_data.validity.RowIsValid(c_idx)) {
 			// to protect against very many groups, thus uses buffering
 #if defined(PAC_NOBUFFERING) || defined(PAC_NOCASCADING)
-			PacCountUpdateOne(*state_p[sdata.sel->get_index(i)], hashes[h_idx] ^ query_hash, aggr.allocator);
+			PacCountUpdateOne(*state_p[sdata.sel->get_index(i)], hashes[h_idx], aggr.allocator);
 #else
-			PacCountBufferOrUpdateOne(*state_p[sdata.sel->get_index(i)], hashes[h_idx] ^ query_hash, aggr.allocator);
+			PacCountBufferOrUpdateOne(*state_p[sdata.sel->get_index(i)], hashes[h_idx], aggr.allocator);
 #endif
 		}
 	}
@@ -124,13 +121,23 @@ void PacCountCombine(Vector &src, Vector &dst, AggregateInputData &aggr, idx_t c
 		PacCountState *ss = sa[i]->GetState();
 		if (ss) { // we have an allocated state: flush it into dst
 			PacCountState &ds = *da[i]->EnsureState(aggr.allocator);
-			ds.FlushLevel(); // flush dst's SWAR so update_count is safe to add to
 			ds.key_hash |= ss->key_hash;
-			ss->FlushLevel();
-			ds.update_count += ss->update_count;
-			for (int j = 0; j < 64; j++) {
-				ds.probabilistic_total[j] += ss->probabilistic_total[j];
+#ifndef PAC_NOCASCADING
+			bool src_has_totals = (ss->probabilistic_total != nullptr) || (ss->swar_fill > 0);
+#else
+			bool src_has_totals = (ss->probabilistic_total != nullptr);
+#endif
+			if (src_has_totals) {
+				ds.FlushLevel(aggr.allocator); // flush dst SWAR first
+				uint64_t *dst_totals = ds.EnsureTotals(aggr.allocator);
+				ss->FlushSWARInto(dst_totals); // src SWAR → dst totals (no src alloc!)
+				if (ss->probabilistic_total) {
+					for (int j = 0; j < 64; j++) {
+						dst_totals[j] += ss->probabilistic_total[j];
+					}
+				}
 			}
+			ds.update_count += ss->update_count; // safe: FlushSWARInto moved swar_fill into update_count
 		}
 	}
 }
@@ -139,10 +146,12 @@ void PacCountFinalize(Vector &states, AggregateInputData &input, Vector &result,
 	auto aggs = FlatVector::GetData<ScatterState *>(states);
 	auto data = FlatVector::GetData<int64_t>(result);
 	auto &result_mask = FlatVector::Validity(result);
-	std::mt19937_64 gen(input.bind_data->Cast<PacBindData>().seed);
-	double mi = input.bind_data->Cast<PacBindData>().mi;
-	double correction = input.bind_data->Cast<PacBindData>().correction;
-	uint64_t query_hash = input.bind_data->Cast<PacBindData>().query_hash;
+	auto &bind = input.bind_data->Cast<PacBindData>();
+	std::mt19937_64 gen(bind.seed);
+	double mi = bind.mi;
+	double correction = bind.correction;
+	uint64_t query_hash = bind.query_hash;
+	auto pstate = bind.pstate;
 	PAC_FLOAT buf[64];
 	for (idx_t i = 0; i < count; i++) {
 #if !defined(PAC_NOBUFFERING) && !defined(PAC_NOCASCADING)
@@ -156,16 +165,15 @@ void PacCountFinalize(Vector &states, AggregateInputData &input, Vector &result,
 			continue;
 		}
 		if (s) {
-			s->FlushLevel(); // flush uint8_t level into uint64_t totals (also finalizes update_count)
-			s->GetTotals(buf);
+			s->GetTotalsWithSWAR(buf);
 		} else {
 			memset(buf, 0, sizeof(buf));
 		}
-		CheckPacSampleDiversity(key_hash, buf, s ? s->update_count : 0, "pac_count",
+		CheckPacSampleDiversity(key_hash, buf, s ? s->GetUpdateCount() : 0, "pac_noised_count",
 		                        input.bind_data->Cast<PacBindData>());
 		// Multiply by 2 to compensate for 50% sampling, then apply correction
 		data[offset + i] = static_cast<int64_t>(
-		    PacNoisySampleFrom64Counters(buf, mi, correction, gen, true, ~key_hash, query_hash) * 2.0);
+		    PacNoisySampleFrom64Counters(buf, mi, correction, gen, ~key_hash, query_hash, pstate) * 2.0);
 	}
 }
 
@@ -177,8 +185,8 @@ void PacCountFinalize(Vector &states, AggregateInputData &input, Vector &result,
 // it returns all 64 counters so the outer query can evaluate the comparison
 // against all subsamples and produce a mask.
 
-// Returns LIST<DOUBLE> with exactly 64 elements.
-// Position j is NULL if key_hash bit j is 0, otherwise value * correction.
+// Returns LIST<DOUBLE> with exactly 64 elements (no NULLs).
+// Position j is 0 if key_hash bit j is 0, otherwise value * 2 * correction.
 void PacCountFinalizeCounters(Vector &states, AggregateInputData &input, Vector &result, idx_t count, idx_t offset) {
 	auto aggs = FlatVector::GetData<ScatterState *>(states);
 	double correction = input.bind_data ? input.bind_data->Cast<PacBindData>().correction : 1.0;
@@ -193,8 +201,6 @@ void PacCountFinalizeCounters(Vector &states, AggregateInputData &input, Vector 
 	ListVector::SetListSize(result, total_elements);
 
 	auto child_data = FlatVector::GetData<PAC_FLOAT>(child_vec);
-	auto &child_validity = FlatVector::Validity(child_vec);
-	auto &result_validity = FlatVector::Validity(result);
 	PAC_FLOAT buf[64];
 
 	for (idx_t i = 0; i < count; i++) {
@@ -208,21 +214,18 @@ void PacCountFinalizeCounters(Vector &states, AggregateInputData &input, Vector 
 		list_entries[offset + i].length = 64;
 
 		if (!s) {
-			result_validity.SetInvalid(offset + i); // return NULL (no values seen)
-			// Still need to mark child elements as invalid for proper list structure
+			// No values seen: output 64 zeros
 			idx_t base = i * 64;
-			for (int j = 0; j < 64; j++) {
-				child_validity.SetInvalid(base + j);
-			}
+			memset(child_data + base, 0, 64 * sizeof(PAC_FLOAT));
 			continue;
 		}
 
 		uint64_t key_hash = s->key_hash;
-		s->FlushLevel(); // flush uint8_t level into uint64_t totals (also finalizes update_count)
-		s->GetTotals(buf);
-		CheckPacSampleDiversity(key_hash, buf, s->update_count, "pac_count", input.bind_data->Cast<PacBindData>());
+		s->GetTotalsWithSWAR(buf);
+		CheckPacSampleDiversity(key_hash, buf, s->GetUpdateCount(), "pac_noised_count",
+		                        input.bind_data->Cast<PacBindData>());
 
-		// Copy counters to list: NULL where key_hash bit is 0, value * 2 * correction otherwise
+		// Copy counters to list: 0 where key_hash bit is 0, value * 2 * correction otherwise
 		// The 2x factor compensates for 50% sampling, correction is user-specified multiplier
 		idx_t base = i * 64;
 		for (int j = 0; j < 64; j++) {
@@ -230,33 +233,34 @@ void PacCountFinalizeCounters(Vector &states, AggregateInputData &input, Vector 
 				child_data[base + j] =
 				    static_cast<PAC_FLOAT>(buf[j] * 2.0 * correction); // 2x for 50% sampling, then correction
 			} else {
-				child_validity.SetInvalid(base + j); // NULL for positions not sampled
+				child_data[base + j] = 0.0; // 0 for positions not sampled
 			}
 		}
 	}
 }
 
 void RegisterPacCountFunctions(ExtensionLoader &loader) {
-	AggregateFunctionSet fcn_set("pac_count");
+	AggregateFunctionSet fcn_set("pac_noised_count");
 
-	fcn_set.AddFunction(AggregateFunction("pac_count", {LogicalType::UBIGINT}, LogicalType::BIGINT, PacCountStateSize,
-	                                      PacCountInitialize, PacCountScatterUpdate, PacCountCombine, PacCountFinalize,
-	                                      FunctionNullHandling::SPECIAL_HANDLING, PacCountUpdate, PacCountBind));
-
-	fcn_set.AddFunction(AggregateFunction("pac_count", {LogicalType::UBIGINT, LogicalType::DOUBLE}, LogicalType::BIGINT,
+	fcn_set.AddFunction(AggregateFunction("pac_noised_count", {LogicalType::UBIGINT}, LogicalType::BIGINT,
 	                                      PacCountStateSize, PacCountInitialize, PacCountScatterUpdate, PacCountCombine,
 	                                      PacCountFinalize, FunctionNullHandling::SPECIAL_HANDLING, PacCountUpdate,
 	                                      PacCountBind));
 
-	fcn_set.AddFunction(AggregateFunction("pac_count", {LogicalType::UBIGINT, LogicalType::ANY}, LogicalType::BIGINT,
-	                                      PacCountStateSize, PacCountInitialize, PacCountColumnScatterUpdate,
-	                                      PacCountCombine, PacCountFinalize, FunctionNullHandling::SPECIAL_HANDLING,
-	                                      PacCountColumnUpdate, PacCountBind));
+	fcn_set.AddFunction(AggregateFunction("pac_noised_count", {LogicalType::UBIGINT, LogicalType::DOUBLE},
+	                                      LogicalType::BIGINT, PacCountStateSize, PacCountInitialize,
+	                                      PacCountScatterUpdate, PacCountCombine, PacCountFinalize,
+	                                      FunctionNullHandling::SPECIAL_HANDLING, PacCountUpdate, PacCountBind));
 
-	fcn_set.AddFunction(AggregateFunction("pac_count", {LogicalType::UBIGINT, LogicalType::ANY, LogicalType::DOUBLE},
+	fcn_set.AddFunction(AggregateFunction("pac_noised_count", {LogicalType::UBIGINT, LogicalType::ANY},
 	                                      LogicalType::BIGINT, PacCountStateSize, PacCountInitialize,
 	                                      PacCountColumnScatterUpdate, PacCountCombine, PacCountFinalize,
 	                                      FunctionNullHandling::SPECIAL_HANDLING, PacCountColumnUpdate, PacCountBind));
+
+	fcn_set.AddFunction(AggregateFunction(
+	    "pac_noised_count", {LogicalType::UBIGINT, LogicalType::ANY, LogicalType::DOUBLE}, LogicalType::BIGINT,
+	    PacCountStateSize, PacCountInitialize, PacCountColumnScatterUpdate, PacCountCombine, PacCountFinalize,
+	    FunctionNullHandling::SPECIAL_HANDLING, PacCountColumnUpdate, PacCountBind));
 
 	loader.RegisterFunction(fcn_set);
 }
@@ -266,18 +270,53 @@ void RegisterPacCountFunctions(ExtensionLoader &loader) {
 // ============================================================================
 void RegisterPacCountCountersFunctions(ExtensionLoader &loader) {
 	auto list_double_type = LogicalType::LIST(PacFloatLogicalType());
-	AggregateFunctionSet counters_set("pac_count_counters");
+	AggregateFunctionSet counters_set("pac_count");
+
+	counters_set.AddFunction(AggregateFunction("pac_count", {LogicalType::UBIGINT}, list_double_type, PacCountStateSize,
+	                                           PacCountInitialize, PacCountScatterUpdate, PacCountCombine,
+	                                           PacCountFinalizeCounters, FunctionNullHandling::DEFAULT_NULL_HANDLING,
+	                                           PacCountUpdate, PacCountBind));
 
 	counters_set.AddFunction(
-	    AggregateFunction("pac_count_counters", {LogicalType::UBIGINT}, list_double_type, PacCountStateSize,
-	                      PacCountInitialize, PacCountScatterUpdate, PacCountCombine, PacCountFinalizeCounters,
-	                      FunctionNullHandling::DEFAULT_NULL_HANDLING, PacCountUpdate, PacCountBind));
+	    AggregateFunction("pac_count", {LogicalType::UBIGINT, LogicalType::ANY}, list_double_type, PacCountStateSize,
+	                      PacCountInitialize, PacCountColumnScatterUpdate, PacCountCombine, PacCountFinalizeCounters,
+	                      FunctionNullHandling::DEFAULT_NULL_HANDLING, PacCountColumnUpdate, PacCountBind));
 
+	// Add list aggregate overload (LIST<DOUBLE> → LIST<DOUBLE>) for subquery/categorical contexts
+	AddPacListAggregateOverload(counters_set, "count");
+
+	loader.RegisterFunction(counters_set);
+}
+
+// ============================================================================
+// pac_noised_avg / pac_avg: reuse pac_noised_count / pac_count implementations.
+// RewritePacAvgToDiv replaces these with sum/count + division before execution.
+// ============================================================================
+void RegisterPacAvgFunctions(ExtensionLoader &loader) {
+	// pac_noised_avg(UBIGINT, value_type[, correction]) → DOUBLE — same implementation as pac_noised_count(UBIGINT,
+	// ANY)
+	AggregateFunctionSet noised_set("pac_noised_avg");
+	noised_set.AddFunction(AggregateFunction(
+	    "pac_noised_avg", {LogicalType::UBIGINT, LogicalType::ANY}, LogicalType::DOUBLE, PacCountStateSize,
+	    PacCountInitialize, PacCountColumnScatterUpdate, PacCountCombine, PacCountFinalize,
+	    FunctionNullHandling::DEFAULT_NULL_HANDLING, PacCountColumnUpdate, PacCountBind));
+	noised_set.AddFunction(AggregateFunction(
+	    "pac_noised_avg", {LogicalType::UBIGINT, LogicalType::ANY, LogicalType::DOUBLE}, LogicalType::DOUBLE,
+	    PacCountStateSize, PacCountInitialize, PacCountColumnScatterUpdate, PacCountCombine, PacCountFinalize,
+	    FunctionNullHandling::DEFAULT_NULL_HANDLING, PacCountColumnUpdate, PacCountBind));
+	loader.RegisterFunction(noised_set);
+
+	// pac_avg(UBIGINT, value_type[, correction]) → LIST<FLOAT> — same implementation as pac_count(UBIGINT, ANY)
+	auto list_float_type = LogicalType::LIST(PacFloatLogicalType());
+	AggregateFunctionSet counters_set("pac_avg");
+	counters_set.AddFunction(
+	    AggregateFunction("pac_avg", {LogicalType::UBIGINT, LogicalType::ANY}, list_float_type, PacCountStateSize,
+	                      PacCountInitialize, PacCountColumnScatterUpdate, PacCountCombine, PacCountFinalizeCounters,
+	                      FunctionNullHandling::DEFAULT_NULL_HANDLING, PacCountColumnUpdate, PacCountBind));
 	counters_set.AddFunction(AggregateFunction(
-	    "pac_count_counters", {LogicalType::UBIGINT, LogicalType::ANY}, list_double_type, PacCountStateSize,
+	    "pac_avg", {LogicalType::UBIGINT, LogicalType::ANY, LogicalType::DOUBLE}, list_float_type, PacCountStateSize,
 	    PacCountInitialize, PacCountColumnScatterUpdate, PacCountCombine, PacCountFinalizeCounters,
 	    FunctionNullHandling::DEFAULT_NULL_HANDLING, PacCountColumnUpdate, PacCountBind));
-
 	loader.RegisterFunction(counters_set);
 }
 

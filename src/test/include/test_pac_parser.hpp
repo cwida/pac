@@ -16,7 +16,7 @@ public:
 	static void TestMetadataManager();
 	// Test saving and loading metadata from file
 	static void TestFilePersistence();
-	// Test parsing of CREATE PAC TABLE statements
+	// Test parsing of CREATE PU TABLE statements
 	static void TestCreatePACTableParsing();
 	// Test parsing of ALTER TABLE with PAC clauses
 	static void TestAlterTablePACParsing();

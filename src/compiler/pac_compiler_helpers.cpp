@@ -13,7 +13,9 @@
 #include "duckdb/planner/logical_operator.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
+#include "duckdb/planner/operator/logical_aggregate.hpp"
 #include "duckdb/planner/operator/logical_delim_get.hpp"
+#include "query_processing/pac_projection_propagation.hpp"
 #include "duckdb/common/constants.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
@@ -158,7 +160,7 @@ unique_ptr<LogicalOperator> CreateLogicalJoin(const PACCompatibilityResult &chec
 	}
 
 	vector<unique_ptr<Expression>> extra;
-	return LogicalComparisonJoin::CreateJoin(context, JoinType::INNER, JoinRefType::REGULAR, std::move(left_operator),
+	return LogicalComparisonJoin::CreateJoin(JoinType::INNER, JoinRefType::REGULAR, std::move(left_operator),
 	                                         std::move(right), std::move(conditions), std::move(extra));
 }
 
@@ -325,6 +327,37 @@ void PopulateGetsFromFKPath(const PACCompatibilityResult &check, vector<string> 
 			gets_missing.push_back(table_in_path);
 		}
 	}
+}
+
+// Find the FK columns from a table that reference any privacy unit.
+vector<string> FindFKColumnsToPU(const PACCompatibilityResult &check, const string &table_name,
+                                 const vector<string> &privacy_units) {
+	auto it = check.table_metadata.find(table_name);
+	if (it == check.table_metadata.end()) {
+		return {};
+	}
+	for (auto &fk : it->second.fks) {
+		for (auto &pu : privacy_units) {
+			if (fk.first == pu) {
+				return fk.second;
+			}
+		}
+	}
+	return {};
+}
+
+// Find a LogicalGet for a table that is accessible within a subtree root's descendants.
+LogicalGet *FindAccessibleGetInSubtree(unique_ptr<LogicalOperator> &plan, LogicalOperator *subtree_root,
+                                       const string &table_name) {
+	vector<unique_ptr<LogicalOperator> *> nodes;
+	FindAllNodesByTable(&plan, table_name, nodes);
+	for (auto *node : nodes) {
+		auto &node_get = node->get()->Cast<LogicalGet>();
+		if (HasTableIndexInSubtree(subtree_root, node_get.table_index)) {
+			return &node_get;
+		}
+	}
+	return nullptr;
 }
 
 } // namespace duckdb

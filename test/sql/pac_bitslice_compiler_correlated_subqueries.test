@@ -8,33 +8,34 @@ statement ok
 PRAGMA clear_pac_metadata;
 
 statement ok
-SET pac_deterministic_noise = true;
-
-statement ok
 SET threads = 1;
 
 statement ok
 set pac_seed = 42;
 
 statement ok
+SET pac_hash_repair = true
+
+statement ok
 set pac_mi = 0;
 
 # Set up TPC-H schema with customer as privacy unit
 statement ok
-CREATE TABLE customer (
-    c_custkey INTEGER PRIMARY KEY,
+CREATE PU TABLE customer (
+    c_custkey INTEGER,
     c_name VARCHAR,
     c_address VARCHAR,
     c_nationkey INTEGER,
     c_phone VARCHAR,
     c_acctbal DECIMAL(15,2),
     c_mktsegment VARCHAR,
-    c_comment VARCHAR
+    c_comment VARCHAR,
+    PAC_KEY (c_custkey)
 );
 
 statement ok
 CREATE TABLE orders (
-    o_orderkey INTEGER PRIMARY KEY,
+    o_orderkey INTEGER,
     o_custkey INTEGER,
     o_orderstatus VARCHAR,
     o_totalprice DECIMAL(15,2),
@@ -42,8 +43,7 @@ CREATE TABLE orders (
     o_orderpriority VARCHAR,
     o_clerk VARCHAR,
     o_shippriority INTEGER,
-    o_comment VARCHAR,
-    FOREIGN KEY (o_custkey) REFERENCES customer(c_custkey)
+    o_comment VARCHAR
 );
 
 statement ok
@@ -63,9 +63,7 @@ CREATE TABLE lineitem (
     l_receiptdate DATE,
     l_shipinstruct VARCHAR,
     l_shipmode VARCHAR,
-    l_comment VARCHAR,
-    PRIMARY KEY (l_orderkey, l_linenumber),
-    FOREIGN KEY (l_orderkey) REFERENCES orders(o_orderkey)
+    l_comment VARCHAR
 );
 
 # Insert test data
@@ -93,9 +91,18 @@ INSERT INTO lineitem VALUES
     (4, 5, 5, 1, 30, 300.00, 0.05, 0.01, 'R', 'F', '1993-08-20', '1993-08-18', '1993-08-25', 'COLLECT COD', 'FOB', 'comment5'),
     (5, 6, 6, 1, 35, 350.00, 0.05, 0.01, 'N', 'O', '1993-09-05', '1993-09-10', '1993-09-15', 'DELIVER IN PERSON', 'TRUCK', 'comment6');
 
-# Configure PAC
+# Configure PAC metadata for orders and lineitem
 statement ok
-ALTER TABLE customer SET PAC;
+ALTER TABLE orders ADD PAC_KEY (o_orderkey);
+
+statement ok
+ALTER TABLE orders ADD PAC_LINK (o_custkey) REFERENCES customer(c_custkey);
+
+statement ok
+ALTER TABLE lineitem ADD PAC_KEY (l_orderkey, l_linenumber);
+
+statement ok
+ALTER TABLE lineitem ADD PAC_LINK (l_orderkey) REFERENCES orders(o_orderkey);
 
 statement ok
 SET pac_join_elimination = true;
@@ -104,7 +111,7 @@ statement ok
 set pac_seed = 42;
 
 statement ok
-SET pac_deterministic_noise = true;
+SET pac_hash_repair = true
 
 # Test correlated subquery with EXISTS (semi-join) - similar to TPC-H Q04
 # This query finds order priorities for orders in a date range that have at least one lineitem
@@ -131,9 +138,39 @@ GROUP BY
 ORDER BY
     o_orderpriority;
 ----
-1-URGENT	4
-2-HIGH	4
+1-URGENT	2
+2-HIGH	2
 3-MEDIUM	2
+
+# Test Top-K pushdown with correlated EXISTS subquery (Q4 + LIMIT)
+# The top-k optimizer should rewrite pac_count to list-returning pac_count,
+# insert pac_mean for ordering, and apply pac_mean to the final top-k rows
+query II
+SELECT
+    o_orderpriority,
+    count(*) AS order_count
+FROM
+    orders
+WHERE
+    o_orderdate >= CAST('1993-07-01' AS date)
+    AND o_orderdate < CAST('1993-10-01' AS date)
+    AND EXISTS (
+        SELECT
+            *
+        FROM
+            lineitem
+        WHERE
+            l_orderkey = o_orderkey
+            AND l_commitdate < l_receiptdate)
+GROUP BY
+    o_orderpriority
+ORDER BY
+    order_count DESC,
+    o_orderpriority
+LIMIT 2;
+----
+1-URGENT	2
+2-HIGH	2
 
 # Test TPC-H Q17-style correlated subquery with aggregates in both outer and inner queries
 # This tests the case where lineitem (FK-linked table) appears in both outer aggregate and inner aggregate
@@ -142,7 +179,7 @@ ORDER BY
 # Create part table for Q17-style query
 statement ok
 CREATE TABLE part (
-    p_partkey INTEGER PRIMARY KEY,
+    p_partkey INTEGER,
     p_name VARCHAR,
     p_mfgr VARCHAR,
     p_brand VARCHAR,
@@ -162,12 +199,16 @@ INSERT INTO part VALUES
     (5, 'Part#5', 'Manufacturer#5', 'Brand#23', 'ECONOMY ANODIZED STEEL', 40, 'MED BOX', 30.00, 'comment5'),
     (6, 'Part#6', 'Manufacturer#1', 'Brand#23', 'PROMO BURNISHED TIN', 3, 'MED BOX', 12.00, 'comment6');
 
+statement ok
+ALTER TABLE part ADD PAC_KEY (p_partkey);
+
 # TPC-H Q17-style query: Calculate average yearly revenue for a specific brand/container
 # where quantity is less than 20% of the average quantity for that part
 # This has:
 # - Outer aggregate: SUM(l_extendedprice) on lineitem
 # - Inner aggregate: AVG(l_quantity) on lineitem with correlation on l_partkey
 # Both aggregates operate on FK-linked table, so BOTH get PAC transformation
+# With pac_mi=0, empty groups return 0 (not NULL) since key_hash is hardcoded to all-bits-set.
 query I
 SELECT
     CAST(sum(l_extendedprice) / 7.0 AS INTEGER) AS avg_yearly
@@ -187,7 +228,7 @@ WHERE
             l_partkey = p_partkey
     );
 ----
-NULL
+0
 
 # Test correlated subqueries on FK-linked tables with PU table scanned
 # This tests the fix where aggregates in correlated subqueries that scan FK-linked tables
@@ -209,7 +250,7 @@ FROM
 WHERE
     c_mktsegment = 'BUILDING';
 ----
-2	0.0	NULL
+0	nan	NULL
 
 # Test outer aggregate + inner aggregate with IN clause - both need joins to PU
 # This tests that when BOTH outer and inner queries scan FK-linked tables (not PU directly),
@@ -235,7 +276,7 @@ WHERE
     )
     AND l_discount > 0.04;
 ----
-2499.52
+2099.52
 
 # Test correlated subquery where outer and inner both need separate joins to PU
 # This is a CORRELATED subquery (references outer table via l_partkey), unlike the IN clause which is uncorrelated
@@ -252,9 +293,9 @@ WHERE
 # connection to the customer PU via orders.
 #
 # This test returns NULL (no rows match l_quantity < 0.2 * avg)
-# The inner AVG for each partkey gives 10, 20, 15, 25, 30, 35
-# 0.2 * avg = 2, 4, 3, 5, 6, 7
-# No l_quantity values (10, 20, 15, 25, 30, 35) are less than these thresholds
+# Each partkey has exactly one lineitem, so avg = the value itself.
+# For positive x, x < 0.2*x is always false, so pac_select zeros all hash bits,
+# pac_filter removes all rows, and SUM of empty set is NULL.
 query I
 SELECT
     SUM(l_extendedprice) AS total_revenue
@@ -294,7 +335,7 @@ SELECT COUNT(*) FROM (
     WHERE o_custkey = 1
 );
 ----
-4
+0
 
 # Test TPC-H Q21-style query: Suppliers Who Kept Orders Waiting
 # This tests complex correlated subqueries with:
@@ -306,7 +347,7 @@ SELECT COUNT(*) FROM (
 # Create supplier table
 statement ok
 CREATE TABLE supplier (
-    s_suppkey INTEGER PRIMARY KEY,
+    s_suppkey INTEGER,
     s_name VARCHAR,
     s_address VARCHAR,
     s_nationkey INTEGER,
@@ -318,7 +359,7 @@ CREATE TABLE supplier (
 # Create nation table
 statement ok
 CREATE TABLE nation (
-    n_nationkey INTEGER PRIMARY KEY,
+    n_nationkey INTEGER,
     n_name VARCHAR,
     n_regionkey INTEGER,
     n_comment VARCHAR
@@ -340,6 +381,12 @@ INSERT INTO supplier VALUES
     (4, 'Supplier#004', 'Address4', 1, '444-444-4444', 4000.00, 'comment4'),
     (5, 'Supplier#005', 'Address5', 3, '555-555-5555', 5000.00, 'comment5'),
     (6, 'Supplier#006', 'Address6', 1, '666-666-6666', 6000.00, 'comment6');
+
+statement ok
+ALTER TABLE supplier ADD PAC_KEY (s_suppkey);
+
+statement ok
+ALTER TABLE nation ADD PAC_KEY (n_nationkey);
 
 # Update orders to have 'F' status for Q21 (which filters on o_orderstatus = 'F')
 statement ok
@@ -412,5 +459,5 @@ ORDER BY
     numwait DESC,
     s_name;
 ----
-Supplier#001	2
 Supplier#002	2
+Supplier#001	0

@@ -1,89 +1,76 @@
-# PAC — DuckDB Privacy-Aware Aggregation Extension
+# PAC — Automatic Query Privatization for DuckDB
 
-PAC (Privacy-Aware-Computed) is a DuckDB extension that enforces privacy rules on aggregation queries over designated tables ("PAC tables"). It provides differential privacy guarantees by transforming standard SQL aggregates into privacy-preserving versions.
+PAC is a DuckDB extension that automatically privatizes SQL queries using the PAC Privacy framework, protecting against Membership Inference Attacks by adding noise to aggregate query results. Unlike Differential Privacy, PAC works automatically and transparently — no per-query analysis by a privacy specialist is needed.
 
-## What PAC Does
+## Build
 
-PAC enables privacy-preserving analytics on sensitive data by automatically transforming SQL queries. When you designate a table as a **privacy unit** (using `CREATE PAC TABLE` or `ALTER TABLE SET PAC`), PAC ensures that individual records cannot be directly accessed or leaked through query results.
-
-Instead of returning exact values, PAC transforms aggregates like `SUM`, `COUNT`, `AVG`, `MIN`, and `MAX` into probabilistic versions that provide strong privacy guarantees while maintaining statistical accuracy. The extension uses a bit-level probabilistic counting algorithm that distributes each record's contribution across 64 parallel counters based on a hash of the privacy unit's key, then samples from these counters with appropriate noise to produce privacy-preserving results.
-
-PAC enforces access controls based on the `PROTECTED` clause:
-- **Privacy unit with PROTECTED columns**: Only the protected columns are restricted to aggregate access; non-protected columns can be projected normally
-- **Privacy unit without PROTECTED columns**: ALL columns are treated as protected and can only be accessed inside aggregate functions
-
-For tables that are not privacy units, you can still mark specific columns as `PROTECTED` to restrict their access to aggregate functions only.
-
-## Documentation
-
-Additional documentation is available in the `docs/` folder:
-
-| Document | Description |
-|----------|-------------|
-| [docs/build/README.md](docs/build/README.md) | Build instructions (Make, CMake, Ninja) |
-| [docs/build/clion.md](docs/build/clion.md) | CLion IDE setup and debugging |
-| [docs/build/updating.md](docs/build/updating.md) | How to update DuckDB version |
-| [docs/pac/internals.md](docs/pac/internals.md) | PAC algorithm implementation details |
-| [docs/test/README.md](docs/test/README.md) | Running SQL and C++ tests |
-| [docs/benchmark/README.md](docs/benchmark/README.md) | Benchmark overview |
-| [docs/benchmark/tpch.md](docs/benchmark/tpch.md) | TPC-H benchmark instructions |
-| [docs/benchmark/tpch_compiler.md](docs/benchmark/tpch_compiler.md) | TPC-H compiler benchmark |
-| [docs/benchmark/microbenchmarks.md](docs/benchmark/microbenchmarks.md) | Microbenchmark suite |
-
-## PAC SQL Syntax
-
-### CREATE PAC TABLE
-
-Creates a table marked as a privacy unit. **Must include either `PAC_KEY` or `PRIMARY KEY`**.
-
-```sql
-CREATE PAC TABLE users (
-    user_id INTEGER,
-    name VARCHAR,
-    email VARCHAR,
-    PAC_KEY (user_id),
-    PROTECTED (email)
-);
-
--- Or with PRIMARY KEY
-CREATE PAC TABLE users (
-    user_id INTEGER PRIMARY KEY,
-    name VARCHAR,
-    email VARCHAR,
-    PROTECTED (email)
-);
+```bash
+git clone --recurse-submodules https://github.com/cwida/pac.git
+cd pac
+GEN=ninja make
 ```
 
-**Important:** 
-- If a privacy unit has **no PROTECTED columns defined**, then **all columns are treated as protected** — they can only be accessed inside aggregate functions.
-- If a privacy unit has **PROTECTED columns defined**, then only those specific columns are restricted; other columns can be projected normally.
-
-### PAC Clauses
-
-| Clause | Description |
-|--------|-------------|
-| `PAC_KEY (col1, col2, ...)` | Defines the privacy unit identifier (composite keys supported) |
-| `PAC_LINK (col) REFERENCES table(col)` | Links this table to a privacy unit via foreign key relationship |
-| `PROTECTED (col1, col2, ...)` | Marks specific columns as sensitive (restricted to aggregate access) |
-
-### PAC_LINK Explained
-
-`PAC_LINK` establishes a relationship between a regular table and a privacy unit, similar to a foreign key constraint but for privacy purposes. When a table has a `PAC_LINK`:
-
-1. **Privacy propagation**: The linked table inherits privacy constraints from the privacy unit
-2. **Hash derivation**: PAC uses the link columns to derive the privacy hash (instead of requiring direct access to the PU table)
-3. **Query optimization**: PAC can compile queries on the linked table without needing to join with the PU table
+## Example: Protecting Employee Salaries
 
 ```sql
--- Privacy unit table
-CREATE PAC TABLE customers (
+-- Load the extension
+LOAD 'build/release/extension/pac/pac.duckdb_extension';
+SET pac_seed = 5;
+
+-- Create a privacy unit table: employees are the entities we protect
+CREATE PU TABLE employees (
+    id INTEGER,
+    department VARCHAR,
+    salary DECIMAL(10,2),
+    PAC_KEY (id),            -- identifies each privacy unit
+    PROTECTED (salary)       -- salary requires aggregation, cannot be projected
+);
+
+INSERT INTO employees VALUES
+    (1, 'Engineering', 95000),  (2, 'Engineering', 110000),
+    (3, 'Engineering', 105000), (4, 'Engineering', 98000),
+    (5, 'Sales', 80000),        (6, 'Sales', 72000),
+    (7, 'Sales', 78000),        (8, 'Sales', 85000),
+    (9, 'Marketing', 85000),    (10, 'Marketing', 90000),
+    (11, 'Marketing', 82000),   (12, 'Marketing', 88000);
+
+-- This works: non-protected columns can be freely queried
+SELECT department FROM employees;
+
+-- This is blocked: protected columns cannot be projected
+SELECT salary FROM employees;
+-- Error: protected column 'employees.salary' can only be accessed inside
+-- aggregate functions (e.g., SUM, COUNT, AVG, MIN, MAX)
+
+-- This works: aggregate queries on protected columns get automatic noise
+SELECT department, AVG(salary)::INTEGER AS avg_salary, COUNT(*) AS count
+FROM employees
+GROUP BY department;
+┌─────────────┬────────────┬───────┐
+│ department  │ avg_salary │ count │
+├─────────────┼────────────┼───────┤
+│ Engineering │     102000 │     2 │
+│ Marketing   │      86250 │     3 │
+│ Sales       │      78333 │     1 │
+└─────────────┴────────────┴───────┘
+```
+
+The noised result is close to the real answer but perturbed — an attacker cannot determine whether any specific employee is in the database. 
+
+## Multi-Table Example: Protecting Customer Orders
+
+PAC propagates privacy through join chains via `PAC_LINK`:
+
+```sql
+-- The privacy unit: customers
+CREATE PU TABLE customers (
     id INTEGER,
     name VARCHAR,
     PAC_KEY (id),
     PROTECTED (name)
 );
 
--- Regular table with PAC_LINK to the privacy unit
+-- Orders are linked to customers — queries on orders get noised too
 CREATE TABLE orders (
     order_id INTEGER,
     customer_id INTEGER,
@@ -91,218 +78,78 @@ CREATE TABLE orders (
     PAC_LINK (customer_id) REFERENCES customers(id)
 );
 
--- Now queries on 'orders' automatically use customer_id for privacy hashing
-SELECT SUM(amount) FROM orders;  -- Uses hash(customer_id) internally
-```
-
-Without a `PAC_LINK`, you can still join tables with privacy units, but the PU table must be present in the query for PAC to derive the privacy hash.
-
-### ALTER PAC TABLE
-
-Add PAC metadata to existing tables:
-
-```sql
--- Add PAC_KEY
-ALTER PAC TABLE orders ADD PAC_KEY (order_id);
-
--- Add PAC_LINK (foreign key relationship)
-ALTER PAC TABLE orders ADD PAC_LINK (customer_id) REFERENCES customers(id);
-
--- Add protected columns
-ALTER PAC TABLE orders ADD PROTECTED (total_amount);
-
--- Drop PAC metadata
-ALTER PAC TABLE orders DROP PAC_LINK (customer_id);
-ALTER PAC TABLE orders DROP PROTECTED (total_amount);
-```
-
-### SET PAC / UNSET PAC
-
-Mark or unmark a table as a privacy unit:
-
-```sql
--- Mark as privacy unit (table must have PRIMARY KEY)
-ALTER TABLE customers SET PAC;
-
--- Remove privacy unit status
-ALTER TABLE customers UNSET PAC;
-```
-
-### PAC Metadata Management
-
-```sql
--- Save PAC metadata to file
-PRAGMA save_pac_metadata('pac_metadata.json');
-
--- Load PAC metadata from file
-PRAGMA load_pac_metadata('pac_metadata.json');
-
--- Clear all PAC metadata
-PRAGMA clear_pac_metadata;
-```
-
-## Configuration Settings
-
-| Setting | Type | Default | Description |
-|---------|------|---------|-------------|
-| `pac_enabled` | BOOLEAN | true | Enable/disable PAC query rewriting |
-| `pac_seed` | BIGINT | (random) | Deterministic RNG seed for reproducible results |
-| `pac_mi` | DOUBLE | 0.0 | Privacy parameter (counter index, 0-63) |
-| `pac_noise` | BOOLEAN | true | Whether to add PAC noise |
-| `pac_deterministic_noise` | BOOLEAN | false | Use deterministic noise (for testing) |
-| `pac_conservative_mode` | BOOLEAN | true | Throw errors on unsupported queries |
-| `pac_compiled_path` | VARCHAR | "." | Output path for compiled PAC SQL |
-| `pac_privacy_file` | VARCHAR | "" | Path to CSV file listing PAC tables |
-
-### Example Configuration
-
-```sql
-SET pac_seed = 42;
-SET pac_mi = 0;
-SET pac_deterministic_noise = true;
-SET threads = 1;
-```
-
-## PAC Limitations
-
-When querying PAC tables (privacy units), the following restrictions apply:
-
-| Feature | Status | Notes |
-|---------|--------|-------|
-| SUM, COUNT, AVG, MIN, MAX | ✅ Supported | Transformed to pac_sum, pac_count, etc. |
-| Other aggregates | ❌ Disallowed | Custom aggregates not supported |
-| Nested aggregates | ❌ Disallowed | Aggregate inside another aggregate |
-| Window functions | ❌ Disallowed | OVER clauses not supported |
-| DISTINCT | ❌ Disallowed | Use COUNT without DISTINCT |
-| INNER JOIN | ✅ Supported | Standard joins work |
-| OUTER JOIN | ⚠️ Limited | LEFT/RIGHT joins have restrictions |
-| CROSS JOIN | ❌ Disallowed | Cartesian products not allowed |
-| Subqueries | ⚠️ Limited | Correlated subqueries have restrictions |
-| UNION/EXCEPT/INTERSECT | ❌ Disallowed | Set operations not supported |
-| ORDER BY, LIMIT | ✅ Supported | On final query only |
-| GROUP BY | ✅ Supported | Cannot group by protected columns |
-| Projecting PROTECTED columns | ❌ Disallowed | Protected columns require aggregation |
-| Projecting non-protected columns | ✅ Allowed | If PROTECTED is defined on other columns |
-
-## Examples
-
-### Privacy Unit Without PROTECTED (All Columns Restricted)
-
-```sql
--- Create a privacy unit with NO protected columns specified
--- This means ALL columns are treated as protected
-CREATE PAC TABLE customers (
-    id INTEGER,
-    name VARCHAR,
-    balance DECIMAL(10,2),
-    PAC_KEY (id)
-);
-
-INSERT INTO customers VALUES (1, 'Alice', 1000), (2, 'Bob', 2000);
-
--- This fails: ALL columns require aggregation when no PROTECTED is defined
-SELECT name FROM customers;  -- Error: requires aggregation
-SELECT * FROM customers;     -- Error: requires aggregation
-
--- This works: aggregate query
-SELECT SUM(balance) FROM customers;
-```
-
-### Privacy Unit With PROTECTED (Only Specified Columns Restricted)
-
-```sql
--- Create a privacy unit WITH protected columns specified
--- Only the protected columns are restricted
-CREATE PAC TABLE employees (
-    id INTEGER,
-    department VARCHAR,
-    salary DECIMAL(10,2),
-    PAC_KEY (id),
-    PROTECTED (salary)
-);
-
-INSERT INTO employees VALUES (1, 'Engineering', 100000), (2, 'Sales', 80000);
-
--- This works: non-protected columns can be projected
-SELECT id, department FROM employees;
-
--- This fails: salary is protected
-SELECT salary FROM employees;  -- Error: protected column
-
--- This works: aggregate the protected column
-SELECT AVG(salary) FROM employees;
-SELECT department, AVG(salary) FROM employees GROUP BY department;
-```
-
-### Using PROTECTED on Non-PU Tables
-
-```sql
--- Regular table (not a privacy unit) with a protected column
-CREATE TABLE survey_data (
-    response_id INTEGER,
-    category VARCHAR,
-    sensitive_answer INTEGER,
-    PROTECTED (sensitive_answer)
-);
-
--- This works: project non-protected columns
-SELECT response_id, category FROM survey_data;
-
--- This fails: sensitive_answer is protected
-SELECT sensitive_answer FROM survey_data;  -- Error: protected column
-
--- This works: aggregate the protected column
-SELECT AVG(sensitive_answer) FROM survey_data;
-```
-
-### Join with PAC_LINK Table
-
-```sql
--- Create related table with PAC_LINK
-CREATE TABLE orders (
+-- Lineitem links through orders (deep chain)
+CREATE TABLE lineitem (
+    item_id INTEGER,
     order_id INTEGER,
-    customer_id INTEGER,
-    amount DECIMAL(10,2),
-    PAC_LINK (customer_id) REFERENCES customers(id)
+    price DECIMAL(10,2),
+    PAC_LINK (order_id) REFERENCES orders(order_id)
 );
 
-INSERT INTO orders VALUES (1, 1, 100), (2, 1, 200), (3, 2, 150);
-
--- Query orders directly - PAC uses customer_id for privacy hash
-SELECT SUM(amount) FROM orders;
-
--- Join and aggregate
-SELECT SUM(amount) FROM customers 
-JOIN orders ON customers.id = orders.customer_id;
-
--- Group by non-protected column
-SELECT customer_id, SUM(amount) FROM orders GROUP BY customer_id;
+-- PAC automatically follows the chain: lineitem -> orders -> customers
+SELECT SUM(price) FROM lineitem;
+┌───────────────┐
+│  sum(price)   │
+├───────────────┤
+│       1388.79 │
+└───────────────┘
 ```
 
-### Join Without PAC_LINK
+## How It Works
 
-Privacy units can be joined with tables that don't have an explicit PAC_LINK. The system uses the privacy unit's PAC_KEY/PRIMARY KEY for hashing:
+1. You declare which table is the **privacy unit** (`CREATE PU TABLE` or `ALTER TABLE SET PU`) and which columns to protect.
+2. You link related tables with `PAC_LINK` to propagate privacy through joins.
+3. PAC intercepts every aggregate query, hashes each privacy unit's key into a 64-bit value, and uses the bits to create 64 sub-samples. Each aggregate runs on all sub-samples independently, and the final result is the noised median — close to the true answer but safe against membership inference.
+
+### Mutual Information (MI)
+
+PAC bounds the mutual information (MI) between the query output and whether any specific individual is in the database. The `pac_mi` parameter sets this bound: at the default `pac_mi = 0.0`, an attacker observing PAC query results gains zero additional information about any individual's presence. Higher values relax the bound, allowing less noise (more accurate results) at the cost of more information leakage.
+
+## SQL Reference
+
+### Defining Privacy Units
 
 ```sql
--- Regular table without PAC_LINK
-CREATE TABLE sales (
-    sale_id INTEGER,
-    customer_id INTEGER,
-    amount DECIMAL(10,2)
-);
+-- Create a new PU table with PAC_KEY and optional PROTECTED columns
+CREATE PU TABLE t (col1 INT, col2 INT, PAC_KEY (col1), PROTECTED (col2));
 
--- This works: PU's PAC_KEY is used for privacy
-SELECT SUM(amount) FROM customers 
-JOIN sales ON customers.id = sales.customer_id;
+-- Or convert an existing table to PU
+ALTER TABLE t ADD PAC_KEY (col1);       -- PAC_KEY on non-PU table (prep for SET PU)
+ALTER TABLE t SET PU;                   -- mark as PU (requires PAC_KEY)
+ALTER TABLE t UNSET PU;                 -- remove PU status
+
+-- Add metadata to non-PU tables (use ALTER TABLE)
+ALTER TABLE orders ADD PAC_LINK (fk_col) REFERENCES t(col1);
+ALTER TABLE orders ADD PROTECTED (col2);
+
+-- Add metadata to PU tables (use ALTER PU TABLE)
+ALTER PU TABLE t ADD PROTECTED (col2);
 ```
 
-## License
+`PAC_KEY` identifies the privacy unit (composite keys supported). `PAC_LINK` declares a join path for privacy propagation. `PROTECTED` restricts columns to aggregate-only access — if omitted on a PU table, all columns are protected. Use `ALTER PU TABLE` for PU tables and `ALTER TABLE` for non-PU tables.
 
-See `LICENSE` in the repository root.
+### Supported Aggregates and Operators
+
+PAC rewrites standard aggregates: `SUM`, `COUNT`, `AVG`, `MIN`, `MAX`, and `COUNT(DISTINCT)`. Joins, subqueries (correlated and uncorrelated), `UNION`/`UNION ALL`, `GROUP BY`, `HAVING`, `ORDER BY`, and `LIMIT` all work. Window functions and set operations like `EXCEPT`/`INTERSECT` are not yet supported.
+
+### Settings
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `pac_mi` | `1/128` | Mutual information bound (higher = less noise) |
+| `pac_seed` | random | Fix seed for reproducible results |
+| `pac_noise` | `true` | Toggle noise injection |
+| `pac_diffcols` | `NULL` | [Utility diff](docs/pac/utility.md): compare noised vs exact results |
+
+## Documentation
+
+For implementation details, see the [docs/](docs/) folder:
+[Parser](docs/pac/syntax.md) | [Query Operators](docs/pac/query_operators.md) | [PAC Functions](docs/pac/functions.md) | [Runtime Checks](docs/pac/runtime_checks.md) | [Tests](docs/test/README.md) | [Benchmarks](docs/benchmark/README.md)
+
+## Literature
+
+> TODO: Add paper reference and BibTeX citation.
 
 ## Maintainer
 
 This extension is maintained by **@ila** (ilaria@cwi.nl).
-
-## Literature
-WIP: We will add references to relevant papers and resources on PAC privacy and privacy-preserving query processing here.

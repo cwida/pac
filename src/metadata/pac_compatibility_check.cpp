@@ -2,6 +2,7 @@
 #include "pac_debug.hpp"
 #include "utils/pac_helpers.hpp"
 #include "parser/pac_parser.hpp"
+#include "query_processing/pac_plan_traversal.hpp"
 
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
@@ -13,6 +14,7 @@
 #include "duckdb/planner/operator/logical_projection.hpp"
 #include "duckdb/planner/operator/logical_order.hpp"
 #include "duckdb/planner/operator/logical_materialized_cte.hpp"
+#include "duckdb/planner/operator/logical_cteref.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 
 #include <algorithm>
@@ -25,9 +27,9 @@
 namespace duckdb {
 
 static bool IsPacAggregate(const string &func) {
-	static const std::unordered_set<string> pac_aggs = {
-	    "pac_sum",          "pac_count",          "pac_avg",          "pac_min",          "pac_max",
-	    "pac_sum_counters", "pac_count_counters", "pac_avg_counters", "pac_min_counters", "pac_max_counters"};
+	static const std::unordered_set<string> pac_aggs = {"pac_noised_sum", "pac_noised_count", "pac_noised_min",
+	                                                    "pac_noised_max", "pac_sum",          "pac_count",
+	                                                    "pac_min",        "pac_max"};
 	string lower_func = func;
 	std::transform(lower_func.begin(), lower_func.end(), lower_func.begin(), ::tolower);
 	return pac_aggs.count(lower_func) > 0;
@@ -83,14 +85,12 @@ static bool ContainsWindowFunction(const LogicalOperator &op) {
 	return false;
 }
 
-static bool ContainsLogicalDistinct(const LogicalOperator &op) {
-	// Only check for explicit DISTINCT operator (SELECT DISTINCT), not aggregate DISTINCT
-	if (op.type == LogicalOperatorType::LOGICAL_DISTINCT) {
+static bool ContainsRecursiveCTE(const LogicalOperator &op) {
+	if (op.type == LogicalOperatorType::LOGICAL_RECURSIVE_CTE) {
 		return true;
 	}
-
 	for (auto &child : op.children) {
-		if (ContainsLogicalDistinct(*child)) {
+		if (ContainsRecursiveCTE(*child)) {
 			return true;
 		}
 	}
@@ -275,36 +275,6 @@ static bool CheckPacAggregatesHaveProperJoins(const LogicalOperator &op, const P
 	return found_pac_aggregate;
 }
 
-// Helper: Find the operator in the plan that produces a given table_index
-static LogicalOperator *FindOperatorByTableIndex(LogicalOperator &op, idx_t table_index) {
-	// Check if this operator produces the table_index
-	if (op.type == LogicalOperatorType::LOGICAL_GET) {
-		auto &get = op.Cast<LogicalGet>();
-		if (get.table_index == table_index) {
-			return &op;
-		}
-	} else if (op.type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
-		auto &aggr = op.Cast<LogicalAggregate>();
-		if (aggr.group_index == table_index || aggr.aggregate_index == table_index) {
-			return &op;
-		}
-	} else if (op.type == LogicalOperatorType::LOGICAL_PROJECTION) {
-		auto &proj = op.Cast<LogicalProjection>();
-		if (proj.table_index == table_index) {
-			return &op;
-		}
-	}
-
-	// Recurse into children
-	for (auto &child : op.children) {
-		auto *result = FindOperatorByTableIndex(*child, table_index);
-		if (result) {
-			return result;
-		}
-	}
-	return nullptr;
-}
-
 // Trace a binding down through the plan to check if it ultimately comes from a PU table.
 // If the binding comes from an aggregate expression, it's safe (the value has been aggregated).
 // If the binding comes from a GROUP BY column, we need to trace that column's source further.
@@ -312,7 +282,7 @@ static LogicalOperator *FindOperatorByTableIndex(LogicalOperator &op, idx_t tabl
 static void TraceBindingToPUTable(LogicalOperator &op, const ColumnBinding &binding, const vector<string> &pu_tables,
                                   LogicalOperator &root) {
 	// Find the operator that produces this binding's table_index
-	auto *source_op = FindOperatorByTableIndex(root, binding.table_index);
+	auto *source_op = FindOperatorByTableIndex(&root, binding.table_index);
 	if (!source_op) {
 		return; // Can't find source, assume safe
 	}
@@ -357,6 +327,16 @@ static void TraceBindingToPUTable(LogicalOperator &op, const ColumnBinding &bind
 				}
 			});
 		}
+	} else if (source_op->type == LogicalOperatorType::LOGICAL_CTE_REF) {
+		auto &cte_ref = source_op->Cast<LogicalCTERef>();
+		auto *cte_def = FindMaterializedCTE(&root, cte_ref.cte_index);
+		if (cte_def && !cte_def->children.empty() && cte_def->children[0]) {
+			auto &cte_body = *cte_def->children[0];
+			auto body_bindings = cte_body.GetColumnBindings();
+			if (binding.column_index < body_bindings.size()) {
+				TraceBindingToPUTable(cte_body, body_bindings[binding.column_index], pu_tables, root);
+			}
+		}
 	}
 }
 
@@ -366,7 +346,7 @@ static std::pair<string, string>
 GetProtectedColumnInfo(LogicalOperator &root, const ColumnBinding &binding,
                        const std::unordered_map<string, std::unordered_set<string>> &protected_columns) {
 	// Find the LogicalGet that produces this binding
-	auto *source_op = FindOperatorByTableIndex(root, binding.table_index);
+	auto *source_op = FindOperatorByTableIndex(&root, binding.table_index);
 	if (!source_op || source_op->type != LogicalOperatorType::LOGICAL_GET) {
 		return {"", ""};
 	}
@@ -464,11 +444,15 @@ static void CheckOutputColumnsNotFromPU(LogicalOperator &current_op, LogicalOper
 		}
 	} else if (current_op.type == LogicalOperatorType::LOGICAL_ORDER_BY ||
 	           current_op.type == LogicalOperatorType::LOGICAL_TOP_N ||
-	           current_op.type == LogicalOperatorType::LOGICAL_LIMIT) {
-		// For ORDER BY, TOP N, and LIMIT: check the child operator's output
-		// These operators just reorder/filter rows, they don't change the columns
+	           current_op.type == LogicalOperatorType::LOGICAL_LIMIT ||
+	           current_op.type == LogicalOperatorType::LOGICAL_DISTINCT) {
 		for (auto &child : current_op.children) {
 			CheckOutputColumnsNotFromPU(*child, plan_root, pu_tables, tables_with_protected_cols);
+		}
+	} else if (current_op.type == LogicalOperatorType::LOGICAL_MATERIALIZED_CTE) {
+		// Only check children[1] (the consumer). children[0] is the CTE definition (intermediate).
+		if (current_op.children.size() > 1 && current_op.children[1]) {
+			CheckOutputColumnsNotFromPU(*current_op.children[1], plan_root, pu_tables, tables_with_protected_cols);
 		}
 	}
 }
@@ -482,7 +466,7 @@ TraceBindingForProtectedColumns(LogicalOperator &op, const ColumnBinding &bindin
 static void
 TraceBindingForProtectedColumns(LogicalOperator &op, const ColumnBinding &binding, LogicalOperator &root,
                                 const std::unordered_map<string, std::unordered_set<string>> &protected_columns) {
-	auto *source_op = FindOperatorByTableIndex(root, binding.table_index);
+	auto *source_op = FindOperatorByTableIndex(&root, binding.table_index);
 	if (!source_op) {
 		return;
 	}
@@ -518,6 +502,16 @@ TraceBindingForProtectedColumns(LogicalOperator &op, const ColumnBinding &bindin
 					TraceBindingForProtectedColumns(*source_op, col_ref.binding, root, protected_columns);
 				}
 			});
+		}
+	} else if (source_op->type == LogicalOperatorType::LOGICAL_CTE_REF) {
+		auto &cte_ref = source_op->Cast<LogicalCTERef>();
+		auto *cte_def = FindMaterializedCTE(&root, cte_ref.cte_index);
+		if (cte_def && !cte_def->children.empty() && cte_def->children[0]) {
+			auto &cte_body = *cte_def->children[0];
+			auto body_bindings = cte_body.GetColumnBindings();
+			if (binding.column_index < body_bindings.size()) {
+				TraceBindingForProtectedColumns(cte_body, body_bindings[binding.column_index], root, protected_columns);
+			}
 		}
 	}
 }
@@ -573,9 +567,15 @@ CheckOutputColumnsNotProtected(LogicalOperator &current_op, LogicalOperator &pla
 		}
 	} else if (current_op.type == LogicalOperatorType::LOGICAL_ORDER_BY ||
 	           current_op.type == LogicalOperatorType::LOGICAL_TOP_N ||
-	           current_op.type == LogicalOperatorType::LOGICAL_LIMIT) {
+	           current_op.type == LogicalOperatorType::LOGICAL_LIMIT ||
+	           current_op.type == LogicalOperatorType::LOGICAL_DISTINCT) {
 		for (auto &child : current_op.children) {
 			CheckOutputColumnsNotProtected(*child, plan_root, protected_columns);
+		}
+	} else if (current_op.type == LogicalOperatorType::LOGICAL_MATERIALIZED_CTE) {
+		// Only check children[1] (the consumer). children[0] is the CTE definition (intermediate).
+		if (current_op.children.size() > 1 && current_op.children[1]) {
+			CheckOutputColumnsNotProtected(*current_op.children[1], plan_root, protected_columns);
 		}
 	}
 }
@@ -685,7 +685,7 @@ static bool DetectCycleInFKGraph(ClientContext &context, const vector<string> &s
 		to_process.pop();
 
 		// Get foreign keys from this table
-		auto fks = FindForeignKeys(context, current);
+		auto fks = FindPacLinks(context, current);
 		for (auto &fk : fks) {
 			string referenced_table = fk.first;
 
@@ -746,7 +746,7 @@ static bool DetectCycleInFKGraph(ClientContext &context, const vector<string> &s
 }
 
 PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, ClientContext &context,
-                                            const vector<string> &pac_tables, PACOptimizerInfo *optimizer_info) {
+                                            PACOptimizerInfo *optimizer_info) {
 	PACCompatibilityResult result;
 
 	// If a replan/compilation is already in progress by the optimizer extension, skip compatibility checks
@@ -759,13 +759,6 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 	std::unordered_map<string, idx_t> scan_counts;
 	CountScans(*plan, scan_counts);
 
-	// Record which configured PAC tables were scanned in this plan
-	for (auto &t : pac_tables) {
-		if (scan_counts[t] > 0) {
-			result.scanned_pu_tables.push_back(t);
-		}
-	}
-
 	// Build a vector of scanned table names
 	vector<string> scanned_tables;
 	for (auto &kv : scan_counts) {
@@ -774,20 +767,9 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 	// Sort for deterministic behavior across platforms (unordered_map iteration order is not guaranteed)
 	std::sort(scanned_tables.begin(), scanned_tables.end());
 
-	// Record scanned tables that are NOT configured PAC tables
-	// This is needed for the compiler to correctly identify present tables
-	std::unordered_set<string> pac_tables_set(pac_tables.begin(), pac_tables.end());
-	for (auto &kv : scan_counts) {
-		if (kv.second > 0 && pac_tables_set.find(kv.first) == pac_tables_set.end()) {
-			result.scanned_non_pu_tables.push_back(kv.first);
-		}
-	}
-	// Sort for deterministic behavior across platforms
-	std::sort(result.scanned_non_pu_tables.begin(), result.scanned_non_pu_tables.end());
-
 	// Discover tables with PROTECTED columns in PAC metadata
 	// Note: Tables with protected columns are NOT automatically privacy units anymore.
-	// A table is a privacy unit only if it has is_privacy_unit = true (via CREATE PAC TABLE or ALTER TABLE SET PAC)
+	// A table is a privacy unit only if it has is_privacy_unit = true (via CREATE PU TABLE or ALTER TABLE SET PAC)
 	auto &metadata_mgr = PACMetadataManager::Get();
 	vector<string> tables_with_protected_columns;
 	for (auto &kv : scan_counts) {
@@ -809,9 +791,19 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 	std::sort(tables_with_protected_columns.begin(), tables_with_protected_columns.end());
 	std::sort(result.scanned_pu_tables.begin(), result.scanned_pu_tables.end());
 
+	// Record scanned tables that are NOT privacy unit tables
+	{
+		std::unordered_set<string> pu_set(result.scanned_pu_tables.begin(), result.scanned_pu_tables.end());
+		for (auto &kv : scan_counts) {
+			if (kv.second > 0 && pu_set.find(kv.first) == pu_set.end()) {
+				result.scanned_non_pu_tables.push_back(kv.first);
+			}
+		}
+		std::sort(result.scanned_non_pu_tables.begin(), result.scanned_non_pu_tables.end());
+	}
+
 	// Also check tables reachable via PAC_LINKs for protected columns
-	// (FindForeignKeys already includes PAC_LINKs, but we need to find protected columns
-	// in tables that may not be directly scanned)
+	// (need to find protected columns in tables that may not be directly scanned)
 	{
 		std::unordered_set<string> visited;
 		std::queue<string> to_check;
@@ -823,8 +815,8 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 			string current = to_check.front();
 			to_check.pop();
 
-			// Get outgoing links (both FK and PAC_LINK)
-			auto fks = FindForeignKeys(context, current);
+			// Get outgoing PAC_LINKs
+			auto fks = FindPacLinks(context, current);
 			for (auto &fk : fks) {
 				string ref_table = fk.first;
 				if (visited.find(ref_table) != visited.end()) {
@@ -849,17 +841,10 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 	result.tables_with_protected_columns = tables_with_protected_columns;
 	bool has_protected_columns = !tables_with_protected_columns.empty();
 
-	// Build the combined privacy unit list:
-	// 1. Configured PAC tables (pac_tables from the CSV file)
-	// 2. Tables explicitly marked as privacy units (is_privacy_unit = true via CREATE PAC TABLE or ALTER TABLE SET PAC)
+	// Build the combined privacy unit list from metadata (is_privacy_unit = true)
 	// Note: Tables with protected columns are NOT automatically privacy units anymore
-	// A table is a privacy unit only if it has is_privacy_unit = true (via CREATE PAC TABLE or ALTER TABLE SET PAC)
-	vector<string> all_privacy_units = pac_tables;
-	for (auto &t : result.scanned_pu_tables) {
-		if (std::find(all_privacy_units.begin(), all_privacy_units.end(), t) == all_privacy_units.end()) {
-			all_privacy_units.push_back(t);
-		}
-	}
+	// A table is a privacy unit only if it has is_privacy_unit = true (via CREATE PU TABLE or ALTER TABLE SET PAC)
+	vector<string> all_privacy_units(result.scanned_pu_tables.begin(), result.scanned_pu_tables.end());
 	// Also include ALL tables from metadata that have is_privacy_unit=true (even if not scanned)
 	for (const auto &table_name : metadata_mgr.GetAllTableNames()) {
 		auto *table_metadata = metadata_mgr.GetTableMetadata(table_name);
@@ -870,18 +855,17 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 		}
 	}
 
-	// --- Populate per-table metadata (PKs and FKs) for scanned tables ---
+	// --- Populate per-table metadata (PAC_KEYs and PAC_LINKs) for scanned tables ---
 	for (auto &name : scanned_tables) {
 		ColumnMetadata md;
 		md.table_name = name;
-		md.pks = FindPrimaryKey(context, name);
-		md.fks = FindForeignKeys(context, name);
+		md.pks = FindPacKey(context, name);
+		md.fks = FindPacLinks(context, name);
 		result.table_metadata[name] = std::move(md);
 	}
 
-	// Compute FK/LINK paths from scanned tables to any privacy unit (transitive)
-	// FindForeignKeyBetween uses FindForeignKeys which already includes PAC_LINKs
-	auto fk_paths = FindForeignKeyBetween(context, all_privacy_units, scanned_tables);
+	// Compute PAC_LINK paths from scanned tables to any privacy unit (transitive)
+	auto fk_paths = FindPacLinkPath(context, all_privacy_units, scanned_tables);
 
 	// Populate metadata for tables in FK paths that aren't scanned
 	for (auto &kv : fk_paths) {
@@ -889,8 +873,8 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 			if (result.table_metadata.find(tbl) == result.table_metadata.end()) {
 				ColumnMetadata md;
 				md.table_name = tbl;
-				md.pks = FindPrimaryKey(context, tbl);
-				md.fks = FindForeignKeys(context, tbl);
+				md.pks = FindPacKey(context, tbl);
+				md.fks = FindPacLinks(context, tbl);
 				result.table_metadata[tbl] = std::move(md);
 			}
 		}
@@ -901,11 +885,11 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 		if (result.table_metadata.find(t) == result.table_metadata.end()) {
 			ColumnMetadata md;
 			md.table_name = t;
-			md.pks = FindPrimaryKey(context, t);
-			md.fks = FindForeignKeys(context, t);
+			md.pks = FindPacKey(context, t);
+			md.fks = FindPacLinks(context, t);
 			result.table_metadata[t] = std::move(md);
 		} else if (result.table_metadata[t].pks.empty()) {
-			auto pk = FindPrimaryKey(context, t);
+			auto pk = FindPacKey(context, t);
 			if (!pk.empty()) {
 				result.table_metadata[t].pks = pk;
 			}
@@ -979,6 +963,21 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 				string table_lower = StringUtil::Lower(table_name);
 				for (auto &fk_col : fk_pair.second) {
 					result.protected_columns[table_lower].insert(StringUtil::Lower(fk_col));
+				}
+#if PAC_DEBUG
+				PAC_DEBUG_PRINT("Source2: table=" + table_name + " FK to " + ref_table +
+				                " reaches PU. Protected FK cols on " + table_lower);
+#endif
+				// Also protect the referenced columns on the parent table.
+				// E.g., PAC_LINK (l_orderkey) REFERENCES orders(o_orderkey):
+				// l_orderkey is protected above; o_orderkey must also be protected
+				// because it's a key along the PAC link chain.
+				auto ref_pk_cols = FindReferencedPKColumns(context, table_name, ref_table);
+				for (auto &pk_col : ref_pk_cols) {
+					result.protected_columns[ref_lower].insert(StringUtil::Lower(pk_col));
+#if PAC_DEBUG
+					PAC_DEBUG_PRINT("Source2: also protecting referenced col " + ref_lower + "." + pk_col);
+#endif
 				}
 			}
 		}
@@ -1057,6 +1056,12 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 			return result;
 		}
 
+		if (ContainsRecursiveCTE(*plan)) {
+			if (is_conservative) {
+				throw InvalidInputException("PAC rewrite: recursive CTEs are not supported for PAC compilation");
+			}
+			return result;
+		}
 		if (ContainsWindowFunction(*plan)) {
 			if (is_conservative) {
 				throw InvalidInputException("PAC rewrite: window functions are not supported for PAC compilation");
@@ -1067,12 +1072,6 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 			if (is_conservative) {
 				throw InvalidInputException(
 				    "Query does not contain any allowed aggregation (sum, count, avg, min, max)!");
-			}
-			return result;
-		}
-		if (ContainsLogicalDistinct(*plan)) {
-			if (is_conservative) {
-				throw InvalidInputException("PAC rewrite: DISTINCT is not supported for PAC compilation");
 			}
 			return result;
 		}

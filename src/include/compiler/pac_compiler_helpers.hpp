@@ -10,8 +10,11 @@
 #include "metadata/pac_compatibility_check.hpp"
 #include "query_processing/pac_expression_builder.hpp"
 #include "query_processing/pac_plan_traversal.hpp"
+#include "query_processing/pac_projection_propagation.hpp"
 
 namespace duckdb {
+
+class LogicalAggregate;
 
 // Build join conditions from FK columns to PK columns
 void BuildJoinConditions(LogicalGet *left_get, LogicalGet *right_get, const vector<string> &left_cols,
@@ -30,6 +33,17 @@ unique_ptr<LogicalGet> CreateLogicalGet(ClientContext &context, unique_ptr<Logic
 // Examine PACCompatibilityResult.fk_paths and populate gets_present / gets_missing
 void PopulateGetsFromFKPath(const PACCompatibilityResult &check, vector<string> &gets_present,
                             vector<string> &gets_missing, string &start_table_out, vector<string> &target_pus_out);
+
+// Find the FK columns from a table that reference any privacy unit.
+// Returns the FK column names, or empty vector if no FK to any PU exists.
+vector<string> FindFKColumnsToPU(const PACCompatibilityResult &check, const string &table_name,
+                                 const vector<string> &privacy_units);
+
+// Find a LogicalGet for a table that is accessible within a subtree root's descendants.
+// Searches all instances of the table in the plan and returns the first whose table_index
+// appears in subtree_root's subtree.  Returns nullptr if none found.
+LogicalGet *FindAccessibleGetInSubtree(unique_ptr<LogicalOperator> &plan, LogicalOperator *subtree_root,
+                                       const string &table_name);
 
 } // namespace duckdb
 

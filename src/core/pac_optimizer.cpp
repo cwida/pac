@@ -7,8 +7,6 @@
 #include <string>
 #include <algorithm>
 
-// Include public helper to access the configured PAC tables filename and read helper
-#include "core/pac_privacy_unit.hpp"
 #include "utils/pac_helpers.hpp"
 // Include PAC bitslice compiler
 #include "compiler/pac_bitslice_compiler.hpp"
@@ -140,6 +138,11 @@ void PACRewriteRule::PACPreOptimizeFunction(OptimizerExtensionInput &input, uniq
 		check_plan = plan->children[0].get();
 	}
 	// TODO: why this particular collection of operators? Maybe check against DDL or DML
+	// For DISTINCT, look through to the child — SELECT DISTINCT has PROJECTION underneath,
+	// but UNION's deduplication has LOGICAL_UNION underneath and should not enter PAC.
+	if (check_plan->type == LogicalOperatorType::LOGICAL_DISTINCT && !check_plan->children.empty()) {
+		check_plan = check_plan->children[0].get();
+	}
 	if (check_plan->type != LogicalOperatorType::LOGICAL_PROJECTION &&
 	    check_plan->type != LogicalOperatorType::LOGICAL_ORDER_BY &&
 	    check_plan->type != LogicalOperatorType::LOGICAL_TOP_N &&
@@ -148,17 +151,12 @@ void PACRewriteRule::PACPreOptimizeFunction(OptimizerExtensionInput &input, uniq
 	    check_plan->type != LogicalOperatorType::LOGICAL_MATERIALIZED_CTE) {
 		return;
 	}
-	// Load configured PAC tables once
-	string pac_privacy_file = GetPacPrivacyFile(input.context);
-	auto pac_tables = ReadPacTablesFile(pac_privacy_file);
-	vector<string> pac_table_list = PacTablesSetToVector(pac_tables);
-
 	// For EXPLAIN queries, we need to operate on the child plan
 	bool is_explain = (plan->type == LogicalOperatorType::LOGICAL_EXPLAIN && !plan->children.empty());
 	unique_ptr<LogicalOperator> &target_plan = is_explain ? plan->children[0] : plan;
 
 	// Delegate compatibility checks (including detecting PAC table presence and internal sample scans)
-	PACCompatibilityResult check = PACRewriteQueryCheck(target_plan, input.context, pac_table_list, pac_info);
+	PACCompatibilityResult check = PACRewriteQueryCheck(target_plan, input.context, pac_info);
 	if (check.fk_paths.empty() && check.scanned_pu_tables.empty()) {
 		return;
 	}
@@ -179,8 +177,20 @@ void PACRewriteRule::PACPreOptimizeFunction(OptimizerExtensionInput &input, uniq
 		return;
 	}
 
-	// compute normalized query hash once for file naming
-	string normalized = NormalizeQueryForHash(input.context.GetCurrentQuery());
+	// Compute normalized query hash once for file naming.
+	// When another optimizer extension (e.g. OpenIVM's IVM rewrite) replans a query
+	// inside its own hook, the new Optimizer runs on a Connection context whose
+	// active_query is NULL. DuckDB's GetCurrentQuery() dereferences that unique_ptr
+	// and throws InternalException. The query string is only used for the compiled-
+	// file hash, so we fall back to a fixed string to let PAC compilation proceed
+	// (needed so delta queries get pac_noised_sum / pac_hash rewrites).
+	string current_query;
+	try {
+		current_query = input.context.GetCurrentQuery();
+	} catch (InternalException &) {
+		current_query = "replan";
+	}
+	string normalized = NormalizeQueryForHash(current_query);
 	string query_hash = HashStringToHex(normalized);
 	vector<string> privacy_units = std::move(discovered_pus);
 #if PAC_DEBUG

@@ -2,6 +2,7 @@
 #define DUCKDB_OPENPAC_REWRITE_RULE_HPP
 
 #include "duckdb.hpp"
+#include "duckdb/optimizer/optimizer_extension.hpp"
 #include <atomic>
 
 namespace duckdb {

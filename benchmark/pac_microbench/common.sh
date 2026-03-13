@@ -14,7 +14,7 @@ BENCH_RUNS=${BENCH_RUNS:-3}
 THREADS=${THREADS:-1}  # Default to single-threaded to avoid partitioning issues
 
 # Query setup commands
-QUERY_SETUP="SET threads=4; SET max_memory='30G'; SET max_temp_directory_size='90GB';"
+QUERY_SETUP="SET pac_mi=0.0; SET threads=4; SET max_memory='30G'; SET max_temp_directory_size='90GB';"
 
 mkdir -p "$RESULTS_DIR"
 

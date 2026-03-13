@@ -18,14 +18,13 @@
 #include "duckdb/planner/operator/logical_expression_get.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
+#include "duckdb/planner/expression_iterator.hpp"
 #include <unordered_set>
 #include <unordered_map>
 #include <algorithm>
 #include <queue>
 
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
-#include "duckdb/parser/constraints/unique_constraint.hpp"
-#include "duckdb/parser/constraints/foreign_key_constraint.hpp"
 #include "core/pac_optimizer.hpp"
 #include "parser/pac_parser.hpp"
 #include "duckdb/planner/binder.hpp"
@@ -102,7 +101,7 @@ idx_t GetNextTableIndex(unique_ptr<LogicalOperator> &plan) {
 	return (max_index == DConstants::INVALID_INDEX) ? 0 : (max_index + 1);
 }
 
-static void CollectTableIndicesRecursive(LogicalOperator *node, idx_set &out) {
+void CollectTableIndicesRecursive(LogicalOperator *node, idx_set &out) {
 	if (!node) {
 		return;
 	}
@@ -135,7 +134,7 @@ static void CollectTableIndicesExcluding(LogicalOperator *node, LogicalOperator 
 	}
 }
 
-static void ApplyIndexMapToSubtree(LogicalOperator *node, const std::unordered_map<idx_t, idx_t> &map) {
+void ApplyIndexMapToSubtree(LogicalOperator *node, const std::unordered_map<idx_t, idx_t> &map) {
 	if (!node) {
 		return;
 	}
@@ -290,12 +289,10 @@ void ReplaceNode(unique_ptr<LogicalOperator> &root, unique_ptr<LogicalOperator> 
 	}
 }
 
-// Find the primary key column name for a given table. Searches the client's catalog search path
-// for the table and returns the first column name of the primary key constraint (if any).
-// Also checks PAC_KEY metadata if no database constraint is found.
-// Returns empty vector when no primary key exists.
-vector<string> FindPrimaryKey(ClientContext &context, const string &table_name) {
-	Connection con(*context.db);
+// Find PAC_KEY column names for the given table.
+// Only uses PAC metadata (no database PRIMARY KEY detection).
+// Returns empty vector when no PAC_KEY is defined.
+vector<string> FindPacKey(ClientContext &context, const string &table_name) {
 	Catalog &catalog = Catalog::GetCatalog(context, DatabaseManager::GetDefaultDatabase(context));
 
 	// Helper that checks a vector of column names exist and are numeric; returns the vector if valid,
@@ -305,14 +302,11 @@ vector<string> FindPrimaryKey(ClientContext &context, const string &table_name) 
 		vector<string> out;
 		out.reserve(cols.size());
 		for (auto &col_name : cols) {
-			// TableCatalogEntry::GetColumnIndex expects a non-const string reference
 			string tmp = col_name;
-			// If column not found, treat as no PK
 			try {
 				auto col_idx = table_entry.GetColumnIndex(tmp);
 				auto &col = table_entry.GetColumn(col_idx);
 				if (!col.Type().IsNumeric()) {
-					// found a non-numeric PK column — treat as no primary key
 					return {};
 				}
 				out.push_back(col.GetName());
@@ -323,83 +317,35 @@ vector<string> FindPrimaryKey(ClientContext &context, const string &table_name) 
 		return out;
 	};
 
-	// If schema-qualified name is provided (schema.table), prefer that exact lookup
+	// Extract unqualified table name for PAC metadata lookup
+	string unqualified = table_name;
 	auto dot_pos = table_name.find('.');
 	if (dot_pos != string::npos) {
-		string schema = table_name.substr(0, dot_pos);
-		string tbl = table_name.substr(dot_pos + 1);
-		auto entry = catalog.GetEntry(context, CatalogType::TABLE_ENTRY, schema, tbl, OnEntryNotFound::RETURN_NULL);
-		if (!entry) {
-			return {};
-		}
-		auto &table_entry = entry->Cast<TableCatalogEntry>();
-		auto pk = table_entry.GetPrimaryKey();
-		if (pk && pk->type == ConstraintType::UNIQUE) {
-			auto &unique = pk->Cast<UniqueConstraint>();
-			// If explicit column names present, validate all are numeric
-			if (!unique.GetColumnNames().empty()) {
-				auto cols = unique.GetColumnNames();
-				auto validated = check_and_return_numeric_columns(table_entry, cols);
-				if (!validated.empty()) {
-					return validated;
-				}
-			}
-			// Otherwise fall back to index-based single-column PK
-			if (unique.HasIndex()) {
-				auto idx = unique.GetIndex();
-				auto &col = table_entry.GetColumn(idx);
-				if (col.Type().IsNumeric()) {
-					return {col.GetName()};
-				}
-			}
-		}
-		// No database PK constraint found - check PAC_KEY metadata
-		auto &metadata_mgr = PACMetadataManager::Get();
-		auto *pac_meta = metadata_mgr.GetTableMetadata(tbl);
-		if (pac_meta && !pac_meta->primary_key_columns.empty()) {
-			auto validated = check_and_return_numeric_columns(table_entry, pac_meta->primary_key_columns);
-			if (!validated.empty()) {
-				return validated;
-			}
-		}
+		unqualified = table_name.substr(dot_pos + 1);
+	}
+
+	auto &metadata_mgr = PACMetadataManager::Get();
+	auto *pac_meta = metadata_mgr.GetTableMetadata(unqualified);
+	if (!pac_meta || pac_meta->primary_key_columns.empty()) {
 		return {};
 	}
 
-	// Non-qualified name: walk the search path
-	CatalogSearchPath path(context);
-	for (auto &entry_path : path.Get()) {
-		auto entry = catalog.GetEntry(context, CatalogType::TABLE_ENTRY, entry_path.schema, table_name,
-		                              OnEntryNotFound::RETURN_NULL);
-		if (!entry) {
-			continue;
+	// Validate columns exist and are numeric by looking up the table in the catalog
+	if (dot_pos != string::npos) {
+		string schema = table_name.substr(0, dot_pos);
+		auto entry =
+		    catalog.GetEntry(context, CatalogType::TABLE_ENTRY, schema, unqualified, OnEntryNotFound::RETURN_NULL);
+		if (entry) {
+			return check_and_return_numeric_columns(entry->Cast<TableCatalogEntry>(), pac_meta->primary_key_columns);
 		}
-		auto &table_entry = entry->Cast<TableCatalogEntry>();
-		auto pk = table_entry.GetPrimaryKey();
-		if (pk && pk->type == ConstraintType::UNIQUE) {
-			auto &unique = pk->Cast<UniqueConstraint>();
-			if (!unique.GetColumnNames().empty()) {
-				auto cols = unique.GetColumnNames();
-				auto validated = check_and_return_numeric_columns(table_entry, cols);
-				if (!validated.empty()) {
-					return validated;
-				}
-				// otherwise continue searching other schemas
-			}
-			if (unique.HasIndex()) {
-				auto idx = unique.GetIndex();
-				auto &col = table_entry.GetColumn(idx);
-				if (col.Type().IsNumeric()) {
-					return {col.GetName()};
-				}
-			}
-		}
-		// No database PK constraint found - check PAC_KEY metadata
-		auto &metadata_mgr = PACMetadataManager::Get();
-		auto *pac_meta = metadata_mgr.GetTableMetadata(table_name);
-		if (pac_meta && !pac_meta->primary_key_columns.empty()) {
-			auto validated = check_and_return_numeric_columns(table_entry, pac_meta->primary_key_columns);
-			if (!validated.empty()) {
-				return validated;
+	} else {
+		CatalogSearchPath path(context);
+		for (auto &entry_path : path.Get()) {
+			auto entry = catalog.GetEntry(context, CatalogType::TABLE_ENTRY, entry_path.schema, table_name,
+			                              OnEntryNotFound::RETURN_NULL);
+			if (entry) {
+				return check_and_return_numeric_columns(entry->Cast<TableCatalogEntry>(),
+				                                        pac_meta->primary_key_columns);
 			}
 		}
 	}
@@ -407,40 +353,11 @@ vector<string> FindPrimaryKey(ClientContext &context, const string &table_name) 
 	return {};
 }
 
-// Find foreign key constraints declared on the given table. Mirrors FindPrimaryKey's lookup logic
-// and returns a vector of (referenced_table_name, fk_column_names) pairs for every FOREIGN KEY
-// constraint defined on the table (i.e., where this table is the foreign-key side).
-// Also includes PAC_LINK relationships defined in PAC metadata.
-vector<std::pair<string, vector<string>>> FindForeignKeys(ClientContext &context, const string &table_name) {
-	Connection con(*context.db);
-	Catalog &catalog = Catalog::GetCatalog(context, DatabaseManager::GetDefaultDatabase(context));
+// Find PAC_LINK relationships declared on the given table.
+// Returns a vector of (referenced_table_name, local_column_names) pairs.
+// Only uses PAC metadata (no database FOREIGN KEY detection).
+vector<std::pair<string, vector<string>>> FindPacLinks(ClientContext &context, const string &table_name) {
 	vector<std::pair<string, vector<string>>> result;
-
-	auto process_entry = [&](CatalogEntry *entry_ptr) {
-		if (!entry_ptr) {
-			return;
-		}
-		auto &table_entry = entry_ptr->Cast<TableCatalogEntry>();
-		auto &constraints = table_entry.GetConstraints();
-		for (auto &constraint : constraints) {
-			if (!constraint) {
-				continue;
-			}
-			if (constraint->type != ConstraintType::FOREIGN_KEY) {
-				continue;
-			}
-			auto &fk = constraint->Cast<ForeignKeyConstraint>();
-			// We only care about constraints where this table is the foreign-key table (append constraint)
-			if (!fk.info.IsAppendConstraint()) {
-				continue;
-			}
-			// Build referenced table name: DO NOT return schema-qualified name here; only return the table name.
-			// The schema-qualified variant adds complexity and is left for future work.
-			string ref_table = fk.info.table;
-			// fk.fk_columns contains the column names on THIS table that reference the other
-			result.emplace_back(ref_table, fk.fk_columns);
-		}
-	};
 
 	// Extract unqualified table name for PAC metadata lookup
 	string unqualified_table_name = table_name;
@@ -449,37 +366,11 @@ vector<std::pair<string, vector<string>>> FindForeignKeys(ClientContext &context
 		unqualified_table_name = table_name.substr(dot_pos + 1);
 	}
 
-	// If schema-qualified name is provided (schema.table), prefer that exact lookup
-	if (dot_pos != string::npos) {
-		string schema = table_name.substr(0, dot_pos);
-		string tbl = table_name.substr(dot_pos + 1);
-		auto entry = catalog.GetEntry(context, CatalogType::TABLE_ENTRY, schema, tbl, OnEntryNotFound::RETURN_NULL);
-		if (entry) {
-			process_entry(entry.get());
-		}
-		// If not found in catalog, continue to check PAC metadata below
-	} else {
-		// Non-qualified name: walk the search path
-		CatalogSearchPath path(context);
-		for (auto &entry_path : path.Get()) {
-			auto entry = catalog.GetEntry(context, CatalogType::TABLE_ENTRY, entry_path.schema, table_name,
-			                              OnEntryNotFound::RETURN_NULL);
-			if (!entry) {
-				continue;
-			}
-			process_entry(entry.get());
-		}
-	}
-
-	// Also check for PAC links in the metadata manager
-	// PAC links supplement FK constraints, so we add them to the result
 	auto &metadata_mgr = PACMetadataManager::Get();
 	auto *pac_metadata = metadata_mgr.GetTableMetadata(unqualified_table_name);
 
 	if (pac_metadata) {
-		// Add each PAC link as a foreign key relationship
 		for (auto &link : pac_metadata->links) {
-			// PAC links now support composite keys with local_columns and referenced_columns arrays
 			result.emplace_back(link.referenced_table, link.local_columns);
 		}
 	}
@@ -487,15 +378,38 @@ vector<std::pair<string, vector<string>>> FindForeignKeys(ClientContext &context
 	return result;
 }
 
-// Find foreign-key path(s) from any of `table_names` to any of `privacy_units`.
-// This function resolves table names using the client's catalog search path, then performs a
-// BFS over outgoing FK edges (A -> referenced_table) to find the shortest path from each start
+// Find the referenced columns on the parent table for a specific PAC_LINK relationship.
+// Looks up PAC_LINK metadata on `table_name` that references `ref_table` and returns
+// the referenced_columns from that link.
+vector<string> FindReferencedPKColumns(ClientContext &context, const string &table_name, const string &ref_table) {
+	string ref_lower = StringUtil::Lower(ref_table);
+
+	// Extract unqualified table name for PAC metadata lookup
+	string unqualified = table_name;
+	auto dot_pos = table_name.find('.');
+	if (dot_pos != string::npos) {
+		unqualified = table_name.substr(dot_pos + 1);
+	}
+
+	auto &metadata_mgr = PACMetadataManager::Get();
+	auto *pac_meta = metadata_mgr.GetTableMetadata(unqualified);
+	if (pac_meta) {
+		for (auto &link : pac_meta->links) {
+			if (StringUtil::Lower(link.referenced_table) == ref_lower) {
+				return link.referenced_columns;
+			}
+		}
+	}
+
+	return {};
+}
+
+// Find PAC_LINK path(s) from any of `table_names` to any of `privacy_units`.
+// Performs a BFS over outgoing PAC_LINK edges to find the shortest path from each start
 // table to any privacy unit. Returns a map from the original start table string to the path
-// (vector of table names from start to privacy unit inclusive). NOTE: table names are returned
-// unqualified (no schema prefix) to keep logic simple.
-std::unordered_map<string, vector<string>>
-FindForeignKeyBetween(ClientContext &context, const vector<string> &privacy_units, const vector<string> &table_names) {
-	Connection con(*context.db);
+// (vector of table names from start to privacy unit inclusive).
+std::unordered_map<string, vector<string>> FindPacLinkPath(ClientContext &context, const vector<string> &privacy_units,
+                                                           const vector<string> &table_names) {
 	Catalog &catalog = Catalog::GetCatalog(context, DatabaseManager::GetDefaultDatabase(context));
 
 	auto ResolveQualified = [&](const string &tbl_name) -> string {
@@ -548,7 +462,7 @@ FindForeignKeyBetween(ClientContext &context, const vector<string> &privacy_unit
 			string cur = q.front();
 			q.pop();
 			// Find outgoing FK edges from cur
-			auto fks = FindForeignKeys(context, cur);
+			auto fks = FindPacLinks(context, cur);
 			for (auto &p : fks) {
 				string neighbor = p.first; // referenced table name (unqualified now)
 				string neighbor_name = StringUtil::Lower(ResolveQualified(neighbor)); // normalize to lowercase
@@ -604,15 +518,6 @@ ReplanGuard::~ReplanGuard() {
 }
 
 // Configuration helpers
-string GetPacPrivacyFile(ClientContext &context, const string &default_filename) {
-	Value v;
-	context.TryGetCurrentSetting("pac_privacy_file", v);
-	if (!v.IsNull()) {
-		return v.ToString();
-	}
-	return default_filename;
-}
-
 string GetPacCompiledPath(ClientContext &context, const string &default_path) {
 	Value v;
 	context.TryGetCurrentSetting("pac_compiled_path", v);
@@ -651,16 +556,6 @@ bool IsPacNoiseEnabled(ClientContext &context, bool default_value) {
 	}
 }
 
-vector<string> PacTablesSetToVector(const std::unordered_set<string> &set) {
-	vector<string> out;
-	out.reserve(set.size());
-	for (auto &s : set) {
-		out.push_back(s);
-	}
-	std::sort(out.begin(), out.end());
-	return out;
-}
-
 // Add implementation for GetPacCompileMethod
 string GetPacCompileMethod(ClientContext &context, const string &default_method) {
 	Value v;
@@ -690,25 +585,26 @@ bool GetBooleanSetting(ClientContext &context, const string &setting_name, bool 
 	return default_value;
 }
 
+// Collect a map from table_index to the operator that produces it.
+static void CollectOperatorsByTableIndex(LogicalOperator &op,
+                                         std::unordered_map<idx_t, LogicalOperator *> &table_index_to_op) {
+	auto bindings = op.GetColumnBindings();
+	if (!bindings.empty()) {
+		idx_t op_table_index = bindings[0].table_index;
+		table_index_to_op[op_table_index] = &op;
+	}
+	for (auto &child : op.children) {
+		if (child) {
+			CollectOperatorsByTableIndex(*child, table_index_to_op);
+		}
+	}
+}
+
 // Helper to trace a binding back through the plan to find which LogicalGet it originates from
 static LogicalGet *TraceBindingToSource(LogicalOperator &plan, const ColumnBinding &binding) {
 	// Build a map from table_index to the operator that produces it
 	std::unordered_map<idx_t, LogicalOperator *> table_index_to_op;
-
-	std::function<void(LogicalOperator &)> collect_ops = [&](LogicalOperator &op) {
-		auto bindings = op.GetColumnBindings();
-		if (!bindings.empty()) {
-			// Map this operator's table_index to the operator itself
-			idx_t op_table_index = bindings[0].table_index;
-			table_index_to_op[op_table_index] = &op;
-		}
-		for (auto &child : op.children) {
-			if (child) {
-				collect_ops(*child);
-			}
-		}
-	};
-	collect_ops(plan);
+	CollectOperatorsByTableIndex(plan, table_index_to_op);
 
 	// Start from the binding's table_index and trace backwards
 	idx_t current_table_index = binding.table_index;
@@ -781,7 +677,6 @@ static LogicalGet *TraceBindingToSource(LogicalOperator &plan, const ColumnBindi
 		if (op->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN || op->type == LogicalOperatorType::LOGICAL_JOIN ||
 		    op->type == LogicalOperatorType::LOGICAL_DELIM_JOIN || op->type == LogicalOperatorType::LOGICAL_ANY_JOIN ||
 		    op->type == LogicalOperatorType::LOGICAL_ASOF_JOIN) {
-
 			if (op->children.empty()) {
 				return nullptr;
 			}
@@ -914,6 +809,86 @@ bool ColumnBelongsToTable(LogicalOperator &plan, const string &table_name, const
 	}
 
 	return false;
+}
+
+// Recursively remap BoundColumnRefExpression bindings in an expression tree.
+static void RemapBindingsInExpr(Expression &e, const std::unordered_map<idx_t, idx_t> &map) {
+	if (e.type == ExpressionType::BOUND_COLUMN_REF) {
+		auto &col_ref = e.Cast<BoundColumnRefExpression>();
+		auto it = map.find(col_ref.binding.table_index);
+		if (it != map.end()) {
+			col_ref.binding.table_index = it->second;
+		}
+	}
+	ExpressionIterator::EnumerateChildren(e, [&map](Expression &child) { RemapBindingsInExpr(child, map); });
+}
+
+void RemapBindingsInSubtree(LogicalOperator &op, const std::unordered_map<idx_t, idx_t> &map) {
+	// Remap expressions owned by this operator
+	auto remap_expr = [&](unique_ptr<Expression> &expr) {
+		if (!expr) {
+			return;
+		}
+		RemapBindingsInExpr(*expr, map);
+	};
+
+	// Remap all expression vectors in the operator
+	for (auto &expr : op.expressions) {
+		remap_expr(expr);
+	}
+
+	// Operator-specific expressions
+	if (op.type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+		auto &agg = op.Cast<LogicalAggregate>();
+		for (auto &g : agg.groups) {
+			remap_expr(g);
+		}
+	} else if (op.type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
+		auto &join = op.Cast<LogicalComparisonJoin>();
+		for (auto &cond : join.conditions) {
+			remap_expr(cond.left);
+			remap_expr(cond.right);
+		}
+	}
+
+	// Recurse into children
+	for (auto &child : op.children) {
+		if (child) {
+			RemapBindingsInSubtree(*child, map);
+		}
+	}
+}
+
+std::unordered_map<idx_t, idx_t> RemapSubtreeIndices(LogicalOperator *subtree, Binder &binder, const idx_set &avoid) {
+	// 1. Collect all indices in subtree
+	idx_set subtree_indices;
+	CollectTableIndicesRecursive(subtree, subtree_indices);
+
+	// 2. Build mapping: for every index in subtree, generate a fresh one not in avoid or subtree_indices
+	std::unordered_map<idx_t, idx_t> map;
+	idx_set used = avoid;
+	// Also consider existing subtree indices as used to avoid self-collision during remap
+	for (auto idx : subtree_indices) {
+		used.insert(idx);
+	}
+
+	for (auto old_idx : subtree_indices) {
+		if (old_idx == DConstants::INVALID_INDEX) {
+			continue;
+		}
+		idx_t fresh = binder.GenerateTableIndex();
+		while (used.find(fresh) != used.end()) {
+			fresh = binder.GenerateTableIndex();
+		}
+		map[old_idx] = fresh;
+		used.insert(fresh);
+	}
+
+	// 3. Apply both operator-level and expression-level remapping
+	ApplyIndexMapToSubtree(subtree, map);
+	RemapBindingsInSubtree(*subtree, map);
+
+	return map;
 }
 
 } // namespace duckdb

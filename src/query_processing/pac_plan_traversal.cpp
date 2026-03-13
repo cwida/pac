@@ -9,11 +9,14 @@
 #include "duckdb/planner/operator/logical_aggregate.hpp"
 #include "duckdb/planner/operator/logical_projection.hpp"
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
+#include "duckdb/planner/operator/logical_cteref.hpp"
+#include "duckdb/planner/operator/logical_materialized_cte.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
+#include "pac_debug.hpp"
 
 namespace duckdb {
 
@@ -176,8 +179,7 @@ unique_ptr<LogicalOperator> *FindNodeRefByTable(unique_ptr<LogicalOperator> *roo
 	return nullptr;
 }
 
-// Check if an operator has any LogicalGet nodes (base table scans) in its subtree.
-// Returns false if the subtree only contains CTE scans or no table scans at all.
+// Check if an operator has any leaf data source nodes (base table scans or CTE refs) in its subtree.
 // IMPORTANT: This function stops at aggregates, because aggregates consume base table
 // bindings and produce new output bindings. Base tables behind an aggregate are not
 // directly accessible from operators above the aggregate.
@@ -188,6 +190,12 @@ bool HasBaseTableInSubtree(LogicalOperator *op) {
 
 	// Check if this is a base table scan
 	if (op->type == LogicalOperatorType::LOGICAL_GET) {
+		return true;
+	}
+
+	// CTE refs are leaf nodes that produce bindings from a materialized CTE,
+	// functionally equivalent to a base table scan for this check
+	if (op->type == LogicalOperatorType::LOGICAL_CTE_REF) {
 		return true;
 	}
 
@@ -226,6 +234,145 @@ bool HasTableInSubtree(LogicalOperator *op, const string &table_name) {
 	// Recursively check children
 	for (auto &child : op->children) {
 		if (HasTableInSubtree(child.get(), table_name)) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+// ---- CTE-aware helpers ----
+
+// Collect all table names referenced by LOGICAL_GET nodes in a subtree.
+static void CollectTableNamesInSubtree(LogicalOperator *op, std::unordered_set<string> &table_names) {
+	if (!op) {
+		return;
+	}
+	if (op->type == LogicalOperatorType::LOGICAL_GET) {
+		auto &get = op->Cast<LogicalGet>();
+		auto tblptr = get.GetTable();
+		if (tblptr) {
+			table_names.insert(tblptr->name);
+		}
+	}
+	for (auto &child : op->children) {
+		CollectTableNamesInSubtree(child.get(), table_names);
+	}
+}
+
+// Build a map from cte_index -> set of base table names that the CTE definition references.
+// Also resolves transitive CTE references (CTE A references CTE B's tables).
+void BuildCTETableMap(LogicalOperator *op, CTETableMap &cte_map) {
+	if (!op) {
+		return;
+	}
+
+	if (op->type == LogicalOperatorType::LOGICAL_MATERIALIZED_CTE) {
+		auto &cte = op->Cast<LogicalMaterializedCTE>();
+		idx_t cte_idx = cte.table_index;
+
+		// children[0] = CTE definition, children[1] = consumer
+		if (!cte.children.empty()) {
+			std::unordered_set<string> tables;
+			CollectTableNamesInSubtree(cte.children[0].get(), tables);
+			cte_map[cte_idx] = std::move(tables);
+		}
+	}
+
+	for (auto &child : op->children) {
+		BuildCTETableMap(child.get(), cte_map);
+	}
+}
+
+// Merge tables from referenced CTEs into a target CTE's table set.
+// Walks a subtree looking for CTE_REF nodes and merges their resolved tables.
+static void MergeCTERefsIntoSet(LogicalOperator *op, idx_t target_cte_idx, CTETableMap &cte_map) {
+	if (!op) {
+		return;
+	}
+	if (op->type == LogicalOperatorType::LOGICAL_CTE_REF) {
+		auto &ref = op->Cast<LogicalCTERef>();
+		auto it = cte_map.find(ref.cte_index);
+		if (it != cte_map.end()) {
+			cte_map[target_cte_idx].insert(it->second.begin(), it->second.end());
+		}
+	}
+	for (auto &child : op->children) {
+		MergeCTERefsIntoSet(child.get(), target_cte_idx, cte_map);
+	}
+}
+
+// Resolve transitive CTE references. Must be called after BuildCTETableMap.
+// For each MATERIALIZED_CTE, merges tables from any CTE_REF nodes in its definition.
+static void ResolveCTERefsInDefinitions(LogicalOperator *op, CTETableMap &cte_map) {
+	if (!op) {
+		return;
+	}
+	if (op->type == LogicalOperatorType::LOGICAL_MATERIALIZED_CTE) {
+		auto &cte = op->Cast<LogicalMaterializedCTE>();
+		if (!cte.children.empty()) {
+			MergeCTERefsIntoSet(cte.children[0].get(), cte.table_index, cte_map);
+		}
+	}
+	for (auto &child : op->children) {
+		ResolveCTERefsInDefinitions(child.get(), cte_map);
+	}
+}
+
+// Fully build and resolve CTE table map from a plan root.
+// First collects direct table names per CTE, then resolves transitive CTE references.
+CTETableMap BuildAndResolveCTETableMap(LogicalOperator *plan_root) {
+	CTETableMap cte_map;
+	BuildCTETableMap(plan_root, cte_map);
+	// Resolve transitive refs: CTEs that reference other CTEs get their tables merged
+	ResolveCTERefsInDefinitions(plan_root, cte_map);
+
+#if PAC_DEBUG
+	if (!cte_map.empty()) {
+		PAC_DEBUG_PRINT("CTE table map (" + std::to_string(cte_map.size()) + " CTEs):");
+		for (auto &kv : cte_map) {
+			string tables_str;
+			for (auto &t : kv.second) {
+				if (!tables_str.empty()) {
+					tables_str += ", ";
+				}
+				tables_str += t;
+			}
+			PAC_DEBUG_PRINT("  CTE index " + std::to_string(kv.first) + ": {" + tables_str + "}");
+		}
+	}
+#endif
+
+	return cte_map;
+}
+
+// CTE-aware version of HasTableInSubtree.
+// Follows CTE_REF nodes through the cte_map to check if the referenced CTE
+// transitively contains the target table.
+bool HasTableInSubtreeCTE(LogicalOperator *op, const string &table_name, const CTETableMap &cte_map) {
+	if (!op) {
+		return false;
+	}
+
+	if (op->type == LogicalOperatorType::LOGICAL_GET) {
+		auto &get = op->Cast<LogicalGet>();
+		auto tblptr = get.GetTable();
+		if (tblptr && tblptr->name == table_name) {
+			return true;
+		}
+	}
+
+	// Follow CTE references through the map
+	if (op->type == LogicalOperatorType::LOGICAL_CTE_REF) {
+		auto &ref = op->Cast<LogicalCTERef>();
+		auto it = cte_map.find(ref.cte_index);
+		if (it != cte_map.end() && it->second.count(table_name) > 0) {
+			return true;
+		}
+	}
+
+	for (auto &child : op->children) {
+		if (HasTableInSubtreeCTE(child.get(), table_name, cte_map)) {
 			return true;
 		}
 	}
@@ -281,6 +428,62 @@ bool HasTableIndexInSubtree(LogicalOperator *op, idx_t table_index) {
 	return false;
 }
 
+// Find the operator in the plan that produces a given table_index.
+// Checks GET, AGGREGATE (group_index and aggregate_index), PROJECTION, and CTE_REF.
+LogicalOperator *FindOperatorByTableIndex(LogicalOperator *op, idx_t table_index) {
+	if (!op) {
+		return nullptr;
+	}
+	if (op->type == LogicalOperatorType::LOGICAL_GET) {
+		auto &get = op->Cast<LogicalGet>();
+		if (get.table_index == table_index) {
+			return op;
+		}
+	} else if (op->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+		auto &aggr = op->Cast<LogicalAggregate>();
+		if (aggr.group_index == table_index || aggr.aggregate_index == table_index) {
+			return op;
+		}
+	} else if (op->type == LogicalOperatorType::LOGICAL_PROJECTION) {
+		auto &proj = op->Cast<LogicalProjection>();
+		if (proj.table_index == table_index) {
+			return op;
+		}
+	} else if (op->type == LogicalOperatorType::LOGICAL_CTE_REF) {
+		auto &cte_ref = op->Cast<LogicalCTERef>();
+		if (cte_ref.table_index == table_index) {
+			return op;
+		}
+	}
+	for (auto &child : op->children) {
+		auto *result = FindOperatorByTableIndex(child.get(), table_index);
+		if (result) {
+			return result;
+		}
+	}
+	return nullptr;
+}
+
+// Find a LogicalMaterializedCTE by its table_index.
+LogicalMaterializedCTE *FindMaterializedCTE(LogicalOperator *op, idx_t cte_table_index) {
+	if (!op) {
+		return nullptr;
+	}
+	if (op->type == LogicalOperatorType::LOGICAL_MATERIALIZED_CTE) {
+		auto &cte = op->Cast<LogicalMaterializedCTE>();
+		if (cte.table_index == cte_table_index) {
+			return &cte;
+		}
+	}
+	for (auto &child : op->children) {
+		auto *result = FindMaterializedCTE(child.get(), cte_table_index);
+		if (result) {
+			return result;
+		}
+	}
+	return nullptr;
+}
+
 // Find all LogicalGet nodes with a specific table index in the plan tree.
 void FindAllNodesByTableIndex(unique_ptr<LogicalOperator> *root, idx_t table_index,
                               vector<unique_ptr<LogicalOperator> *> &results) {
@@ -308,14 +511,18 @@ void FindAllNodesByTableIndex(unique_ptr<LogicalOperator> *root, idx_t table_ind
 // AND have base tables in their DIRECT children (not through nested aggregates).
 // This filters out outer aggregates that only depend on inner aggregate results.
 vector<LogicalAggregate *> FilterTargetAggregates(const vector<LogicalAggregate *> &all_aggregates,
-                                                  const vector<string> &target_table_names) {
+                                                  const vector<string> &target_table_names,
+                                                  const CTETableMap &cte_map) {
 	vector<LogicalAggregate *> target_aggregates;
 
 	for (auto *agg : all_aggregates) {
 		// Check if this aggregate has at least one target table in its subtree
+		// Use CTE-aware version if we have a CTE map
 		bool has_target_table = false;
 		for (auto &table_name : target_table_names) {
-			if (HasTableInSubtree(agg, table_name)) {
+			bool found =
+			    cte_map.empty() ? HasTableInSubtree(agg, table_name) : HasTableInSubtreeCTE(agg, table_name, cte_map);
+			if (found) {
 				has_target_table = true;
 				break;
 			}
@@ -326,7 +533,7 @@ vector<LogicalAggregate *> FilterTargetAggregates(const vector<LogicalAggregate 
 		}
 
 		// Check if this aggregate has base tables in its DIRECT children (not nested aggregates)
-		// If it only depends on another aggregate's output, skip it
+		// HasBaseTableInSubtree already recognizes CTE_REF as a valid leaf data source
 		bool has_direct_base_table = false;
 		for (auto &child : agg->children) {
 			// Skip if the child is another aggregate
@@ -347,6 +554,19 @@ vector<LogicalAggregate *> FilterTargetAggregates(const vector<LogicalAggregate 
 	return target_aggregates;
 }
 
+// Check if a specific node pointer exists anywhere in the subtree.
+bool HasNodeInSubtree(LogicalOperator *op, LogicalOperator *target) {
+	if (op == target) {
+		return true;
+	}
+	for (auto &child : op->children) {
+		if (HasNodeInSubtree(child.get(), target)) {
+			return true;
+		}
+	}
+	return false;
+}
+
 // Check if a target node is inside a DELIM_JOIN's subquery branch (children[1]).
 // This is important for correlated subqueries where nodes in the subquery branch
 // cannot directly access tables from the outer query.
@@ -360,20 +580,7 @@ bool IsInDelimJoinSubqueryBranch(unique_ptr<LogicalOperator> *root, LogicalOpera
 	// If this is a DELIM_JOIN, check if target is in children[1] (subquery side)
 	if (cur->type == LogicalOperatorType::LOGICAL_DELIM_JOIN) {
 		if (cur->children.size() >= 2) {
-			// Check if target_node is in the subquery branch (children[1])
-			std::function<bool(LogicalOperator *)> find_target = [&](LogicalOperator *op) -> bool {
-				if (op == target_node) {
-					return true;
-				}
-				for (auto &child : op->children) {
-					if (find_target(child.get())) {
-						return true;
-					}
-				}
-				return false;
-			};
-
-			if (find_target(cur->children[1].get())) {
+			if (HasNodeInSubtree(cur->children[1].get(), target_node)) {
 				return true;
 			}
 		}
@@ -389,6 +596,99 @@ bool IsInDelimJoinSubqueryBranch(unique_ptr<LogicalOperator> *root, LogicalOpera
 	return false;
 }
 
+// Recursive helper for AreTableColumnsAccessible.
+// Returns true if the table is found in an accessible path, false if not found or blocked.
+static bool CheckColumnsAccessible(LogicalOperator *op, idx_t table_index) {
+	if (!op) {
+		return false;
+	}
+
+	// If this is the target table, it's accessible from here
+	if (op->type == LogicalOperatorType::LOGICAL_GET) {
+		auto &get = op->Cast<LogicalGet>();
+		if (get.table_index == table_index) {
+			return true;
+		}
+	}
+
+	// Check for join types that block right-side column access
+	if (op->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN || op->type == LogicalOperatorType::LOGICAL_ANY_JOIN) {
+		auto &join = op->Cast<LogicalJoin>();
+
+		// MARK, SEMI, and ANTI joins don't output right-side columns
+		if (join.join_type == JoinType::MARK || join.join_type == JoinType::SEMI || join.join_type == JoinType::ANTI ||
+		    join.join_type == JoinType::RIGHT_SEMI || join.join_type == JoinType::RIGHT_ANTI) {
+			// Check if table is in the right child (blocked side)
+			if (op->children.size() >= 2 && HasTableIndexInSubtree(op->children[1].get(), table_index)) {
+				// Table is in the right child of a MARK/SEMI/ANTI join - columns NOT accessible
+				return false;
+			}
+
+			// Check left child (accessible side)
+			if (!op->children.empty() && CheckColumnsAccessible(op->children[0].get(), table_index)) {
+				return true;
+			}
+
+			return false;
+		}
+	}
+
+	// For DELIM_JOIN, accessibility depends on the join type:
+	// - RIGHT_SEMI/RIGHT_ANTI: only RIGHT child columns are accessible (left is filtered out)
+	// - SEMI/ANTI: only LEFT child columns are accessible (right is filtered out)
+	// - INNER/LEFT/etc: left child columns are accessible (right side is correlated subquery)
+	if (op->type == LogicalOperatorType::LOGICAL_DELIM_JOIN) {
+		auto &delim_join = op->Cast<LogicalJoin>();
+
+		// For RIGHT_SEMI/RIGHT_ANTI, only right child columns flow through
+		if (delim_join.join_type == JoinType::RIGHT_SEMI || delim_join.join_type == JoinType::RIGHT_ANTI) {
+			// Table in left child is NOT accessible (filtered out by RIGHT_SEMI/RIGHT_ANTI)
+			if (!op->children.empty() && HasTableIndexInSubtree(op->children[0].get(), table_index)) {
+				return false;
+			}
+			// Check right child (accessible side for RIGHT_SEMI/RIGHT_ANTI)
+			if (op->children.size() >= 2 && CheckColumnsAccessible(op->children[1].get(), table_index)) {
+				return true;
+			}
+			return false;
+		}
+
+		// For SEMI/ANTI, only left child columns flow through
+		if (delim_join.join_type == JoinType::SEMI || delim_join.join_type == JoinType::ANTI) {
+			// Table in right child is NOT accessible
+			if (op->children.size() >= 2 && HasTableIndexInSubtree(op->children[1].get(), table_index)) {
+				return false;
+			}
+			// Check left child (accessible side for SEMI/ANTI)
+			if (!op->children.empty() && CheckColumnsAccessible(op->children[0].get(), table_index)) {
+				return true;
+			}
+			return false;
+		}
+
+		// For other join types (INNER, LEFT, etc.), right side is correlated subquery
+		// and left child columns are accessible
+		if (op->children.size() >= 2 && HasTableIndexInSubtree(op->children[1].get(), table_index)) {
+			// Table is in the subquery branch - columns NOT accessible from above
+			return false;
+		}
+		// Check left child
+		if (!op->children.empty() && CheckColumnsAccessible(op->children[0].get(), table_index)) {
+			return true;
+		}
+		return false;
+	}
+
+	// For all other operators, check all children
+	for (auto &child : op->children) {
+		if (CheckColumnsAccessible(child.get(), table_index)) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
 // Check if a table's columns are accessible from the given starting operator.
 // Returns false if the table is in the right child of a MARK/SEMI/ANTI join,
 // because those join types don't output right-side columns (only the boolean mark).
@@ -397,123 +697,26 @@ bool AreTableColumnsAccessible(LogicalOperator *from_op, idx_t table_index) {
 		return false;
 	}
 
-	// Helper to check if table_index is in a subtree
-	std::function<bool(LogicalOperator *)> has_table_in_subtree = [&](LogicalOperator *op) -> bool {
-		if (!op) {
-			return false;
+	return CheckColumnsAccessible(from_op, table_index);
+}
+
+// Find a LogicalGet by its table_index in a subtree.
+static LogicalGet *FindLogicalGetByTableIndex(LogicalOperator *op, idx_t table_index) {
+	if (!op) {
+		return nullptr;
+	}
+	if (op->type == LogicalOperatorType::LOGICAL_GET) {
+		auto &get = op->Cast<LogicalGet>();
+		if (get.table_index == table_index) {
+			return &get;
 		}
-		if (op->type == LogicalOperatorType::LOGICAL_GET) {
-			auto &get = op->Cast<LogicalGet>();
-			if (get.table_index == table_index) {
-				return true;
-			}
+	}
+	for (auto &child : op->children) {
+		if (auto *found = FindLogicalGetByTableIndex(child.get(), table_index)) {
+			return found;
 		}
-		for (auto &child : op->children) {
-			if (has_table_in_subtree(child.get())) {
-				return true;
-			}
-		}
-		return false;
-	};
-
-	// Recursive helper that returns:
-	// - true if table is accessible (found in an accessible path)
-	// - false if table is not found or blocked by MARK/SEMI/ANTI join
-	std::function<bool(LogicalOperator *)> check_accessible = [&](LogicalOperator *op) -> bool {
-		if (!op) {
-			return false;
-		}
-
-		// If this is the target table, it's accessible from here
-		if (op->type == LogicalOperatorType::LOGICAL_GET) {
-			auto &get = op->Cast<LogicalGet>();
-			if (get.table_index == table_index) {
-				return true;
-			}
-		}
-
-		// Check for join types that block right-side column access
-		if (op->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN ||
-		    op->type == LogicalOperatorType::LOGICAL_ANY_JOIN) {
-			auto &join = op->Cast<LogicalJoin>();
-
-			// MARK, SEMI, and ANTI joins don't output right-side columns
-			if (join.join_type == JoinType::MARK || join.join_type == JoinType::SEMI ||
-			    join.join_type == JoinType::ANTI || join.join_type == JoinType::RIGHT_SEMI ||
-			    join.join_type == JoinType::RIGHT_ANTI) {
-
-				// Check if table is in the right child (blocked side)
-				if (op->children.size() >= 2 && has_table_in_subtree(op->children[1].get())) {
-					// Table is in the right child of a MARK/SEMI/ANTI join - columns NOT accessible
-					return false;
-				}
-
-				// Check left child (accessible side)
-				if (!op->children.empty() && check_accessible(op->children[0].get())) {
-					return true;
-				}
-
-				return false;
-			}
-		}
-
-		// For DELIM_JOIN, accessibility depends on the join type:
-		// - RIGHT_SEMI/RIGHT_ANTI: only RIGHT child columns are accessible (left is filtered out)
-		// - SEMI/ANTI: only LEFT child columns are accessible (right is filtered out)
-		// - INNER/LEFT/etc: left child columns are accessible (right side is correlated subquery)
-		if (op->type == LogicalOperatorType::LOGICAL_DELIM_JOIN) {
-			auto &delim_join = op->Cast<LogicalJoin>();
-
-			// For RIGHT_SEMI/RIGHT_ANTI, only right child columns flow through
-			if (delim_join.join_type == JoinType::RIGHT_SEMI || delim_join.join_type == JoinType::RIGHT_ANTI) {
-				// Table in left child is NOT accessible (filtered out by RIGHT_SEMI/RIGHT_ANTI)
-				if (!op->children.empty() && has_table_in_subtree(op->children[0].get())) {
-					return false;
-				}
-				// Check right child (accessible side for RIGHT_SEMI/RIGHT_ANTI)
-				if (op->children.size() >= 2 && check_accessible(op->children[1].get())) {
-					return true;
-				}
-				return false;
-			}
-
-			// For SEMI/ANTI, only left child columns flow through
-			if (delim_join.join_type == JoinType::SEMI || delim_join.join_type == JoinType::ANTI) {
-				// Table in right child is NOT accessible
-				if (op->children.size() >= 2 && has_table_in_subtree(op->children[1].get())) {
-					return false;
-				}
-				// Check left child (accessible side for SEMI/ANTI)
-				if (!op->children.empty() && check_accessible(op->children[0].get())) {
-					return true;
-				}
-				return false;
-			}
-
-			// For other join types (INNER, LEFT, etc.), right side is correlated subquery
-			// and left child columns are accessible
-			if (op->children.size() >= 2 && has_table_in_subtree(op->children[1].get())) {
-				// Table is in the subquery branch - columns NOT accessible from above
-				return false;
-			}
-			// Check left child
-			if (!op->children.empty() && check_accessible(op->children[0].get())) {
-				return true;
-			}
-			return false;
-		}
-
-		// For all other operators, check all children
-		for (auto &child : op->children) {
-			if (check_accessible(child.get())) {
-				return true;
-			}
-		}
-
-		return false;
-	};
-
-	return check_accessible(from_op);
+	}
+	return nullptr;
 }
 
 // Helper function to get table name and column name from a column binding
@@ -523,26 +726,7 @@ static std::pair<string, string> GetColumnInfoFromBinding(LogicalOperator *subtr
 		return {"", ""};
 	}
 
-	// Find the LogicalGet with matching table_index
-	std::function<LogicalGet *(LogicalOperator *)> find_get = [&](LogicalOperator *op) -> LogicalGet * {
-		if (!op) {
-			return nullptr;
-		}
-		if (op->type == LogicalOperatorType::LOGICAL_GET) {
-			auto &get = op->Cast<LogicalGet>();
-			if (get.table_index == binding.table_index) {
-				return &get;
-			}
-		}
-		for (auto &child : op->children) {
-			if (auto *found = find_get(child.get())) {
-				return found;
-			}
-		}
-		return nullptr;
-	};
-
-	auto *get = find_get(subtree);
+	auto *get = FindLogicalGetByTableIndex(subtree, binding.table_index);
 	if (!get) {
 		return {"", ""};
 	}
@@ -595,6 +779,11 @@ bool AggregateGroupsByPUKey(LogicalAggregate *agg, const PACCompatibilityResult 
 		auto col_info = GetColumnInfoFromBinding(agg, binding);
 		auto &table_name = col_info.first;
 		auto &col_name = col_info.second;
+#if PAC_DEBUG
+		PAC_DEBUG_PRINT("AggregateGroupsByPUKey: binding [" + std::to_string(binding.table_index) + "." +
+		                std::to_string(binding.column_index) + "] -> table='" + table_name + "' col='" + col_name +
+		                "'");
+#endif
 		if (table_name.empty() || col_name.empty()) {
 			continue;
 		}
@@ -603,6 +792,17 @@ bool AggregateGroupsByPUKey(LogicalAggregate *agg, const PACCompatibilityResult 
 		string col_lower = StringUtil::Lower(col_name);
 
 		auto it = check.protected_columns.find(table_lower);
+#if PAC_DEBUG
+		if (it != check.protected_columns.end()) {
+			string cols_str;
+			for (auto &c : it->second) {
+				cols_str += c + ", ";
+			}
+			PAC_DEBUG_PRINT("AggregateGroupsByPUKey: protected_columns['" + table_lower + "'] = {" + cols_str + "}");
+		} else {
+			PAC_DEBUG_PRINT("AggregateGroupsByPUKey: no protected_columns entry for '" + table_lower + "'");
+		}
+#endif
 		if (it != check.protected_columns.end() && it->second.count(col_lower) > 0) {
 			return true;
 		}
@@ -611,44 +811,62 @@ bool AggregateGroupsByPUKey(LogicalAggregate *agg, const PACCompatibilityResult 
 	return false;
 }
 
+// Find the first aggregate in a subtree (depth-first).
+static LogicalAggregate *FindFirstChildAggregate(LogicalOperator *op) {
+	if (!op) {
+		return nullptr;
+	}
+	if (op->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+		return &op->Cast<LogicalAggregate>();
+	}
+	for (auto &c : op->children) {
+		if (auto *found = FindFirstChildAggregate(c.get())) {
+			return found;
+		}
+	}
+	return nullptr;
+}
+
+// Find the first aggregate in a subtree, collecting the path of operators traversed.
+// The path does NOT include the returned aggregate itself.
+static LogicalAggregate *FindFirstChildAggregateWithPath(LogicalOperator *op, vector<LogicalOperator *> &path) {
+	if (!op) {
+		return nullptr;
+	}
+	if (op->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+		return &op->Cast<LogicalAggregate>();
+	}
+	path.push_back(op);
+	for (auto &c : op->children) {
+		if (auto *found = FindFirstChildAggregateWithPath(c.get(), path)) {
+			return found;
+		}
+	}
+	path.pop_back();
+	return nullptr;
+}
+
 // Extended version of FilterTargetAggregates that handles the edge case where inner aggregate
 // groups by PU key (PAC key/PK of Privacy Unit or FK referencing it).
 // In this case, the inner aggregate is skipped and the outer aggregate is noised instead.
 vector<LogicalAggregate *> FilterTargetAggregatesWithPUKeyCheck(const vector<LogicalAggregate *> &all_aggregates,
                                                                 const vector<string> &target_table_names,
                                                                 const PACCompatibilityResult &check,
-                                                                const vector<string> &privacy_units) {
+                                                                const vector<string> &privacy_units,
+                                                                const CTETableMap &cte_map) {
 	vector<LogicalAggregate *> target_aggregates;
 
 	// First, identify which aggregates have inner aggregates that group by PU key
-	// For these, we want to skip the inner aggregate and include the outer aggregate
+	// For these, we want to skip the inner aggregate and include the outer aggregate.
+	// Also detect CTE boundary patterns: when an outer aggregate reads target tables
+	// only through CTE_SCAN, the CTE definition's aggregate handles PAC transformation.
 	std::unordered_set<LogicalAggregate *> skip_aggregates;
 	std::unordered_set<LogicalAggregate *> include_outer_aggregates;
 
 	for (auto *agg : all_aggregates) {
-		// Check if this aggregate has a child aggregate (nested aggregate)
+		// Check if this aggregate has a child aggregate (nested aggregate — direct subtree)
 		for (auto &child : agg->children) {
-			LogicalAggregate *inner_agg = nullptr;
-
-			// Traverse down to find the immediate child aggregate
-			std::function<LogicalAggregate *(LogicalOperator *)> find_inner_agg =
-			    [&](LogicalOperator *op) -> LogicalAggregate * {
-				if (!op) {
-					return nullptr;
-				}
-				if (op->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
-					return &op->Cast<LogicalAggregate>();
-				}
-				// Don't traverse through projections/filters that might just be wrapping
-				for (auto &c : op->children) {
-					if (auto *found = find_inner_agg(c.get())) {
-						return found;
-					}
-				}
-				return nullptr;
-			};
-
-			inner_agg = find_inner_agg(child.get());
+			auto *inner_agg = FindFirstChildAggregate(child.get());
 
 			if (inner_agg) {
 				// Check if the inner aggregate groups by PU key
@@ -659,36 +877,91 @@ vector<LogicalAggregate *> FilterTargetAggregatesWithPUKeyCheck(const vector<Log
 				}
 			}
 		}
+
+		// CTE boundary pattern: check if this aggregate reaches target tables only
+		// through CTE_SCAN (not direct scans). If so, find the CTE definition's aggregate
+		// and decide which one to noise based on PU-key passthrough logic.
+		if (!cte_map.empty()) {
+			bool has_direct_target = false;
+			for (auto &table_name : target_table_names) {
+				if (HasTableInSubtree(agg, table_name)) {
+					has_direct_target = true;
+					break;
+				}
+			}
+			if (!has_direct_target) {
+				// This aggregate only reaches target tables via CTE_SCAN.
+				// Find the CTE definition's aggregate (the one with direct access).
+				for (auto *other_agg : all_aggregates) {
+					if (other_agg == agg) {
+						continue;
+					}
+					bool other_has_direct = false;
+					for (auto &table_name : target_table_names) {
+						if (HasTableInSubtree(other_agg, table_name)) {
+							other_has_direct = true;
+							break;
+						}
+					}
+					if (other_has_direct) {
+						if (AggregateGroupsByPUKey(other_agg, check, privacy_units)) {
+							// CTE definition groups by PU key → can't noise it.
+							// Include outer aggregate instead (PU-key passthrough across CTE boundary).
+							skip_aggregates.insert(other_agg);
+							include_outer_aggregates.insert(agg);
+						} else {
+							// CTE definition doesn't group by PU key → noise it.
+							// Skip this outer aggregate (it re-aggregates noised output).
+							skip_aggregates.insert(agg);
+						}
+						break;
+					}
+				}
+			}
+		}
 	}
 
 	for (auto *agg : all_aggregates) {
 		// Skip aggregates that are marked to be skipped (inner aggregates that group by PU key)
 		if (skip_aggregates.count(agg) > 0) {
+#if PAC_DEBUG
+			PAC_DEBUG_PRINT("FilterTargetAggregatesWithPUKeyCheck: skipping aggregate (inner groups by PU key)");
+#endif
 			continue;
 		}
 
 		// Check if this aggregate should be included because its inner aggregate groups by PU key
 		if (include_outer_aggregates.count(agg) > 0) {
 			// Include this outer aggregate - it needs to be noised instead of the inner one
+#if PAC_DEBUG
+			PAC_DEBUG_PRINT("FilterTargetAggregatesWithPUKeyCheck: including outer aggregate (inner groups by PU key)");
+#endif
 			target_aggregates.push_back(agg);
 			continue;
 		}
 
 		// Standard filtering logic: check if this aggregate has target tables in its subtree
+		// Use CTE-aware version if we have a CTE map
 		bool has_target_table = false;
 		for (auto &table_name : target_table_names) {
-			if (HasTableInSubtree(agg, table_name)) {
+			bool found =
+			    cte_map.empty() ? HasTableInSubtree(agg, table_name) : HasTableInSubtreeCTE(agg, table_name, cte_map);
+			if (found) {
 				has_target_table = true;
 				break;
 			}
 		}
 
 		if (!has_target_table) {
+#if PAC_DEBUG
+			PAC_DEBUG_PRINT(
+			    "FilterTargetAggregatesWithPUKeyCheck: aggregate has no target tables in subtree, skipping");
+#endif
 			continue;
 		}
 
 		// Check if this aggregate has base tables in its DIRECT children (not nested aggregates)
-		// If it only depends on another aggregate's output, skip it (unless it's in include_outer_aggregates)
+		// HasBaseTableInSubtree already recognizes CTE_REF as a valid leaf data source
 		bool has_direct_base_table = false;
 		for (auto &child : agg->children) {
 			// Skip if the child is another aggregate
@@ -702,9 +975,23 @@ vector<LogicalAggregate *> FilterTargetAggregatesWithPUKeyCheck(const vector<Log
 		}
 
 		if (has_direct_base_table) {
+#if PAC_DEBUG
+			PAC_DEBUG_PRINT("FilterTargetAggregatesWithPUKeyCheck: including aggregate (has target tables + direct "
+			                "base table/CTE ref)");
+#endif
 			target_aggregates.push_back(agg);
+		} else {
+#if PAC_DEBUG
+			PAC_DEBUG_PRINT(
+			    "FilterTargetAggregatesWithPUKeyCheck: aggregate has target tables but no direct base table, skipping");
+#endif
 		}
 	}
+
+#if PAC_DEBUG
+	PAC_DEBUG_PRINT("FilterTargetAggregatesWithPUKeyCheck: selected " + std::to_string(target_aggregates.size()) +
+	                " of " + std::to_string(all_aggregates.size()) + " aggregates");
+#endif
 
 	return target_aggregates;
 }
@@ -721,27 +1008,9 @@ LogicalAggregate *FindInnerAggregateWithPUKeyGroup(LogicalAggregate *target_agg,
 	// between the outer aggregate and the inner aggregate (for binding propagation)
 	vector<LogicalOperator *> path_to_inner;
 
-	std::function<LogicalAggregate *(LogicalOperator *, vector<LogicalOperator *> &)> find_inner_agg =
-	    [&](LogicalOperator *op, vector<LogicalOperator *> &path) -> LogicalAggregate * {
-		if (!op) {
-			return nullptr;
-		}
-		if (op->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
-			return &op->Cast<LogicalAggregate>();
-		}
-		path.push_back(op);
-		for (auto &c : op->children) {
-			if (auto *found = find_inner_agg(c.get(), path)) {
-				return found;
-			}
-		}
-		path.pop_back();
-		return nullptr;
-	};
-
 	for (auto &child : target_agg->children) {
 		path_to_inner.clear();
-		LogicalAggregate *inner_agg = find_inner_agg(child.get(), path_to_inner);
+		LogicalAggregate *inner_agg = FindFirstChildAggregateWithPath(child.get(), path_to_inner);
 		if (!inner_agg) {
 			continue;
 		}

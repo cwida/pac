@@ -15,15 +15,15 @@
 #include "duckdb/common/vector_operations/unary_executor.hpp"
 #include "duckdb/common/types.hpp"
 #include "core/pac_optimizer.hpp"
-#include "core/pac_privacy_unit.hpp"
 #include "aggregates/pac_aggregate.hpp"
 #include "aggregates/pac_count.hpp"
 #include "aggregates/pac_sum.hpp"
-#include "aggregates/pac_avg.hpp"
 #include "aggregates/pac_min_max.hpp"
 #include "categorical/pac_categorical.hpp"
 #include "parser/pac_parser.hpp"
 #include "diff/pac_utility_diff.hpp"
+#include "query_processing/pac_topk_rewriter.hpp"
+#include "query_processing/pac_avg_rewriter.hpp"
 #include "pac_debug.hpp"
 
 namespace duckdb {
@@ -70,11 +70,6 @@ static void ClearPACMetadataPragma(ClientContext &context, const FunctionParamet
 }
 
 static void LoadInternal(ExtensionLoader &loader) {
-	// Register scalar helper to delete file (tests use this cleanup helper)
-	auto delete_privacy_unit_file = ScalarFunction("delete_privacy_unit_file", {LogicalType::VARCHAR},
-	                                               LogicalType::VARCHAR, DeletePrivacyUnitFileFun);
-	loader.RegisterFunction(delete_privacy_unit_file);
-
 	// Try to automatically load PAC metadata from database directory if it exists
 	auto &db = loader.GetDatabaseInstance();
 	try {
@@ -163,21 +158,30 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// attach PAC-specific optimizer info so the extension can coordinate replan state
 	auto pac_info = make_shared_ptr<PACOptimizerInfo>();
 	pac_rewrite_rule.optimizer_info = pac_info;
-	db.config.optimizer_extensions.push_back(pac_rewrite_rule);
+	OptimizerExtension::Register(db.config, std::move(pac_rewrite_rule));
 
 	// Register PAC DROP TABLE cleanup rule (separate rule to handle DROP TABLE operations)
 	auto pac_drop_table_rule = PACDropTableRule();
-	db.config.optimizer_extensions.push_back(pac_drop_table_rule);
+	OptimizerExtension::Register(db.config, std::move(pac_drop_table_rule));
 
-	db.config.AddExtensionOption("pac_privacy_file", "path for privacy units", LogicalType::VARCHAR);
+	// Register PAC Top-K pushdown rule (post-optimizer: rewrites TopN over PAC aggregates)
+	auto pac_topk_rule = PACTopKRule();
+	pac_topk_rule.optimizer_info = pac_info;
+	OptimizerExtension::Register(db.config, std::move(pac_topk_rule));
+
+	// Register pac_avg rewrite rule (post-optimizer: decomposes pac_noised_avg/pac_avg into sum/count + division).
+	// Runs as a separate optimizer so it works for both compiler-generated and user-written pac_avg() SQL.
+	{
+		OptimizerExtension pac_avg_rule;
+		pac_avg_rule.optimize_function = RewritePacAvgToDiv;
+		OptimizerExtension::Register(db.config, std::move(pac_avg_rule));
+	}
+
 	// Add option to enable/disable PAC noise application (this is useful for testing, since noise affects result
 	// determinism)
 	db.config.AddExtensionOption("pac_noise", "apply PAC noise", LogicalType::BOOLEAN);
 	// Add option to set deterministic RNG seed for PAC functions (useful for tests)
 	db.config.AddExtensionOption("pac_seed", "deterministic RNG seed for PAC functions", LogicalType::BIGINT);
-	// Add option to force deterministic (architecture-agnostic) noise generation for testing (default false)
-	db.config.AddExtensionOption("pac_deterministic_noise", "use architecture-agnostic noise generation for testing",
-	                             LogicalType::BOOLEAN, Value::BOOLEAN(false));
 	// Add option to configure the number of samples (m) used by PAC (default 128)
 	db.config.AddExtensionOption("pac_m", "number of per-sample subsets (m)", LogicalType::INTEGER);
 	// Add option to toggle enforcement of per-sample array length == pac_m (default true)
@@ -194,6 +198,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                             LogicalType::BOOLEAN, Value::BOOLEAN(true));
 	// Add option to set the mi parameter for PAC aggregates (default 1/128)
 	// Controls probabilistic vs deterministic mode for noise/NULL decisions
+	db.config.AddExtensionOption("pac_categorical", "enable categorical query rewrites", LogicalType::BOOLEAN,
+	                             Value::BOOLEAN(true));
+	db.config.AddExtensionOption("pac_select", "use pac_select for categorical filters below pac aggregates",
+	                             LogicalType::BOOLEAN, Value::BOOLEAN(true));
 	db.config.AddExtensionOption("pac_mi", "mutual information parameter for PAC aggregates", LogicalType::DOUBLE,
 	                             Value::DOUBLE(1.0 / 128));
 	// Add option to set the correction factor for PAC aggregates (default 1.0)
@@ -203,14 +211,27 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// Add option to enable utility diff mode: number of key columns for matching
 	db.config.AddExtensionOption("pac_diffcols", "key columns and optional output path for utility diff",
 	                             LogicalType::VARCHAR);
+	// Add option to enable top-k pushdown: when true, top-k is applied on true aggregates before noising
+	db.config.AddExtensionOption("pac_pushdown_topk", "apply top-k before noise instead of after", LogicalType::BOOLEAN,
+	                             Value::BOOLEAN(true));
+	// Expansion factor for top-k superset approach: inner TopN selects ceil(c*K) candidates,
+	// final TopN limits to K. With c=1 (default), no expansion. With c>1, more candidates
+	// are considered before noising and re-ranking, improving utility.
+	db.config.AddExtensionOption("pac_topk_expansion", "expansion factor for top-k superset (1 = no expansion)",
+	                             LogicalType::DOUBLE, Value::DOUBLE(1.0));
+	// Add option to control whether pac_hash() repairs hashes to exactly 32 bits set
+	db.config.AddExtensionOption("pac_hash_repair", "pac_hash() repairs hash to exactly 32 bits set",
+	                             LogicalType::BOOLEAN, Value::BOOLEAN(false));
+	// Add option to enable/disable persistent secret p-tracking for correct query-level privacy composition.
+	// When enabled (default), noise calibration tracks a Bayesian posterior over worlds across all cells
+	// in a query, providing query-level MIA protection. When disabled, each cell uses uniform variance
+	// independently (cell-level MIA only). Only active when pac_mi > 0.
+	db.config.AddExtensionOption("pac_ptracking", "enable persistent secret p-tracking for query-level MIA",
+	                             LogicalType::BOOLEAN, Value::BOOLEAN(true));
 
-	// Register pac_aggregate function(s)
-	RegisterPacAggregateFunctions(loader);
-	// Register pac_sum/pac_avg aggregate functions (moved to pac_sum_avg.cpp)
+	// Register pac_sum aggregate functions
 	RegisterPacSumFunctions(loader);
 	RegisterPacSumCountersFunctions(loader);
-	RegisterPacAvgFunctions(loader);
-	RegisterPacAvgCountersFunctions(loader);
 	RegisterPacCountFunctions(loader);
 	RegisterPacCountCountersFunctions(loader);
 	// Register pac_min/pac_max aggregate functions
@@ -220,11 +241,20 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RegisterPacMinCountersFunctions(loader);
 	RegisterPacMaxCountersFunctions(loader);
 
-	// Register PAC categorical functions (pac_select, pac_filter, pac_mask_and, etc.)
+	// Register dummy pac_noised_avg / pac_avg (replaced by RewritePacAvgToDiv before execution)
+	RegisterPacAvgFunctions(loader);
+
+	// Register PAC categorical functions (pac_select, pac_filter, pac_filter_<cmp>, etc.)
 	RegisterPacCategoricalFunctions(loader);
 
+	// Register pac_mean scalar function (used by top-k pushdown for ordering)
+	RegisterPacMeanFunction(loader);
+
+	// Register pac_hash scalar function (UBIGINT -> UBIGINT with exactly 32 bits set)
+	RegisterPacHashFunction(loader);
+
 	// Register PAC parser extension
-	db.config.parser_extensions.push_back(PACParserExtension());
+	ParserExtension::Register(db.config, PACParserExtension());
 
 	// Register PAC metadata management pragmas
 	auto save_pac_metadata_pragma =

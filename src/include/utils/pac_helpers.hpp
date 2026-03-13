@@ -34,19 +34,24 @@ idx_t GetNextTableIndex(unique_ptr<LogicalOperator> &plan);
 void ReplaceNode(unique_ptr<LogicalOperator> &root, unique_ptr<LogicalOperator> &old_node,
                  unique_ptr<LogicalOperator> &new_node, Binder *binder = nullptr);
 
-// Find the primary key column names for the given table (searching the client's catalog search path).
-// Returns a vector with the primary key column names in order; empty vector if there is no PK.
-vector<string> FindPrimaryKey(ClientContext &context, const string &table_name);
+// Find PAC_KEY column names for the given table. Only uses PAC metadata.
+// Returns a vector with the PAC_KEY column names in order; empty vector if no PAC_KEY is defined.
+vector<string> FindPacKey(ClientContext &context, const string &table_name);
 
-// Find foreign keys declared on the given table (searching the client's catalog search path).
-// Returns a vector of pairs: (referenced_table_name, list_of_fk_column_names) for each FK constraint.
-vector<std::pair<string, vector<string>>> FindForeignKeys(ClientContext &context, const string &table_name);
+// Find PAC_LINK relationships declared on the given table. Only uses PAC metadata.
+// Returns a vector of pairs: (referenced_table_name, local_column_names) for each PAC_LINK.
+vector<std::pair<string, vector<string>>> FindPacLinks(ClientContext &context, const string &table_name);
 
-// Find foreign-key path(s) from any of `table_names` to any of `privacy_units`.
-// Returns a map: start_table (as provided) -> path (vector of qualified table names from start to privacy unit,
+// Find the referenced columns on the parent table for a specific PAC_LINK relationship.
+// E.g., for PAC_LINK (l_orderkey) REFERENCES orders(o_orderkey), calling
+// FindReferencedPKColumns(ctx, "lineitem", "orders") returns {"o_orderkey"}.
+vector<string> FindReferencedPKColumns(ClientContext &context, const string &table_name, const string &ref_table);
+
+// Find PAC_LINK path(s) from any of `table_names` to any of `privacy_units`.
+// Returns a map: start_table (as provided) -> path (vector of table names from start to privacy unit,
 // inclusive). If no path exists for a start table, it will not appear in the returned map.
-std::unordered_map<string, vector<string>>
-FindForeignKeyBetween(ClientContext &context, const vector<string> &privacy_units, const vector<string> &table_names);
+std::unordered_map<string, vector<string>> FindPacLinkPath(ClientContext &context, const vector<string> &privacy_units,
+                                                           const vector<string> &table_names);
 
 // -----------------------------------------------------------------------------
 // PAC-specific small helpers
@@ -70,7 +75,6 @@ private:
 
 // Configuration helpers that read PAC-related settings from the client's context and
 // return a canonicalized value or a default when not configured.
-string GetPacPrivacyFile(ClientContext &context, const string &default_filename = "pac_tables.csv");
 string GetPacCompiledPath(ClientContext &context, const string &default_path = ".");
 int64_t GetPacM(ClientContext &context, int64_t default_m = 128);
 bool IsPacNoiseEnabled(ClientContext &context, bool default_value = true);
@@ -79,13 +83,23 @@ string GetPacCompileMethod(ClientContext &context, const string &default_method 
 // Helper to safely retrieve boolean settings with defaults
 bool GetBooleanSetting(ClientContext &context, const string &setting_name, bool default_value);
 
-// Helper to convert ReadPacTablesFile's unordered_set into a deterministic vector (sorted)
-// so callers don't need to repeat this conversion.
-vector<string> PacTablesSetToVector(const std::unordered_set<string> &set);
-
 // Return true if the given ColumnBinding in a logical plan ultimately originates from the
 // specified base table name (i.e., from a LogicalGet of that table), false otherwise.
 // This resolves bindings via table_index back to the source LogicalGet nodes.
 bool ColumnBelongsToTable(LogicalOperator &plan, const string &table_name, const ColumnBinding &binding);
+
+// Collect all table indices in the subtree rooted at `node` into `out`.
+void CollectTableIndicesRecursive(LogicalOperator *node, std::unordered_set<idx_t> &out);
+
+// Apply an index remapping to all operator-specific table index fields in the subtree.
+void ApplyIndexMapToSubtree(LogicalOperator *node, const std::unordered_map<idx_t, idx_t> &map);
+
+// Walk all expressions in a subtree, updating BoundColumnRefExpression bindings per the map.
+void RemapBindingsInSubtree(LogicalOperator &op, const std::unordered_map<idx_t, idx_t> &map);
+
+// Collect indices from `subtree`, generate fresh indices avoiding `avoid`, apply remapping.
+// Returns the old→new index map that was applied.
+std::unordered_map<idx_t, idx_t> RemapSubtreeIndices(LogicalOperator *subtree, Binder &binder,
+                                                     const std::unordered_set<idx_t> &avoid);
 
 } // namespace duckdb

@@ -44,7 +44,6 @@ using int64_t = signed long long;
 
 namespace duckdb {
 void RegisterPacSumFunctions(ExtensionLoader &loader);
-void RegisterPacAvgFunctions(ExtensionLoader &loader);
 void RegisterPacSumCountersFunctions(ExtensionLoader &loader);
 
 // ============================================================================
@@ -207,7 +206,7 @@ struct PacSumIntState {
 
 	// Common fields for all variants
 	uint64_t key_hash;     // OR of all key_hashes seen (for PacNoiseInNull)
-	uint64_t update_count; // total count of values added (for pac_avg)
+	uint64_t update_count; // number of non-null updates (used for sample diversity check)
 
 #ifndef PAC_EXACTSUM
 	// ========== APPROXIMATE STATE LAYOUT WITH INLINE STORAGE ==========
@@ -581,7 +580,7 @@ struct PacSumIntState {
 // Double pac_sum state is noncascading: directly aggregates float/double into double
 struct PacSumDoubleState {
 	uint64_t key_hash;     // OR of all key_hashes seen (for PacNoiseInNull)
-	uint64_t update_count; // total count of values added (for pac_avg)
+	uint64_t update_count; // number of non-null updates (used for sample diversity check)
 #ifdef PAC_EXACTSUM
 	double probabilistic_total[64];
 #else
@@ -693,7 +692,7 @@ using PacSumIntStateWrapper = PacSumStateWrapper<PacSumIntState<SIGNED>, typenam
 using PacSumDoubleStateWrapper = PacSumStateWrapper<PacSumDoubleState, double>;
 #endif // PAC_NOBUFFERING
 
-// Forward declarations for pac_sum functions exported for pac_avg
+// Forward declarations for pac_sum functions
 
 // State type selection (defined in pac_sum.cpp, needed by pac_avg.cpp)
 #ifdef PAC_NOBUFFERING
@@ -740,7 +739,7 @@ GetPosStateTotals(typename State::State *pos, PAC_FLOAT *buf) {
 	pos->GetTotals(buf);
 }
 
-// For signed int states: subtract neg_state totals from buf, return neg count
+// For signed int states: subtract neg_state totals from buf, return neg update_count
 template <class State, bool SIGNED>
 inline typename std::enable_if<SIGNED && !std::is_same<typename State::State, PacSumDoubleState>::value, uint64_t>::type
 SubtractNegStateTotals(State *wrapper, PAC_FLOAT *buf, uint64_t &key_hash, ArenaAllocator &allocator) {
@@ -764,17 +763,16 @@ SubtractNegStateTotals(State *, PAC_FLOAT *, uint64_t &, ArenaAllocator &) {
 }
 #endif
 
-// Generic finalize template (used by pac_sum and pac_avg)
-template <class State, class ACC_TYPE, bool SIGNED, bool DIVIDE_BY_COUNT = false>
+// Generic finalize template (used by pac_sum)
+template <class State, class ACC_TYPE, bool SIGNED>
 void PacSumFinalize(Vector &states, AggregateInputData &input, Vector &result, idx_t count, idx_t offset);
 
-// Templated bind for DECIMAL pac_sum/pac_avg (IS_AVG=false for sum, IS_AVG=true for avg)
-template <bool IS_AVG>
-unique_ptr<FunctionData> BindDecimalPacSumAvg(ClientContext &ctx, AggregateFunction &function,
-                                              vector<unique_ptr<Expression>> &args);
+// Bind for DECIMAL pac_sum
+unique_ptr<FunctionData> BindDecimalPacSum(ClientContext &ctx, AggregateFunction &function,
+                                           vector<unique_ptr<Expression>> &args);
 
-// Templated FinalizeCounters for pac_sum_counters/pac_avg_counters (DIVIDE_BY_COUNT=false for sum, true for avg)
-template <class State, bool SIGNED, bool DIVIDE_BY_COUNT>
+// FinalizeCounters for pac_sum_counters
+template <class State, bool SIGNED>
 void PacSumAvgFinalizeCounters(Vector &states, AggregateInputData &input, Vector &result, idx_t count, idx_t offset);
 
 } // namespace duckdb

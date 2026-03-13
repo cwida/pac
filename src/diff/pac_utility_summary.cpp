@@ -47,8 +47,9 @@ PhysicalOperator &LogicalPacUtilitySummary::CreatePlan(ClientContext &context, P
 
 struct PacUtilitySummaryGlobalState : public GlobalOperatorState {
 	idx_t total_rows = 0;
-	idx_t matched_rows = 0; // "=" rows: all columns non-NULL
-	idx_t missing_rows = 0; // "-" rows: any key column NULL
+	idx_t matched_rows = 0;  // "=" rows: key matched, all columns non-NULL
+	idx_t missing_rows = 0;  // "-" rows: key NULL (in ref but not in pac)
+	idx_t pac_only_rows = 0; // "+" rows: key non-NULL, some measure NULL (in pac but not in ref)
 
 	// Per measure column (columns after key columns): accumulate relative error %
 	vector<double> utility_sum;
@@ -103,7 +104,6 @@ OperatorResultType PhysicalPacUtilitySummary::Execute(ExecutionContext &context,
 			gstate.missing_rows++;
 			continue;
 		}
-
 		// Check if any measure column is NULL → "+" row (pac-only, skip)
 		bool any_measure_null = false;
 		for (idx_t c = num_key_cols; c < num_cols; c++) {
@@ -113,9 +113,9 @@ OperatorResultType PhysicalPacUtilitySummary::Execute(ExecutionContext &context,
 			}
 		}
 		if (any_measure_null) {
+			gstate.pac_only_rows++;
 			continue; // "+" row — no ref to compare against
 		}
-
 		// "=" matched row — accumulate utility (cell values are relative error %)
 		gstate.matched_rows++;
 
@@ -132,7 +132,6 @@ OperatorResultType PhysicalPacUtilitySummary::Execute(ExecutionContext &context,
 			gstate.utility_count[idx]++;
 		}
 	}
-
 	// Pass through unchanged
 	chunk.Reference(input);
 	return OperatorResultType::NEED_MORE_INPUT;
@@ -144,11 +143,16 @@ OperatorFinalResultType PhysicalPacUtilitySummary::OperatorFinalize(Pipeline &pi
 	auto &gstate = input.global_state.Cast<PacUtilitySummaryGlobalState>();
 
 	// Compute recall: matched / (matched + missing)
+	// recall measures how many reference rows PAC found (1.0 = no missing rows)
 	idx_t ref_rows = gstate.matched_rows + gstate.missing_rows;
 	double recall = (ref_rows > 0) ? static_cast<double>(gstate.matched_rows) / static_cast<double>(ref_rows) : 1.0;
 
-	// Compute utility: average relative error % across all reference rows
-	// (matched "=" rows contribute their actual error; missing "-" rows contribute 100%)
+	// Compute precision: matched / (matched + pac_only)
+	// precision measures how many PAC rows are correct (1.0 = no false positives)
+	idx_t pac_rows = gstate.matched_rows + gstate.pac_only_rows;
+	double precision = (pac_rows > 0) ? static_cast<double>(gstate.matched_rows) / static_cast<double>(pac_rows) : 1.0;
+
+	// Compute utility: average relative error % across all matched rows
 	double utility = 0.0;
 	idx_t num_measure_cols = gstate.utility_sum.size();
 	idx_t cols_with_data = 0;
@@ -162,21 +166,20 @@ OperatorFinalResultType PhysicalPacUtilitySummary::OperatorFinalize(Pipeline &pi
 	if (cols_with_data > 0) {
 		utility /= static_cast<double>(cols_with_data);
 	}
-
 	// Output results
 	if (!output_path.empty()) {
 		// Append to CSV file
 		std::ofstream out(output_path, std::ios::app);
 		if (out.is_open()) {
-			out << utility << "," << recall << "\n";
+			out << utility << "," << recall << "," << precision << "\n";
 			out.close();
 		}
-	} else {
-		// Print to stderr
-		string msg = "utility=" + std::to_string(utility) + " recall=" + std::to_string(recall);
-		Printer::Print(msg);
 	}
-
+	// Print to stderr
+	string msg = "utility=" + std::to_string(utility) + " recall=" + std::to_string(recall) +
+	             " precision=" + std::to_string(precision) + " (=" + std::to_string(gstate.matched_rows) + " -" +
+	             std::to_string(gstate.missing_rows) + " +" + std::to_string(gstate.pac_only_rows) + ")";
+	Printer::Print(msg);
 	return OperatorFinalResultType::FINISHED;
 }
 

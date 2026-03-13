@@ -32,7 +32,7 @@ PLATFORM_NAMES = {
     'epyc': 'AMD (EPYC 9645)',
     'granite-rapids': 'Intel Xeon (Granite Rapids)',
     'graviton': 'ARM (AWS Graviton4)',
-    'macbook': 'ARM (Apple M2 Pro)'
+    'macbook': 'ARM (Apple M2 Max)'
 }
 
 

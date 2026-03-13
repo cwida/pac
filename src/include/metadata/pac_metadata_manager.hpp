@@ -12,15 +12,13 @@
 
 #include "duckdb.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "parser/pac_parser.hpp"
 #include <string>
 #include <vector>
 #include <unordered_map>
 #include <mutex>
 
 namespace duckdb {
-
-// Forward declarations
-struct PACTableMetadata;
 
 // Global PAC metadata manager - stores all PAC metadata in memory
 class PACMetadataManager {
