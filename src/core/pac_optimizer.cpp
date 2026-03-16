@@ -20,6 +20,14 @@
 // Include DuckDB headers for DROP operation handling
 #include "duckdb/parser/parsed_data/drop_info.hpp"
 #include "duckdb/planner/operator/logical_simple.hpp"
+// Include DuckDB headers for CTAS metadata propagation
+#include "duckdb/planner/operator/logical_create_table.hpp"
+#include "duckdb/planner/operator/logical_get.hpp"
+#include "metadata/pac_metadata_manager.hpp"
+#include "metadata/pac_compatibility_check.hpp"
+#include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
+
+#include <stack>
 
 namespace duckdb {
 
@@ -112,6 +120,144 @@ void PACDropTableRule::PACDropTableRuleFunction(OptimizerExtensionInput &input, 
 }
 
 // ============================================================================
+// CTAS metadata propagation helper
+// ============================================================================
+
+// When a CTAS sources from a PU or derived_pu table, mark the new table as
+// derived_pu and propagate PAC_KEY columns. derived_pu tables behave as:
+//   - SELECT: untouched (no PAC check/noise)
+//   - INSERT/UPDATE containing aggregation: PAC noise injected
+//
+// Handles column renames (e.g. SELECT value AS amount) by building a mapping
+// from source column names to destination column names via the new table's ColumnList.
+static void PropagateCTASMetadata(unique_ptr<LogicalOperator> &outer_plan, unique_ptr<LogicalOperator> &select_plan,
+                                  OptimizerExtensionInput &input) {
+	auto &create_table = outer_plan->Cast<LogicalCreateTable>();
+	string new_table = create_table.info->Base().table;
+	auto &mgr = PACMetadataManager::Get();
+	if (mgr.HasMetadata(new_table)) {
+		return;
+	}
+
+	// Walk the select plan to find the source PU/derived_pu GET and its metadata,
+	// and check if the plan contains an aggregate (which means the output is already
+	// aggregated — protected columns should not be propagated to the result table).
+	std::stack<LogicalOperator *> stack;
+	stack.push(select_plan.get());
+	const PACTableMetadata *source_meta = nullptr;
+	LogicalGet *source_get = nullptr;
+	bool has_aggregate = false;
+
+	while (!stack.empty()) {
+		auto *node = stack.top();
+		stack.pop();
+		if (node->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+			has_aggregate = true;
+		}
+		if (node->type == LogicalOperatorType::LOGICAL_GET) {
+			auto &get = node->Cast<LogicalGet>();
+			auto entry = get.GetTable();
+			if (!entry) {
+				continue;
+			}
+			auto *meta = mgr.GetTableMetadata(entry->name);
+			if (meta && (meta->is_privacy_unit || meta->derived_pu)) {
+				source_meta = meta;
+				source_get = &get;
+			}
+		}
+		for (auto &child : node->children) {
+			stack.push(child.get());
+		}
+	}
+
+	if (!source_meta) {
+		return;
+	}
+
+	// Build OID → column name map from catalog (O(n) lookup instead of O(n*m))
+	auto entry = source_get->GetTable();
+	std::unordered_map<idx_t, string> oid_to_name;
+	if (entry) {
+		for (auto &col : entry->GetColumns().Logical()) {
+			oid_to_name[col.Oid()] = col.Name();
+		}
+	}
+
+	// Build source GET column index → source column name mapping
+	std::unordered_map<idx_t, string> get_col_idx_to_name;
+	auto &col_ids = source_get->GetColumnIds();
+	for (idx_t i = 0; i < col_ids.size(); i++) {
+		auto &col_idx = col_ids[i];
+		if (col_idx.IsRowIdColumn()) {
+			continue;
+		}
+		auto it = oid_to_name.find(col_idx.GetPrimaryIndex());
+		if (it != oid_to_name.end()) {
+			get_col_idx_to_name[i] = it->second;
+		}
+	}
+
+	// Build source name → dest name mapping using the new table's column list.
+	// The new table columns correspond positionally to the GET's column_ids
+	// (for simple SELECT * / SELECT col AS alias queries).
+	auto &new_columns = create_table.info->Base().columns;
+	std::unordered_map<string, string> src_to_dest_name;
+
+	idx_t dest_idx = 0;
+	for (auto &new_col : new_columns.Logical()) {
+		auto name_it = get_col_idx_to_name.find(dest_idx);
+		if (name_it != get_col_idx_to_name.end()) {
+			src_to_dest_name[name_it->second] = new_col.Name();
+		}
+		dest_idx++;
+	}
+
+	// Map source PAC_KEY and protected columns to destination names
+	PACTableMetadata prop(new_table);
+	prop.derived_pu = true;
+
+	for (auto &pk : source_meta->primary_key_columns) {
+		auto it = src_to_dest_name.find(pk);
+		prop.primary_key_columns.push_back(it != src_to_dest_name.end() ? it->second : pk);
+	}
+
+	// Only propagate protected columns that appear directly in the output — not those
+	// consumed by aggregate functions. For non-aggregate CTASes (schema copies), use
+	// the positional rename mapping. For aggregate CTASes, only propagate if the source
+	// protected column name appears directly in the new table's columns (i.e., it's a
+	// GROUP BY column that passes through unchanged).
+	if (!has_aggregate) {
+		// No aggregate: full propagation with rename support
+		for (auto &prot : source_meta->protected_columns) {
+			auto it = src_to_dest_name.find(prot);
+			prop.protected_columns.push_back(it != src_to_dest_name.end() ? it->second : prot);
+		}
+	} else {
+		// Aggregate query: only propagate protected columns that appear directly
+		// in the new table's column list (GROUP BY pass-through columns).
+		// Note: the positional GET→dest mapping doesn't hold for aggregates, so we
+		// fall back to a simple name check against the output column names.
+		std::unordered_set<string> new_col_names;
+		for (auto &new_col : new_columns.Logical()) {
+			new_col_names.insert(new_col.Name());
+		}
+		for (auto &prot : source_meta->protected_columns) {
+			if (new_col_names.count(prot) > 0) {
+				prop.protected_columns.push_back(prot);
+			}
+		}
+	}
+
+	mgr.AddOrUpdateTable(new_table, prop);
+
+	string path = PACMetadataManager::GetMetadataFilePath(input.context);
+	if (!path.empty()) {
+		mgr.SaveToFile(path);
+	}
+}
+
+// ============================================================================
 // PACRewriteRule - Main PAC query rewriting optimizer rule
 // ============================================================================
 
@@ -120,6 +266,20 @@ void PACDropTableRule::PACDropTableRuleFunction(OptimizerExtensionInput &input, 
 // materialization etc. all run on the PAC-transformed plan automatically.
 void PACRewriteRule::PACPreOptimizeFunction(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan) {
 	if (!plan) {
+		return;
+	}
+	// Propagate CTAS metadata even when pac_rewrite is disabled, so that
+	// tables created via CTAS (e.g. IVM delta tables) inherit PAC_KEY and
+	// PROTECTED columns from their source tables.
+	bool pac_ctas_enabled = GetBooleanSetting(input.context, "pac_ctas", true);
+	if (pac_ctas_enabled && plan->type == LogicalOperatorType::LOGICAL_CREATE_TABLE && !plan->children.empty()) {
+		PropagateCTASMetadata(plan, plan->children[0], input);
+	}
+	// When pac_rewrite is disabled (e.g. by IVM during internal delta plan derivation),
+	// skip the rest of PAC optimization. This is separate from pac_check, which
+	// only controls the protected column access restrictions.
+	bool pac_rewrite_enabled = GetBooleanSetting(input.context, "pac_rewrite", true);
+	if (!pac_rewrite_enabled) {
 		return;
 	}
 	// If the optimizer extension provided a PACOptimizerInfo, and a replan is already in progress,
@@ -134,8 +294,18 @@ void PACRewriteRule::PACPreOptimizeFunction(OptimizerExtensionInput &input, uniq
 	// Run the PAC compatibility checks only if the plan is a projection, order by, or aggregate (i.e., a SELECT query)
 	// For EXPLAIN/EXPLAIN_ANALYZE, look at the child operator to decide whether to rewrite
 	LogicalOperator *check_plan = plan.get();
+	PAC_DEBUG_PRINT("[PAC TRACE] plan->type = " + std::to_string((int)plan->type));
 	if (plan->type == LogicalOperatorType::LOGICAL_EXPLAIN && !plan->children.empty()) {
 		check_plan = plan->children[0].get();
+	}
+	// Drill through DML wrappers (INSERT...SELECT, CREATE TABLE AS SELECT) to reach the SELECT plan.
+	// This allows PAC to fire on materialized view creation and IVM delta queries.
+	if ((check_plan->type == LogicalOperatorType::LOGICAL_INSERT ||
+	     check_plan->type == LogicalOperatorType::LOGICAL_CREATE_TABLE) &&
+	    !check_plan->children.empty()) {
+		PAC_DEBUG_PRINT("[PAC TRACE] DML wrapper detected, drilling to child: " +
+		                std::to_string((int)check_plan->children[0]->type));
+		check_plan = check_plan->children[0].get();
 	}
 	// TODO: why this particular collection of operators? Maybe check against DDL or DML
 	// For DISTINCT, look through to the child — SELECT DISTINCT has PROJECTION underneath,
@@ -143,20 +313,68 @@ void PACRewriteRule::PACPreOptimizeFunction(OptimizerExtensionInput &input, uniq
 	if (check_plan->type == LogicalOperatorType::LOGICAL_DISTINCT && !check_plan->children.empty()) {
 		check_plan = check_plan->children[0].get();
 	}
+	PAC_DEBUG_PRINT("[PAC TRACE] check_plan->type = " + std::to_string((int)check_plan->type));
 	if (check_plan->type != LogicalOperatorType::LOGICAL_PROJECTION &&
 	    check_plan->type != LogicalOperatorType::LOGICAL_ORDER_BY &&
 	    check_plan->type != LogicalOperatorType::LOGICAL_TOP_N &&
 	    check_plan->type != LogicalOperatorType::LOGICAL_LIMIT &&
 	    check_plan->type != LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY &&
 	    check_plan->type != LogicalOperatorType::LOGICAL_MATERIALIZED_CTE) {
+		PAC_DEBUG_PRINT("[PAC TRACE] check_plan type NOT in allowed list, returning early");
 		return;
 	}
 	// For EXPLAIN queries, we need to operate on the child plan
 	bool is_explain = (plan->type == LogicalOperatorType::LOGICAL_EXPLAIN && !plan->children.empty());
-	unique_ptr<LogicalOperator> &target_plan = is_explain ? plan->children[0] : plan;
+	unique_ptr<LogicalOperator> &outer_plan = is_explain ? plan->children[0] : plan;
+	// For INSERT...SELECT and CREATE TABLE AS SELECT, operate on the SELECT child
+	bool is_dml_wrapper = ((outer_plan->type == LogicalOperatorType::LOGICAL_INSERT ||
+	                        outer_plan->type == LogicalOperatorType::LOGICAL_CREATE_TABLE) &&
+	                       !outer_plan->children.empty());
+	// For WITH ... INSERT (CTE-wrapped DML), the INSERT is nested inside MATERIALIZED_CTEs.
+	// Detect it by walking the consumer chain (child[1]).
+	bool is_cte_dml = false;
+	if (!is_dml_wrapper && outer_plan->type == LogicalOperatorType::LOGICAL_MATERIALIZED_CTE) {
+		LogicalOperator *inner = outer_plan.get();
+		while (inner->type == LogicalOperatorType::LOGICAL_MATERIALIZED_CTE && inner->children.size() > 1) {
+			inner = inner->children[1].get();
+		}
+		is_cte_dml = (inner->type == LogicalOperatorType::LOGICAL_INSERT ||
+		              inner->type == LogicalOperatorType::LOGICAL_CREATE_TABLE);
+	}
+	// target_plan: for direct DML (INSERT/CTAS), use the SELECT child.
+	// For CTE-wrapped DML, use the full CTE tree (PAC needs to rewrite aggregates inside CTEs).
+	unique_ptr<LogicalOperator> &target_plan = is_dml_wrapper ? outer_plan->children[0] : outer_plan;
 
 	// Delegate compatibility checks (including detecting PAC table presence and internal sample scans)
 	PACCompatibilityResult check = PACRewriteQueryCheck(target_plan, input.context, pac_info);
+
+	// For DML wrappers (INSERT/CTAS, including CTE-wrapped), check if any scanned tables are derived_pu.
+	// derived_pu tables are transparent to SELECT but trigger PAC noise on DML aggregates.
+	PAC_DEBUG_PRINT("[PAC TRACE] is_dml_wrapper=" + std::to_string(is_dml_wrapper) + " is_cte_dml=" +
+	                std::to_string(is_cte_dml) + " fk_paths.empty=" + std::to_string(check.fk_paths.empty()) +
+	                " scanned_pu_tables.empty=" + std::to_string(check.scanned_pu_tables.empty()));
+	if ((is_dml_wrapper || is_cte_dml) && check.fk_paths.empty() && check.scanned_pu_tables.empty()) {
+		auto &mgr = PACMetadataManager::Get();
+		std::unordered_map<string, idx_t> scan_counts;
+		CountScans(*target_plan, scan_counts);
+		PAC_DEBUG_PRINT("[PAC TRACE] CountScans found " + std::to_string(scan_counts.size()) + " tables:");
+		for (auto &kv : scan_counts) {
+			auto *meta = mgr.GetTableMetadata(kv.first);
+			PAC_DEBUG_PRINT("[PAC TRACE]   " + kv.first + " count=" + std::to_string(kv.second) +
+			                " has_meta=" + std::to_string(meta != nullptr) +
+			                " derived_pu=" + std::to_string(meta ? meta->derived_pu : false));
+			if (kv.second > 0 && meta && meta->derived_pu) {
+				check.scanned_pu_tables.push_back(kv.first);
+				check.eligible_for_rewrite = true;
+				// Populate table_metadata so the compiler knows the PAC_KEY
+				ColumnMetadata cm;
+				cm.table_name = kv.first;
+				cm.pks = meta->primary_key_columns;
+				check.table_metadata[kv.first] = cm;
+			}
+		}
+	}
+
 	if (check.fk_paths.empty() && check.scanned_pu_tables.empty()) {
 		return;
 	}

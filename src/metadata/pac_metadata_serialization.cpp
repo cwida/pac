@@ -103,7 +103,10 @@ string PACMetadataManager::SerializeToJSON(const PACTableMetadata &metadata, con
 	ss << "],\n";
 
 	// Serialize is_privacy_unit flag
-	ss << indent << "  \"is_privacy_unit\": " << (metadata.is_privacy_unit ? "true" : "false") << "\n";
+	ss << indent << "  \"is_privacy_unit\": " << (metadata.is_privacy_unit ? "true" : "false") << ",\n";
+
+	// Serialize derived_pu flag
+	ss << indent << "  \"derived_pu\": " << (metadata.derived_pu ? "true" : "false") << "\n";
 
 	ss << indent << "}";
 	return ss.str();
@@ -332,6 +335,12 @@ PACTableMetadata PACMetadataManager::DeserializeFromJSON(const string &json) {
 	std::regex privacy_unit_regex(R"xxx("is_privacy_unit"\s*:\s*(true|false))xxx");
 	if (std::regex_search(json, match, privacy_unit_regex)) {
 		metadata.is_privacy_unit = (match[1].str() == "true");
+	}
+
+	// Extract derived_pu flag
+	std::regex derived_pu_regex(R"xxx("derived_pu"\s*:\s*(true|false))xxx");
+	if (std::regex_search(json, match, derived_pu_regex)) {
+		metadata.derived_pu = (match[1].str() == "true");
 	}
 
 	return metadata;

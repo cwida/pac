@@ -1,0 +1,209 @@
+# name: test/sql/pac_derived_tables.test
+# description: Test derived table creation (CTAS) and INSERT behavior with PAC noise
+# group: [sql]
+
+require pac
+
+statement ok
+PRAGMA clear_pac_metadata;
+
+statement ok
+SET pac_seed = 42
+
+statement ok
+SET pac_hash_repair = true
+
+statement ok
+SET threads = 1
+
+statement ok
+SET pac_mi = 0
+
+# ============================================================================
+# Test 1: CTAS from PU table propagates metadata
+# Tests: PAC_KEY and PROTECTED columns are propagated to the new table
+# ============================================================================
+
+statement ok
+CREATE PU TABLE ctas_source (id INT, grp INT, value INT, PAC_KEY(id), PROTECTED(value));
+
+statement ok
+INSERT INTO ctas_source VALUES (1, 1, 10), (2, 2, 20);
+
+# Disable pac_check so the schema-copy CTAS can project protected columns
+statement ok
+SET pac_check = false;
+
+# CTAS should propagate protected(value) and PAC_KEY(id) from ctas_source
+statement ok
+CREATE TABLE ctas_copy AS SELECT * FROM ctas_source LIMIT 0;
+
+statement ok
+SET pac_check = true;
+
+# Projecting a protected column from the CTAS-derived table should error
+statement error
+SELECT value FROM ctas_copy;
+----
+PAC rewrite: protected column 'ctas_copy.value' can only be accessed inside aggregate functions
+
+# Non-protected columns should be accessible
+statement ok
+SELECT grp FROM ctas_copy;
+
+statement ok
+DROP TABLE ctas_copy;
+
+statement ok
+DROP TABLE ctas_source;
+
+# ============================================================================
+# Test 2: CTAS with renamed columns propagates metadata correctly
+# Tests: Protected column renamed via alias is still protected in new table
+# ============================================================================
+
+statement ok
+CREATE PU TABLE ctas_rename_src (id INT, grp INT, value INT, PAC_KEY(id), PROTECTED(value));
+
+statement ok
+INSERT INTO ctas_rename_src VALUES (1, 1, 10), (2, 2, 20);
+
+# Disable pac_check so the schema-copy CTAS can project protected columns
+statement ok
+SET pac_check = false;
+
+# CTAS with column renames: 'amount' is renamed from 'value' (protected)
+statement ok
+CREATE TABLE ctas_renamed AS SELECT id AS uid, grp AS category, value AS amount FROM ctas_rename_src LIMIT 0;
+
+statement ok
+SET pac_check = true;
+
+# 'amount' (renamed from protected 'value') should be protected
+statement error
+SELECT amount FROM ctas_renamed;
+----
+PAC rewrite: protected column 'ctas_renamed.amount' can only be accessed inside aggregate functions
+
+# Non-protected renamed column should be accessible
+statement ok
+SELECT category FROM ctas_renamed;
+
+statement ok
+DROP TABLE ctas_renamed;
+
+statement ok
+DROP TABLE ctas_rename_src;
+
+# ============================================================================
+# Test 3: CTAS with aggregate does not propagate consumed protected columns
+# Tests: Protected column consumed by SUM should NOT be marked protected in
+# the output table (only GROUP BY pass-throughs should be propagated)
+# ============================================================================
+
+statement ok
+CREATE PU TABLE ctas_agg_src (id INT, grp INT, value INT, PAC_KEY(id), PROTECTED(value));
+
+statement ok
+INSERT INTO ctas_agg_src VALUES (1, 1, 10), (2, 1, 20), (3, 2, 30), (4, 2, 40);
+
+statement ok
+SET pac_check = false;
+
+statement ok
+CREATE TABLE ctas_agg AS SELECT grp, SUM(value) AS total FROM ctas_agg_src GROUP BY grp;
+
+statement ok
+SET pac_check = true;
+
+# 'total' is an aggregate over a protected column — it should NOT be protected
+# (it's already noised by PAC), so SELECT should succeed
+statement ok
+SELECT total FROM ctas_agg;
+
+# 'grp' is a non-protected pass-through — should also be accessible
+statement ok
+SELECT grp FROM ctas_agg;
+
+statement ok
+DROP TABLE ctas_agg;
+
+statement ok
+DROP TABLE ctas_agg_src;
+
+# ============================================================================
+# Test 4: INSERT with aggregate into derived_pu table gets PAC noise
+# Tests: INSERT INTO derived_table SELECT ... GROUP BY reads from the source
+# PU table — the aggregate should be noised (pac_noised_sum).
+# ============================================================================
+
+statement ok
+CREATE PU TABLE scores (id INT, grp INT, value INT, PAC_KEY(id), PROTECTED(value));
+
+statement ok
+INSERT INTO scores VALUES (1, 1, 10), (2, 1, 20), (3, 2, 30), (4, 2, 40);
+
+# Create a derived_pu table via CTAS (aggregate shape — like a materialized view)
+statement ok
+SET pac_check = false;
+
+statement ok
+CREATE TABLE mv_scores AS SELECT grp, SUM(value) AS total FROM scores GROUP BY grp LIMIT 0;
+
+statement ok
+SET pac_check = true;
+
+# INSERT with aggregate into derived table — should be noised
+# Exact values would be grp=1:30, grp=2:70, but noise changes them
+statement ok
+INSERT INTO mv_scores SELECT grp, SUM(value) AS total FROM scores GROUP BY grp;
+
+# The inserted values should differ from the exact sums due to noise
+# We check that at least one value is not exact (30 or 70)
+query I
+SELECT COUNT(*) FROM mv_scores WHERE (grp = 1 AND total = 30) OR (grp = 2 AND total = 70);
+----
+0
+
+statement ok
+DROP TABLE mv_scores;
+
+statement ok
+DROP TABLE scores;
+
+# ============================================================================
+# Test 5: SELECT from derived_pu table is transparent (no noise)
+# Tests: Plain SELECT queries on derived tables should not trigger PAC
+# ============================================================================
+
+statement ok
+CREATE PU TABLE items (id INT, cat INT, price INT, PAC_KEY(id), PROTECTED(price));
+
+statement ok
+INSERT INTO items VALUES (1, 1, 100), (2, 1, 200), (3, 2, 300);
+
+statement ok
+SET pac_check = false;
+
+statement ok
+CREATE TABLE mv_items AS SELECT cat, SUM(price) AS total FROM items GROUP BY cat;
+
+statement ok
+SET pac_check = true;
+
+# SELECT from derived table is transparent — returns the stored (noised) values as-is
+query II
+SELECT cat, total FROM mv_items ORDER BY cat;
+----
+1	400
+2	600
+
+statement ok
+DROP TABLE mv_items;
+
+statement ok
+DROP TABLE items;
+
+# Cleanup
+statement ok
+PRAGMA clear_pac_metadata;

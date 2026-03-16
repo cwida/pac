@@ -39,6 +39,7 @@ struct PACTableMetadata {
 	vector<PACLink> links;
 	vector<string> protected_columns;
 	bool is_privacy_unit = false; // True if created with CREATE PU TABLE or SET PAC
+	bool derived_pu = false;      // True if created via CTAS from a PU or derived_pu table
 
 	PACTableMetadata() = default;
 	explicit PACTableMetadata(string name) : table_name(std::move(name)) {
