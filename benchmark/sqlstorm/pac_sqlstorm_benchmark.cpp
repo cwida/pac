@@ -905,17 +905,22 @@ static vector<QuerySummary> RunPass(const string &label, vector<string> &query_f
 				worker.Stop();
 			}
 		} else if (qr.state == "crash") {
-			stats.crashed++;
 			if (!last_internal_error_query.empty()) {
 				Log("Query " + name + " hit invalidated DB (root cause: " + last_internal_error_query + "): " + qr.error);
-				// Also track the root-cause query as a crash
+				// Count the root-cause query as the crash
+				stats.crashed++;
 				BenchmarkQueryResult root_qr;
 				root_qr.name = last_internal_error_query;
 				root_qr.state = "crash";
 				root_qr.error = "INTERNAL error that invalidated the database (victim: " + name + ")";
 				TrackQueryErrors(stats, root_qr);
 				last_internal_error_query.clear();
+				// Retry the victim query — it failed only because the DB was invalidated.
+				// The worker will be restarted below, then we decrement i to re-run this query.
+				i--;
+				continue;
 			} else {
+				stats.crashed++;
 				Log("Query " + name + " crashed child process: " + qr.error);
 			}
 			// Child already dead; will be restarted next iteration
