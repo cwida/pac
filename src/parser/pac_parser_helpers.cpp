@@ -404,9 +404,11 @@ bool PACParserExtension::ParseAlterTableAddPAC(const string &query, string &stri
 		                      std::regex_constants::icase);
 		auto begin = std::sregex_iterator(query.begin(), query.end(), link_regex);
 		auto end = std::sregex_iterator();
+		idx_t new_links_count = 0;
 		for (auto it = begin; it != end; ++it) {
 			PACLink link;
 			if (ExtractPACLink((*it).str(), link)) {
+				new_links_count++;
 				// Check if a link already exists on these local columns (to a different table or columns)
 				for (const auto &existing_link : metadata.links) {
 					if (existing_link.local_columns == link.local_columns) {
@@ -437,6 +439,13 @@ bool PACParserExtension::ParseAlterTableAddPAC(const string &query, string &stri
 					metadata.links.push_back(link);
 				}
 			}
+		}
+
+		// Check for PAC_LINK keyword present but no valid link extracted (malformed syntax)
+		if (new_links_count == 0) {
+			throw ParserException(
+			    "Invalid PAC_LINK syntax. Use PAC_LINK (col) REFERENCES table(ref_col). "
+			    "Example: CREATE TABLE t (id INT, fk INT, PAC_LINK (fk) REFERENCES other_table(id), PROTECTED (id))");
 		}
 	}
 

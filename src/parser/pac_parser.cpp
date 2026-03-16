@@ -14,6 +14,9 @@
 // Refactored on 1/22/26.
 //
 
+// IMPORTANT: <regex> must be included BEFORE duckdb headers on Windows MSVC
+#include <regex>
+
 #include "parser/pac_parser.hpp"
 #include "pac_debug.hpp"
 
@@ -158,7 +161,7 @@ static unique_ptr<FunctionData> PACDDLBindFunction(ClientContext &context, Table
 		Connection conn(db);
 		auto result = conn.Query(sql_to_execute);
 		if (result->HasError()) {
-			throw InternalException("Failed to execute DDL: " + result->GetError());
+			throw ParserException("Failed to execute DDL: " + result->GetError());
 		}
 	}
 
@@ -220,6 +223,8 @@ ParserExtensionParseResult PACParserExtension::PACParseFunction(ParserExtensionI
 	std::replace(clean_query.begin(), clean_query.end(), '\n', ' ');
 	std::replace(clean_query.begin(), clean_query.end(), '\r', ' ');
 	std::replace(clean_query.begin(), clean_query.end(), '\t', ' ');
+	// Collapse multiple spaces into single space (so string::find patterns work with any whitespace)
+	clean_query = std::regex_replace(clean_query, std::regex(R"(\s+)"), " ");
 	// Trim whitespace
 	StringUtil::Trim(clean_query);
 

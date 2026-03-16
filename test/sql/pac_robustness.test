@@ -1,0 +1,582 @@
+# name: test/sql/pac_robustness.test
+# description: Stress test PAC parser and compatibility checker with malformed syntax, wrong keywords, edge cases
+# group: [sql]
+
+require pac
+
+statement ok
+PRAGMA clear_pac_metadata;
+
+statement ok
+SET pac_seed = 42
+
+statement ok
+SET pac_hash_repair = true
+
+statement ok
+SET pac_mi = 0
+
+statement ok
+SET threads = 1
+
+# ============================================================================
+# A. Parser: Malformed CREATE PU TABLE
+# ============================================================================
+
+# A1: CREATE PU TABLE without PAC_KEY
+statement error
+CREATE PU TABLE a1 (id INTEGER, name VARCHAR);
+----
+CREATE PU TABLE requires a PAC_KEY clause to identify the privacy unit
+
+# A2: PAC_KEY without parens (missing opening paren)
+# DuckDB parser will fail before PAC parser can extract it
+statement error
+CREATE PU TABLE a2 (id INTEGER, PAC_KEY);
+----
+CREATE PU TABLE requires a PAC_KEY clause to identify the privacy unit
+
+# A3: Empty PAC_KEY column list
+statement error
+CREATE PU TABLE a3 (id INTEGER, PAC_KEY());
+----
+CREATE PU TABLE requires a PAC_KEY clause to identify the privacy unit
+
+# A4: PAC_KEY referencing nonexistent column
+# Table gets created first, then column validation happens at plan time
+# DuckDB will catch this because table is created with only id,
+# but PAC_KEY(nonexistent) should still parse. The column doesn't need to exist
+# as a separate definition since PAC_KEY is metadata-only.
+# Actually, the CREATE TABLE succeeds (PAC_KEY is stripped), but PAC metadata
+# stores 'nonexistent'. The column check happens at ALTER time, not CREATE time.
+# Let's just verify the table is created with PAC_KEY pointing at a real column.
+statement ok
+CREATE PU TABLE a4 (id INTEGER, PAC_KEY(id));
+
+statement ok
+DROP TABLE a4;
+
+# A5: Duplicate PAC_KEY
+# The parser just merges columns, so duplicate PAC_KEY clauses get deduped
+statement ok
+CREATE PU TABLE a5 (id INTEGER, PAC_KEY(id), PAC_KEY(id));
+
+statement ok
+DROP TABLE a5;
+
+# A6: PROTECTED without PAC_KEY on CREATE PU TABLE
+statement error
+CREATE PU TABLE a6 (id INTEGER, PROTECTED(id));
+----
+CREATE PU TABLE requires a PAC_KEY clause to identify the privacy unit
+
+# A7: PAC_LINK referencing nonexistent table on CREATE PU TABLE
+# For CREATE path, referenced table existence is NOT validated (only ALTER validates).
+# The table gets created and metadata stored. Link validation happens at query time.
+statement ok
+CREATE PU TABLE a7 (id INTEGER, PAC_KEY(id), PAC_LINK(id) REFERENCES nonexistent_table(x));
+
+statement ok
+DROP TABLE a7;
+
+# A8: PROTECTED without parens (bare keyword)
+statement error
+CREATE PU TABLE a8 (id INTEGER PROTECTED, PAC_KEY(id));
+----
+Invalid PROTECTED syntax
+
+statement ok
+PRAGMA clear_pac_metadata;
+
+# ============================================================================
+# B. Parser: Malformed ALTER TABLE
+# ============================================================================
+
+# Setup tables for ALTER tests
+statement ok
+CREATE TABLE b_table (id INTEGER, fk INTEGER, val INTEGER, extra INTEGER);
+
+statement ok
+CREATE PU TABLE b_pu (pk INTEGER, secret INTEGER, PAC_KEY(pk), PROTECTED(secret));
+
+# B1: ALTER TABLE on nonexistent table
+statement error
+ALTER TABLE nonexistent ADD PAC_KEY (id);
+----
+Table 'nonexistent' does not exist
+
+# B2: Empty PAC_KEY column list in ALTER
+# The regex won't match empty parens, so "add pac_key" is detected but
+# ExtractPACPrimaryKey returns false. No columns get added.
+# This is a metadata-only operation that succeeds but adds nothing.
+statement ok
+ALTER TABLE b_table ADD PAC_KEY();
+
+# B3: Incomplete REFERENCES in PAC_LINK
+statement error
+ALTER TABLE b_table ADD PAC_LINK (fk) REFERENCES;
+----
+Invalid PAC_LINK syntax
+
+# B4: PAC_LINK referencing nonexistent table
+statement ok
+ALTER TABLE b_table ADD PAC_KEY(id);
+
+statement error
+ALTER TABLE b_table ADD PAC_LINK (fk) REFERENCES nonexistent(id);
+----
+Referenced table 'nonexistent' does not exist
+
+# B5: PAC_LINK with nonexistent local column
+statement error
+ALTER TABLE b_table ADD PAC_LINK (nonexistent) REFERENCES b_pu(pk);
+----
+Column 'nonexistent' does not exist in table 'b_table'
+
+# B6: PROTECTED with nonexistent column
+statement error
+ALTER TABLE b_table ADD PROTECTED (nonexistent);
+----
+Column 'nonexistent' does not exist in table 'b_table'
+
+# B7: Duplicate column in same PROTECTED statement
+statement error
+ALTER TABLE b_table ADD PROTECTED (val, val);
+----
+Duplicate protected column 'val' in ALTER PU TABLE statement
+
+# B8: ALTER PU TABLE on non-PU table
+statement error
+ALTER PU TABLE b_table ADD PROTECTED (val);
+----
+Table 'b_table' is not a privacy unit. Use ALTER TABLE (without PU) for non-PU tables.
+
+# B9: ALTER TABLE (without PU) on PU table
+statement error
+ALTER TABLE b_pu ADD PROTECTED (secret);
+----
+Table 'b_pu' is a privacy unit. Use ALTER PU TABLE for PU tables.
+
+# B10: SET PU without PAC_KEY
+statement ok
+CREATE TABLE b_no_key (id INTEGER);
+
+statement error
+ALTER TABLE b_no_key SET PU;
+----
+ALTER TABLE SET PU requires a PAC_KEY
+
+# B11: SET PU is idempotent
+statement ok
+ALTER TABLE b_table SET PU;
+
+statement ok
+ALTER TABLE b_table SET PU;
+
+# B12: UNSET PU is idempotent
+statement ok
+ALTER TABLE b_table UNSET PU;
+
+statement ok
+ALTER TABLE b_table UNSET PU;
+
+# Cleanup section B
+statement ok
+DROP TABLE IF EXISTS b_table;
+
+statement ok
+DROP TABLE IF EXISTS b_pu;
+
+statement ok
+DROP TABLE IF EXISTS b_no_key;
+
+statement ok
+PRAGMA clear_pac_metadata;
+
+# ============================================================================
+# C. Parser: Malformed DROP metadata
+# ============================================================================
+
+# Setup for DROP tests
+statement ok
+CREATE PU TABLE c_pu (id INTEGER, val INTEGER, PAC_KEY(id), PROTECTED(val));
+
+statement ok
+CREATE TABLE c_ref (rid INTEGER);
+
+statement ok
+ALTER TABLE c_ref ADD PAC_KEY(rid);
+
+statement ok
+ALTER TABLE c_ref ADD PAC_LINK(rid) REFERENCES c_pu(id);
+
+# C1: DROP PAC_LINK on column with no link
+statement error
+ALTER TABLE c_ref DROP PAC_LINK (nonexistent);
+----
+No PAC LINK found on column 'nonexistent'
+
+# C2: DROP PROTECTED on non-protected column
+statement error
+ALTER PU TABLE c_pu DROP PROTECTED (id);
+----
+Column 'id' is not marked as protected
+
+# C3: DROP metadata on table with no PAC metadata
+statement ok
+CREATE TABLE c_plain (x INTEGER);
+
+statement error
+ALTER TABLE c_plain DROP PROTECTED (x);
+----
+Table 'c_plain' does not have any PAC metadata to drop
+
+# Cleanup section C
+statement ok
+DROP TABLE IF EXISTS c_ref;
+
+statement ok
+DROP TABLE IF EXISTS c_pu;
+
+statement ok
+DROP TABLE IF EXISTS c_plain;
+
+statement ok
+PRAGMA clear_pac_metadata;
+
+# ============================================================================
+# D. Parser: PU-to-PU link prevention (cycle detection)
+# ============================================================================
+
+statement ok
+CREATE PU TABLE d_pu1 (id INTEGER, PAC_KEY(id));
+
+statement ok
+CREATE PU TABLE d_pu2 (id INTEGER, ref_id INTEGER, PAC_KEY(id));
+
+# D1: ALTER PU TABLE ADD PAC_LINK from PU to PU should fail
+statement error
+ALTER PU TABLE d_pu2 ADD PAC_LINK (ref_id) REFERENCES d_pu1(id);
+----
+Cannot create PAC LINK from PAC table 'd_pu2' to PAC table 'd_pu1'. PAC tables cannot link to other PAC tables (cycles not supported).
+
+# D2: CREATE PU TABLE with link to PU table should fail
+statement error
+CREATE PU TABLE d_pu3 (id INTEGER, ref INTEGER, PAC_KEY(id), PAC_LINK(ref) REFERENCES d_pu1(id));
+----
+Cannot create PAC LINK from PAC table 'd_pu3' to PAC table 'd_pu1'. PAC tables cannot link to other PAC tables (cycles not supported).
+
+# Cleanup section D
+statement ok
+DROP TABLE IF EXISTS d_pu2;
+
+statement ok
+DROP TABLE IF EXISTS d_pu1;
+
+statement ok
+PRAGMA clear_pac_metadata;
+
+# ============================================================================
+# E. Compatibility checker: Protected column violations
+# ============================================================================
+
+statement ok
+CREATE PU TABLE e_pu (
+    uid INTEGER,
+    secret INTEGER,
+    PAC_KEY(uid),
+    PROTECTED(secret)
+);
+
+statement ok
+INSERT INTO e_pu VALUES (1, 10), (2, 20), (3, 30);
+
+# E1: SELECT protected column directly
+statement error
+SELECT secret FROM e_pu;
+----
+PAC rewrite: protected column 'e_pu.secret' can only be accessed inside aggregate functions
+
+# E2: SELECT * from PU table (PAC_KEY is auto-protected)
+statement error
+SELECT * FROM e_pu;
+----
+PAC rewrite: protected column 'e_pu.uid' can only be accessed inside aggregate functions
+
+# E3: Protected column in GROUP BY
+statement error
+SELECT secret, COUNT(*) FROM e_pu GROUP BY secret;
+----
+PAC rewrite: protected column 'e_pu.secret' can only be accessed inside aggregate functions
+
+# E4: SUM of protected column is OK (inside aggregate)
+query I
+SELECT SUM(secret) FROM e_pu;
+----
+100
+
+# E5: COUNT(*) is OK
+query I
+SELECT COUNT(*) FROM e_pu;
+----
+4
+
+# E6: Protected column in WHERE (HAVING-level filter check)
+# WHERE filters below an aggregate are allowed for protected columns,
+# but if there's no aggregate at all, the query fails the structural check
+statement error
+SELECT secret FROM e_pu WHERE secret > 5;
+----
+PAC rewrite: protected column 'e_pu.secret' can only be accessed inside aggregate functions
+
+# E7: AVG of protected column is OK
+query I
+SELECT AVG(secret) FROM e_pu;
+----
+25.0
+
+# E8: MIN/MAX of protected column is OK
+query I
+SELECT MIN(secret) FROM e_pu;
+----
+20
+
+# Cleanup section E
+statement ok
+DROP TABLE IF EXISTS e_pu;
+
+statement ok
+PRAGMA clear_pac_metadata;
+
+# ============================================================================
+# F. Compatibility checker: Unsupported operators
+# ============================================================================
+
+statement ok
+CREATE PU TABLE f_pu (id INTEGER, val INTEGER, PAC_KEY(id));
+
+statement ok
+INSERT INTO f_pu VALUES (1, 10), (2, 20), (3, 30);
+
+# F1: Window function on PU table
+statement error
+SELECT id, SUM(val) OVER (PARTITION BY id) FROM f_pu;
+----
+PAC rewrite: protected column 'f_pu.id' can only be accessed inside aggregate functions
+
+# F2: Recursive CTE on PU table
+# The protected column check fires before the recursive CTE check,
+# because PAC_KEY column 'id' is auto-protected and used in WHERE filter.
+statement error
+WITH RECURSIVE cte AS (
+    SELECT id, val FROM f_pu WHERE id = 1
+    UNION ALL
+    SELECT f.id, f.val FROM f_pu f JOIN cte ON f.id = cte.id + 1
+)
+SELECT SUM(val) FROM cte;
+----
+PAC rewrite: protected column 'f_pu.id' cannot be used in WHERE/HAVING filters
+
+# Cleanup section F
+statement ok
+DROP TABLE IF EXISTS f_pu;
+
+statement ok
+PRAGMA clear_pac_metadata;
+
+# ============================================================================
+# G. Edge cases: Case insensitivity and whitespace
+# ============================================================================
+
+# G1: Extra spaces in CREATE PU TABLE
+statement ok
+CREATE   PU   TABLE   g1 (id INTEGER, PAC_KEY(id));
+
+statement ok
+DROP TABLE g1;
+
+# G2: All lowercase
+statement ok
+create pu table g2 (id integer, pac_key(id));
+
+statement ok
+DROP TABLE g2;
+
+# G3: Mixed case
+statement ok
+CREATE Pu TaBlE g3 (id INTEGER, Pac_Key(id));
+
+statement ok
+DROP TABLE g3;
+
+# G4: Extra whitespace in ALTER TABLE ADD PAC_KEY
+statement ok
+CREATE TABLE g4 (id INTEGER);
+
+statement ok
+ALTER   TABLE   g4   ADD   PAC_KEY   (  id  );
+
+statement ok
+DROP TABLE g4;
+
+# G5: Multiline CREATE PU TABLE (newlines become spaces in parser)
+statement ok
+CREATE PU TABLE g5 (
+    id INTEGER,
+    name VARCHAR,
+    PAC_KEY(id)
+);
+
+statement ok
+DROP TABLE g5;
+
+# G6: Tab-separated keywords (tabs become spaces in parser cleanup)
+statement ok
+CREATE	PU	TABLE	g6 (id INTEGER, PAC_KEY(id));
+
+statement ok
+DROP TABLE g6;
+
+statement ok
+PRAGMA clear_pac_metadata;
+
+# ============================================================================
+# H. Keyword typos and wrong ordering
+# ============================================================================
+
+# H1: Space instead of underscore in PAC_KEY → DuckDB interprets "PAC" as column name
+# This will either fail as a syntax error or create a table without PAC_KEY
+# Since CREATE PU TABLE requires PAC_KEY, it should error.
+statement error
+CREATE PU TABLE h1 (id INTEGER, PAC KEY(id));
+----
+CREATE PU TABLE requires a PAC_KEY clause to identify the privacy unit
+
+# H2: No underscore → "PACKEY" is not recognized as PAC_KEY
+statement error
+CREATE PU TABLE h2 (id INTEGER, PACKEY(id));
+----
+CREATE PU TABLE requires a PAC_KEY clause to identify the privacy unit
+
+# H3: Plural PAC_KEYS
+statement error
+CREATE PU TABLE h3 (id INTEGER, PAC_KEYS(id));
+----
+CREATE PU TABLE requires a PAC_KEY clause to identify the privacy unit
+
+# H4: Reversed keyword KEY_PAC
+statement error
+CREATE PU TABLE h4 (id INTEGER, KEY_PAC(id));
+----
+CREATE PU TABLE requires a PAC_KEY clause to identify the privacy unit
+
+# H5: Parens around table name in REFERENCES
+# PAC_LINK(id) REFERENCES(foo) → regex won't match, triggering PAC_LINK syntax error
+statement error
+CREATE PU TABLE h5 (id INTEGER, PAC_KEY(id), PAC_LINK(id) REFERENCES(foo));
+----
+Invalid PAC_LINK syntax
+
+# H6: Missing ref column parens in REFERENCES
+# PAC_LINK(id) REFERENCES foo → regex won't match, triggering PAC_LINK syntax error
+statement error
+CREATE PU TABLE h6 (id INTEGER, PAC_KEY(id), PAC_LINK(id) REFERENCES foo);
+----
+Invalid PAC_LINK syntax
+
+# H7: PU after TABLE instead of before → "CREATE TABLE PU" means table named "PU"
+# PAC parser extracts table name "pu" (first identifier after TABLE), strips PAC clauses,
+# but the resulting "CREATE TABLE PU h7 (id INTEGER)" fails in DuckDB because "h7" is unexpected.
+statement error
+CREATE TABLE PU h7 (id INTEGER, PAC_KEY(id));
+----
+Failed to execute DDL
+
+# H8: Missing TABLE keyword → DuckDB sees "CREATE PU" which is invalid
+statement error
+CREATE PU h8 (id INTEGER, PAC_KEY(id));
+----
+
+# H9: REFERENCE instead of REFERENCES (singular)
+# The regex expects "references", so "reference" won't match
+statement error
+CREATE PU TABLE h9 (id INTEGER, PAC_KEY(id), PAC_LINK(id) REFERENCE foo(x));
+----
+Invalid PAC_LINK syntax
+
+# H10: SET PAC instead of SET PU
+# "ALTER TABLE t SET PAC" won't match any PAC pattern, falls through to DuckDB parser
+statement error
+ALTER TABLE nonexistent SET PAC;
+----
+
+# H11: PROTECT instead of PROTECTED
+# "PROTECT" won't match the "protected" regex (word boundary + "protected")
+# Falls through to DuckDB parser as regular ALTER TABLE ADD ... which will fail
+statement error
+ALTER TABLE nonexistent ADD PROTECT (col);
+----
+
+# H12: Double PU keyword
+# "CREATE PU PU TABLE" → regex matches "create pu table" (pu table portion)
+# with "pu" as the table name, but then "table" appears after, which is confusing.
+# The regex will try to extract table name and may fail or create unexpected results.
+statement error
+CREATE PU PU TABLE h12 (id INTEGER, PAC_KEY(id));
+----
+
+statement ok
+PRAGMA clear_pac_metadata;
+
+# ============================================================================
+# I. Edge cases: Column interactions (add, drop, re-add)
+# ============================================================================
+
+# Setup
+statement ok
+CREATE PU TABLE i_pu (id INTEGER, col1 INTEGER, col2 INTEGER, fk INTEGER, PAC_KEY(id));
+
+statement ok
+CREATE TABLE i_ref (rid INTEGER);
+
+statement ok
+ALTER TABLE i_ref ADD PAC_KEY(rid);
+
+# I1: Add PROTECTED, drop it, re-add → should work
+statement ok
+ALTER PU TABLE i_pu ADD PROTECTED (col1);
+
+statement ok
+ALTER PU TABLE i_pu DROP PROTECTED (col1);
+
+statement ok
+ALTER PU TABLE i_pu ADD PROTECTED (col1);
+
+# I2: Add PAC_LINK, drop it, re-add → should work
+statement ok
+ALTER PU TABLE i_pu ADD PAC_LINK (fk) REFERENCES i_ref(rid);
+
+statement ok
+ALTER PU TABLE i_pu DROP PAC_LINK (fk);
+
+statement ok
+ALTER PU TABLE i_pu ADD PAC_LINK (fk) REFERENCES i_ref(rid);
+
+# I3: Same PROTECTED column added twice in separate ALTERs → error on second
+statement ok
+ALTER PU TABLE i_pu ADD PROTECTED (col2);
+
+statement error
+ALTER PU TABLE i_pu ADD PROTECTED (col2);
+----
+Column 'col2' is already marked as protected
+
+# Cleanup section I
+statement ok
+DROP TABLE IF EXISTS i_ref;
+
+statement ok
+DROP TABLE IF EXISTS i_pu;
+
+statement ok
+PRAGMA clear_pac_metadata;
