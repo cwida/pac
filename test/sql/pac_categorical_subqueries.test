@@ -623,6 +623,40 @@ SELECT count(*) FROM (
 6
 
 # ============================================================================
+# HAVING with COALESCE over PAC aggregate (crash 30430)
+# ============================================================================
+# COALESCE(SUM(...), 0) with HAVING SUM(...) > threshold used to crash with a
+# NULL shared_ptr dereference in ListVector::GetEntry because the HAVING filter
+# was not rewritten when the projection above it triggered categorical conversion.
+
+statement ok
+SELECT
+    l_partkey,
+    COALESCE(SUM(l_quantity), 0) AS total_qty
+FROM lineitem
+GROUP BY l_partkey
+HAVING SUM(l_quantity) > 5;
+
+# Plain SUM ... HAVING (no COALESCE) should also work
+statement ok
+SELECT
+    l_partkey,
+    SUM(l_quantity) AS total_qty
+FROM lineitem
+GROUP BY l_partkey
+HAVING SUM(l_quantity) > 10;
+
+# HAVING with ORDER BY — ORDER BY must also handle counter bindings
+statement ok
+SELECT
+    l_partkey,
+    COALESCE(SUM(l_quantity), 0) AS total_qty
+FROM lineitem
+GROUP BY l_partkey
+HAVING SUM(l_quantity) > 5
+ORDER BY total_qty DESC;
+
+# ============================================================================
 # Cleanup
 # ============================================================================
 

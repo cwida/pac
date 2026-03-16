@@ -311,8 +311,14 @@ static void WrapCounterRefsWithNoised(unique_ptr<Expression> &expr,
 		auto &col_ref = expr->Cast<BoundColumnRefExpression>();
 		if (counter_bindings.count(HashBinding(col_ref.binding))) {
 			auto original_type = col_ref.return_type;
+			auto list_type = LogicalType::LIST(PacFloatLogicalType());
+			// If the universal type fix already changed the col_ref to LIST<FLOAT>,
+			// we can't cast back to it — just use pac_noised's natural scalar return type.
+			bool needs_cast = (original_type != PacFloatLogicalType() && original_type != list_type);
+			// Ensure col_ref type is LIST<FLOAT> for correct pac_noised binding.
+			col_ref.return_type = list_type;
 			unique_ptr<Expression> noised = input.optimizer.BindScalarFunction("pac_noised", expr->Copy());
-			if (original_type != PacFloatLogicalType()) {
+			if (needs_cast) {
 				noised = BoundCastExpression::AddDefaultCastToType(std::move(noised), original_type);
 			}
 			expr = std::move(noised);
@@ -472,6 +478,19 @@ static void RewriteBottomUp(unique_ptr<LogicalOperator> &op_ptr, OptimizerExtens
 		}
 	}
 	LogicalOperator *plan_root = plan.get();
+	// Handle non-categorical FILTER (HAVING) BEFORE the universal type fix,
+	// so col_ref types still hold the original scalar type (e.g. DECIMAL).
+	// WrapCounterRefsWithNoised will set the col_ref type to LIST<FLOAT> for pac_noised binding,
+	// then cast the result back to the original scalar type so the parent comparison stays valid.
+	if (op->type == LogicalOperatorType::LOGICAL_FILTER && !inside_cte_definition && !counter_bindings.empty()) {
+		auto it = pattern_lookup.find(op);
+		if (it == pattern_lookup.end()) {
+			auto &filter = op->Cast<LogicalFilter>();
+			for (auto &filter_expr : filter.expressions) {
+				WrapCounterRefsWithNoised(filter_expr, counter_bindings, input);
+			}
+		}
+	}
 	// Universal col_ref type fix: after children have been processed (and populated counter_bindings),
 	// fix stale col_ref types in the current operator's expressions. When PAC aggregates are converted
 	// to counters, output types change (e.g. DECIMAL → LIST<FLOAT>). Expressions in all operators
@@ -653,6 +672,22 @@ static void RewriteBottomUp(unique_ptr<LogicalOperator> &op_ptr, OptimizerExtens
 						filter.expressions[expr_idx] = std::move(result);
 					}
 				}
+			}
+		}
+	} else if ((op->type == LogicalOperatorType::LOGICAL_ORDER_BY || op->type == LogicalOperatorType::LOGICAL_TOP_N) &&
+	           !inside_cte_definition && !counter_bindings.empty()) {
+		// ORDER BY / TOP N that references counter bindings need scalar values.
+		// col_ref types are still scalar (skip_type_fix), so WrapCounterRefsWithNoised
+		// fixes types to LIST<FLOAT> for pac_noised binding and casts back to the original type.
+		if (op->type == LogicalOperatorType::LOGICAL_ORDER_BY) {
+			auto &order = op->Cast<LogicalOrder>();
+			for (auto &o : order.orders) {
+				WrapCounterRefsWithNoised(o.expression, counter_bindings, input);
+			}
+		} else {
+			auto &topn = op->Cast<LogicalTopN>();
+			for (auto &o : topn.orders) {
+				WrapCounterRefsWithNoised(o.expression, counter_bindings, input);
 			}
 		}
 	} else if ((op->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN ||
