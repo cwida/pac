@@ -676,10 +676,36 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 				}
 				std::function<void(unique_ptr<Expression> &)> WrapListRefs = [&](unique_ptr<Expression> &e) {
 					if (e->type == ExpressionType::BOUND_COLUMN_REF && e->return_type.id() == LogicalTypeId::LIST) {
+						auto binding = e->Cast<BoundColumnRefExpression>().binding;
 #if PAC_DEBUG
 						PAC_DEBUG_PRINT("PACTopKRule:     A3b WRAPPING LIST colref: " + e->ToString());
 #endif
 						e = input.optimizer.BindScalarFunction("pac_noised", std::move(e));
+						// Cast back to original aggregate type (e.g. FLOAT→DOUBLE for AVG).
+						// Trace the binding through remaining projections to identify which
+						// PAC aggregate this colref came from, then cast if types differ.
+						ColumnBinding resolved;
+						bool traced =
+						    TraceBindingThroughProjections(binding, ctx.intermediate_projections, pi + 1, resolved);
+						for (auto &info : pac_aggs) {
+							if (info.original_type != e->return_type) {
+								if (traced && resolved == info.agg_binding) {
+									e = BoundCastExpression::AddCastToType(input.context, std::move(e),
+									                                       info.original_type);
+									break;
+								}
+								// When CTEs or other operators sit between the projections and
+								// the aggregate, the table_index differs. Fall back to matching
+								// by aggregate position: resolved column_index minus the number
+								// of group columns gives the aggregate expression index.
+								if (traced && resolved.column_index >= ctx.aggregate->groups.size() &&
+								    (resolved.column_index - ctx.aggregate->groups.size()) == info.agg_index) {
+									e = BoundCastExpression::AddCastToType(input.context, std::move(e),
+									                                       info.original_type);
+									break;
+								}
+							}
+						}
 						return;
 					}
 					// If this is a CAST whose child is a LIST colref, replace the

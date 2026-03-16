@@ -657,6 +657,42 @@ HAVING SUM(l_quantity) > 5
 ORDER BY total_qty DESC;
 
 # ============================================================================
+# COALESCE(AVG(...)) with ORDER BY/LIMIT (crash 30873)
+# ============================================================================
+# TopK rewriter wraps LIST colrefs with pac_noised() which returns FLOAT,
+# but COALESCE was bound for DOUBLE arguments (from AVG). The fix casts
+# pac_noised() back to the original aggregate type.
+# The crash requires COALESCE(AVG(...)) as a direct aggregate in the same
+# GROUP BY that feeds into ORDER BY ... LIMIT (TopK pushdown path).
+
+statement ok
+WITH CustomerOrders AS (
+    SELECT c_custkey, c_name, COUNT(o_orderkey) AS order_count
+    FROM customer LEFT JOIN orders ON c_custkey = o_custkey
+    WHERE c_acctbal > 1000
+    GROUP BY c_custkey, c_name
+),
+PartSupplierData AS (
+    SELECT p_partkey, (ps_supplycost * ps_availqty) AS total_cost
+    FROM part LEFT JOIN partsupp ON p_partkey = ps_partkey
+    WHERE ps_supplycost IS NOT NULL
+),
+FinalResult AS (
+    SELECT n_nationkey,
+           SUM(COALESCE(p.total_cost, 0)) AS total_value,
+           COALESCE(AVG(co.order_count), 0) AS avg_orders
+    FROM nation
+    LEFT JOIN supplier ON n_nationkey = s_nationkey
+    LEFT JOIN PartSupplierData p ON s_suppkey = p.p_partkey
+    LEFT JOIN CustomerOrders co ON s_suppkey = co.c_custkey
+    GROUP BY n_nationkey
+)
+SELECT n_nationkey, total_value, avg_orders
+FROM FinalResult
+ORDER BY total_value DESC
+LIMIT 10;
+
+# ============================================================================
 # Cleanup
 # ============================================================================
 
