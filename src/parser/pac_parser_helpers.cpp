@@ -512,7 +512,7 @@ bool PACParserExtension::ParseAlterTableDropPAC(const string &query, string &str
 		// Require PAC_KEY to be defined before SET PU
 		if (metadata.primary_key_columns.empty()) {
 			throw ParserException("ALTER TABLE SET PU requires a PAC_KEY. "
-			                      "First run: ALTER PU TABLE " +
+			                      "First run: ALTER TABLE " +
 			                      metadata.table_name + " ADD PAC_KEY (column_name)");
 		}
 
