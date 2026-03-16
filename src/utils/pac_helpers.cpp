@@ -601,7 +601,7 @@ static void CollectOperatorsByTableIndex(LogicalOperator &op,
 }
 
 // Helper to trace a binding back through the plan to find which LogicalGet it originates from
-static LogicalGet *TraceBindingToSource(LogicalOperator &plan, const ColumnBinding &binding) {
+LogicalGet *TraceBindingToSource(LogicalOperator &plan, const ColumnBinding &binding, idx_t *out_column_index) {
 	// Build a map from table_index to the operator that produces it
 	std::unordered_map<idx_t, LogicalOperator *> table_index_to_op;
 	CollectOperatorsByTableIndex(plan, table_index_to_op);
@@ -625,6 +625,9 @@ static LogicalGet *TraceBindingToSource(LogicalOperator &plan, const ColumnBindi
 		// If we found a LogicalGet, we've reached the source
 		if (op->type == LogicalOperatorType::LOGICAL_GET) {
 			auto &get = op->Cast<LogicalGet>();
+			if (out_column_index) {
+				*out_column_index = current_column_index;
+			}
 			return &get;
 		}
 
