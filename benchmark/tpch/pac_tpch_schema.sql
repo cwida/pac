@@ -14,8 +14,10 @@ ALTER PU TABLE customer ADD PROTECTED (c_acctbal);
 ALTER PU TABLE customer ADD PROTECTED (c_name);
 ALTER PU TABLE customer ADD PROTECTED (c_address);
 
--- Orders -> Customer link
+-- Orders -> Customer and Lineitem->Orders links
 ALTER TABLE orders ADD PAC_LINK (o_custkey) REFERENCES customer(c_custkey);
-
--- Lineitem -> Orders link
 ALTER TABLE lineitem ADD PAC_LINK (l_orderkey) REFERENCES orders(o_orderkey);
+
+-- Protect the comment columns, as they may include customer-specific notes
+ALTER TABLE orders ADD PROTECTED (o_comment);
+ALTER TABLE lineitem ADD PROTECTED (l_comment);
