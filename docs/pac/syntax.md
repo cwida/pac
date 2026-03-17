@@ -98,3 +98,42 @@ When a `SELECT` query arrives, the `PACRewriteRule` optimizer checks if the plan
 - **Inconspicuous:** no PU or PAC-linked table referenced — passed through unchanged.
 - **Rejected:** references protected data but violates constraints (see `query_operators.md`).
 - **Rewritable:** valid for PAC compilation — aggregates are transformed.
+
+## SQL Reference
+
+### Defining Privacy Units
+
+```sql
+-- Create a new PU table with PAC_KEY and optional PROTECTED columns
+CREATE PU TABLE t (col1 INT, col2 INT, PAC_KEY (col1), PROTECTED (col2));
+
+-- Or convert an existing table to PU
+ALTER TABLE t ADD PAC_KEY (col1);       -- PAC_KEY on non-PU table (prep for SET PU)
+ALTER TABLE t SET PU;                   -- mark as PU (requires PAC_KEY)
+ALTER TABLE t UNSET PU;                 -- remove PU status
+
+-- Add metadata to non-PU tables (use ALTER TABLE)
+ALTER TABLE orders ADD PAC_LINK (fk_col) REFERENCES t(col1);
+ALTER TABLE orders ADD PROTECTED (col2);
+
+-- Add metadata to PU tables (use ALTER PU TABLE)
+ALTER PU TABLE t ADD PROTECTED (col2);
+```
+
+`PAC_KEY` identifies the privacy unit (composite keys supported). `PAC_LINK` declares a join path for privacy propagation. `PROTECTED` restricts columns to aggregate-only access — if omitted on a PU table, all columns are protected. Use `ALTER PU TABLE` for PU tables and `ALTER TABLE` for non-PU tables.
+
+### Supported Aggregates and Operators
+
+PAC rewrites standard aggregates: `SUM`, `COUNT`, `AVG`, `MIN`, `MAX`, and their `COUNT(DISTINCT)` variants. Other aggregates are not (yet) cupported, but could. Most SQL operators are supported, exceptions are RECURSIVE CTEs, Window functions and set operations like `EXCEPT`/`INTERSECT`.
+
+There is some preliminary support for using multiple PU tables inside the same schema and query (it works but needs more study).
+
+### Settings
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `pac_mi` | `1/128` | Mutual information bound (higher = less noise) |
+| `pac_seed` | random | Fix seed for reproducible results |
+| `pac_noise` | `true` | Toggle noise injection |
+| `pac_diffcols` | `NULL` | [Utility diff](docs/pac/utility.md): compare noised vs exact results |
+
