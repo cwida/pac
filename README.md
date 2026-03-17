@@ -173,7 +173,7 @@ utility=0.510000 recall=1.000000 precision=1.000000 (=4 -0 +0)
 
 1. You declare which table is the **privacy unit** (`CREATE PU TABLE` or `ALTER TABLE SET PU`) and which columns to protect.
 2. You link related tables with `PAC_LINK` to propagate privacy through joins.
-3. PAC intercepts every aggregate query, hashes each privacy unit's key into a 64-bit value, and uses the bits to create 64 sub-samples. Each aggregate runs on all sub-samples independently, and the final result is the noised median — close to the true answer but safe against membership inference.
+3. PAC intercepts every aggregate query, hashes each privacy unit's key into a 64-bit value, and uses the bits to create 64 sub-samples (possible worlds). Each aggregate runs on all sub-samples independently, and the final result is taken from one secret world but  noised using the variance over all possible worlds — close to the true answer but safe against membership inference. Each query uses a different hash function, and choses a different secret world to return answers from, making such attacks harder.
 
 ### Mutual Information (MI)
 
