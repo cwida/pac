@@ -2,6 +2,8 @@
 
 PAC is a DuckDB extension that automatically privatizes SQL queries using the PAC Privacy framework, protecting against Membership Inference Attacks by adding noise to aggregate query results. Unlike Differential Privacy, PAC works automatically and transparently — no per-query analysis by a privacy specialist is needed.
 
+This works on DuckDB v1.5 and beyond. See https://duckdb.org/install to install. This extension is also distributed in WASM, so you can also just run these examples in https://shell.duckdb.org in a browser. 
+
 ## Install
 
 ```sql
