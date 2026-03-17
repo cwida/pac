@@ -13,7 +13,7 @@ LOAD pac;
 
 ## Example: Protecting Customers and their Purchasing Behavior
 
-In this example we use standard the TPC-H data warehouse benchmark setup. In this warehouse, customers place orders, consisting of lineitems -- which are certain queatities of parts, provided by part suppliers. In this setup, we consider personal customer data sensitive, but also consider their purchase history sensitive. Note that not all aspects of customers get protection under the below scenario: for instance, we consider aggregating customers by market segment (c_mksegment is a non-protected column) non-senstive, nor aggregating by nation or region.
+In this example we use standard the TPC-H data warehouse benchmark setup. In this warehouse, customers place orders, consisting of lineitems -- which are certain quantities of parts, provided by part suppliers. In this setup, we consider personal customer data sensitive, but also consider their purchase history sensitive. Note that not all aspects of customers get protection under the below scenario: for instance, we consider aggregating customers by market segment (c_mksegment is a non-protected column) non-senstive, nor aggregating by nation or region.
 
 ```sql
 # generate TPC-H database
