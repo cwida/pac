@@ -150,6 +150,23 @@ SELECT grp, SUM(val) AS total_val FROM diff_data GROUP BY grp ORDER BY grp
 statement ok
 SET pac_diffcols = NULL
 
+# ========== Test 7: ORDER BY DESC is preserved in diff output ==========
+statement ok
+SET pac_noise = true
+
+statement ok
+SET pac_diffcols = 'true'
+
+query II
+SELECT grp, SUM(val) AS total_val FROM diff_data GROUP BY grp ORDER BY grp DESC
+----
+3	12
+2	12
+1	12
+
+statement ok
+SET pac_diffcols = NULL
+
 # ========== Cleanup ==========
 statement ok
 SET pac_diffcols = NULL
