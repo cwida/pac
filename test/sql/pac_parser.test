@@ -225,6 +225,31 @@ PRAGMA clear_pac_metadata;
 # Edge Case Tests: Validation and Error Handling
 # ============================================================================
 
+# Test 12b: CREATE PU TABLE that already exists should give a clean error (not INTERNAL Error)
+statement ok
+CREATE PU TABLE duplicate_test (
+    id INTEGER,
+    value INTEGER,
+    PAC_KEY (id),
+    PROTECTED (value)
+);
+
+statement error
+CREATE PU TABLE duplicate_test (
+    id INTEGER,
+    value INTEGER,
+    PAC_KEY (id),
+    PROTECTED (value)
+);
+----
+Table with name "duplicate_test" already exists
+
+statement ok
+DROP TABLE IF EXISTS duplicate_test;
+
+statement ok
+PRAGMA clear_pac_metadata;
+
 # Test 13: ALTER TABLE on non-existent table should fail
 statement ok
 CREATE TABLE test_table (id INTEGER, name VARCHAR);

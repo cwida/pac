@@ -161,7 +161,7 @@ static unique_ptr<FunctionData> PACDDLBindFunction(ClientContext &context, Table
 		Connection conn(db);
 		auto result = conn.Query(sql_to_execute);
 		if (result->HasError()) {
-			throw ParserException("Failed to execute DDL: " + result->GetError());
+			throw CatalogException("Failed to execute DDL: " + result->GetError());
 		}
 	}
 
