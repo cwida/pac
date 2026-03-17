@@ -59,7 +59,7 @@ The noised result is close to the real answer but perturbed — an attacker cann
 PAC propagates privacy through join chains via `PAC_LINK`:
 
 ```sql
-# generate TPC database
+# generate TPC-H database
 INSTALL tpch;
 LOAD tpch;
 call dbgen(sf=1);
@@ -112,7 +112,7 @@ EXPLAIN SELECT l_returnflag, l_linestatus, SUM(l_extendedprice) FROM lineitem GR
 ┌─────────────┴─────────────┐┌─────────────┴─────────────┐
 │          SEQ_SCAN         ││         PROJECTION        │
 │    ────────────────────   ││    ────────────────────   │
-│    memory.main.lineitem   ││  pac_pu=pac_hash(hash#0)) │
+│    memory.main.lineitem   ││ pac_pu=pac_hash(hash(#1)) │
 │        l_returnflag       ││             #0            │
 │        l_linestatus       ││                           │
 │      l_extendedprice      ││                           │
