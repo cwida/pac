@@ -179,42 +179,6 @@ utility=0.510000 recall=1.000000 precision=1.000000 (=4 -0 +0)
 
 PAC bounds the mutual information (MI) between the query output and whether any specific individual is in the database. The `pac_mi` parameter sets this bound: at the default `pac_mi = 0.0`, an attacker observing PAC query results gains zero additional information about any individual's presence. Higher values relax the bound, allowing less noise (more accurate results) at the cost of more information leakage.
 
-## SQL Reference
-
-### Defining Privacy Units
-
-```sql
--- Create a new PU table with PAC_KEY and optional PROTECTED columns
-CREATE PU TABLE t (col1 INT, col2 INT, PAC_KEY (col1), PROTECTED (col2));
-
--- Or convert an existing table to PU
-ALTER TABLE t ADD PAC_KEY (col1);       -- PAC_KEY on non-PU table (prep for SET PU)
-ALTER TABLE t SET PU;                   -- mark as PU (requires PAC_KEY)
-ALTER TABLE t UNSET PU;                 -- remove PU status
-
--- Add metadata to non-PU tables (use ALTER TABLE)
-ALTER TABLE orders ADD PAC_LINK (fk_col) REFERENCES t(col1);
-ALTER TABLE orders ADD PROTECTED (col2);
-
--- Add metadata to PU tables (use ALTER PU TABLE)
-ALTER PU TABLE t ADD PROTECTED (col2);
-```
-
-`PAC_KEY` identifies the privacy unit (composite keys supported). `PAC_LINK` declares a join path for privacy propagation. `PROTECTED` restricts columns to aggregate-only access — if omitted on a PU table, all columns are protected. Use `ALTER PU TABLE` for PU tables and `ALTER TABLE` for non-PU tables.
-
-### Supported Aggregates and Operators
-
-PAC rewrites standard aggregates: `SUM`, `COUNT`, `AVG`, `MIN`, `MAX`, and `COUNT(DISTINCT)`. Joins, subqueries (correlated and uncorrelated), `UNION`/`UNION ALL`, `GROUP BY`, `HAVING`, `ORDER BY`, and `LIMIT` all work. Window functions and set operations like `EXCEPT`/`INTERSECT` are not yet supported.
-
-### Settings
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `pac_mi` | `1/128` | Mutual information bound (higher = less noise) |
-| `pac_seed` | random | Fix seed for reproducible results |
-| `pac_noise` | `true` | Toggle noise injection |
-| `pac_diffcols` | `NULL` | [Utility diff](docs/pac/utility.md): compare noised vs exact results |
-
 ## Documentation
 
 For implementation details, see the [docs/](docs/) folder:
