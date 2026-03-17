@@ -2,19 +2,16 @@
 
 PAC is a DuckDB extension that automatically privatizes SQL queries using the PAC Privacy framework, protecting against Membership Inference Attacks by adding noise to aggregate query results. Unlike Differential Privacy, PAC works automatically and transparently — no per-query analysis by a privacy specialist is needed.
 
-## Build
+## Install
 
-```bash
-git clone --recurse-submodules https://github.com/cwida/pac.git
-cd pac
-GEN=ninja make
+```sql
+INSTALL 'pac';
+LOAD 'pac';        
 ```
 
 ## Example: Protecting Employee Salaries
 
 ```sql
--- Load the extension
-LOAD 'build/release/extension/pac/pac.duckdb_extension';
 SET pac_seed = 5;
 
 -- Create a privacy unit table: employees are the entities we protect
