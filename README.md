@@ -11,52 +11,7 @@ INSTALL pac FROM COMMUNITY;
 LOAD pac;        
 ```
 
-## Example: Protecting Employee Salaries
-
-```sql
-SET pac_seed = 5;
-
--- Create a privacy unit table: employees are the entities we protect
-CREATE PU TABLE employees (
-    id INTEGER,
-    department VARCHAR,
-    salary DECIMAL(10,2),
-    PAC_KEY (id),            -- identifies each privacy unit
-    PROTECTED (salary)       -- salary requires aggregation, cannot be projected
-);
-
-INSERT INTO employees VALUES
-    (1, 'Engineering', 95000),  (2, 'Engineering', 110000),
-    (3, 'Engineering', 105000), (4, 'Engineering', 98000),
-    (5, 'Sales', 80000),        (6, 'Sales', 72000),
-    (7, 'Sales', 78000),        (8, 'Sales', 85000),
-    (9, 'Marketing', 85000),    (10, 'Marketing', 90000),
-    (11, 'Marketing', 82000),   (12, 'Marketing', 88000);
-
--- This works: non-protected columns can be freely queried
-SELECT department FROM employees;
-
--- This is blocked: protected columns cannot be projected
-SELECT salary FROM employees;
--- Error: protected column 'employees.salary' can only be accessed inside
--- aggregate functions (e.g., SUM, COUNT, AVG, MIN, MAX)
-
--- This works: aggregate queries on protected columns get automatic noise
-SELECT department, AVG(salary)::INTEGER AS avg_salary, COUNT(*) AS count
-FROM employees
-GROUP BY department;
-┌─────────────┬────────────┬───────┐
-│ department  │ avg_salary │ count │
-├─────────────┼────────────┼───────┤
-│ Engineering │     102000 │     2 │
-│ Marketing   │      86250 │     3 │
-│ Sales       │      78333 │     1 │
-└─────────────┴────────────┴───────┘
-```
-
-The noised result is close to the real answer but perturbed — an attacker cannot determine whether any specific employee is in the database. 
-
-## Multi-Table Example: Protecting Customers and their Purchasing Behavior
+## Example: Protecting Customers and their Purchasing Behavior
 
 PAC propagates privacy through join chains via `PAC_LINK`:
 
@@ -85,6 +40,11 @@ ALTER TABLE lineitem ADD PAC_LINK (l_orderkey) REFERENCES orders(o_orderkey);
 ALTER TABLE orders ADD PROTECTED (o_comment);
 ALTER TABLE lineitem ADD PROTECTED (l_comment);
 
+-- protected columns cannot be returned
+SELECT c_name FROM employees;
+-- Error: protected column 'customer.c_name' can only be accessed inside
+-- aggregate functions (e.g., SUM, COUNT, AVG, MIN, MAX)
+
 SELECT l_returnflag, l_linestatus, SUM(l_extendedprice) FROM lineitem GROUP BY ALL;
 ┌──────────────┬──────────────┬──────────────────────┐
 │ l_returnflag │ l_linestatus │ sum(l_extendedprice) │
@@ -95,6 +55,8 @@ SELECT l_returnflag, l_linestatus, SUM(l_extendedprice) FROM lineitem GROUP BY A
 │ N            │ O            │      116295729152.00 │
 │ R            │ F            │       57318996705.28 │
 └──────────────┴──────────────┴──────────────────────┘
+
+The noised result is close to the real answer but perturbed — an attacker cannot determine whether any specific employee is in the database. 
 
 -- PAC automatically follows the chain: lineitem -> orders -> o_custkey (fetch PU key)
 EXPLAIN SELECT l_returnflag, l_linestatus, SUM(l_extendedprice) FROM lineitem GROUP BY ALL;
