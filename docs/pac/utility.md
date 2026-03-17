@@ -20,11 +20,21 @@ When `pac_diffcols` is set, PAC performs a **utility comparison** by:
 |--------|-------------|
 | `'N'` | Enable utility diff with `N` key columns for matching |
 | `'N:/path/to/file.csv'` | Enable utility diff and append results to CSV file |
+| `'true'` | Enable utility diff with auto-detected key columns |
+| `'/path/to/file.csv'` | Auto-detect key columns and append results to CSV file |
 | `NULL` | Disable utility diff (default) |
+
+The number of key columns can be omitted to enable auto-detection. When auto-detecting, PAC infers the key column count from the number of GROUP BY columns in the query. Ungrouped (scalar) aggregates default to positional matching.
 
 **Examples:**
 
 ```sql
+-- Auto-detect key columns from GROUP BY
+SET pac_diffcols = 'true';
+
+-- Auto-detect with CSV output
+SET pac_diffcols = '/tmp/utility_results.csv';
+
 -- Positional matching (no key columns) - use for ungrouped queries
 SET pac_diffcols = '0';
 

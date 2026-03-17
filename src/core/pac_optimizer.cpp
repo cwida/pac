@@ -213,14 +213,21 @@ void PACRewriteRule::PACPreOptimizeFunction(OptimizerExtensionInput &input, uniq
 		Value val;
 		if (input.context.TryGetCurrentSetting("pac_diffcols", val) && !val.IsNull()) {
 			string val_str = val.ToString();
-			auto colon = val_str.find(':');
-			num_diffcols = static_cast<idx_t>(std::stoi(val_str.substr(0, colon)));
-			if (colon != string::npos) {
-				diff_output_path = val_str.substr(colon + 1);
+			if (!val_str.empty()) {
+				if (std::isdigit(val_str[0])) {
+					auto colon = val_str.find(':');
+					num_diffcols = static_cast<idx_t>(std::stoi(val_str.substr(0, colon)));
+					if (colon != string::npos) {
+						diff_output_path = val_str.substr(colon + 1);
+					}
+				} else {
+					num_diffcols = DConstants::INVALID_INDEX;
+					diff_output_path = (val_str[0] == ':') ? val_str.substr(1) : val_str;
+				}
+				do_diff = true;
+				LogicalOperatorDeepCopy copier(input.optimizer.binder, nullptr);
+				ref_plan = copier.DeepCopy(target_plan);
 			}
-			do_diff = true;
-			LogicalOperatorDeepCopy copier(input.optimizer.binder, nullptr);
-			ref_plan = copier.DeepCopy(target_plan);
 		}
 	}
 

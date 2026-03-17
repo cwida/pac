@@ -27,6 +27,7 @@
 #include "duckdb/planner/expression/bound_operator_expression.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/expression/bound_window_expression.hpp"
+#include "duckdb/planner/operator/logical_aggregate.hpp"
 #include "duckdb/common/types.hpp"
 
 namespace duckdb {
@@ -98,16 +99,38 @@ static vector<string> ExtractColumnNames(LogicalOperator *node) {
 	return names;
 }
 
+// Walk the plan to find the topmost LogicalAggregate and return its group count.
+static idx_t DetectNumKeyCols(LogicalOperator *node, idx_t num_output_cols) {
+	while (node) {
+		switch (node->type) {
+		case LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY: {
+			auto &agg = node->Cast<LogicalAggregate>();
+			idx_t n = agg.groups.size();
+			return (n >= num_output_cols) ? 0 : n;
+		}
+		case LogicalOperatorType::LOGICAL_PROJECTION:
+		case LogicalOperatorType::LOGICAL_ORDER_BY:
+		case LogicalOperatorType::LOGICAL_LIMIT:
+		case LogicalOperatorType::LOGICAL_TOP_N:
+		case LogicalOperatorType::LOGICAL_FILTER:
+			if (!node->children.empty()) {
+				node = node->children[0].get();
+				continue;
+			}
+			return 0;
+		default:
+			return 0;
+		}
+	}
+	return 0;
+}
+
 // ---------------------------------------------------------------------------
 // Main entry point
 // ---------------------------------------------------------------------------
 
 void ApplyUtilityDiff(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
                       unique_ptr<LogicalOperator> ref_plan, idx_t num_key_cols, const string &output_path) {
-#if PAC_DEBUG
-	PAC_DEBUG_PRINT("ApplyUtilityDiff: num_key_cols=" + std::to_string(num_key_cols));
-#endif
-
 	plan->ResolveOperatorTypes();
 	ref_plan->ResolveOperatorTypes();
 
@@ -125,6 +148,16 @@ void ApplyUtilityDiff(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 	}
 
 	idx_t num_cols = col_types.size();
+
+	// Auto-detect from plan if sentinel was passed
+	if (num_key_cols == DConstants::INVALID_INDEX) {
+		num_key_cols = DetectNumKeyCols(ref_plan.get(), num_cols);
+	}
+
+#if PAC_DEBUG
+	PAC_DEBUG_PRINT("ApplyUtilityDiff: num_key_cols=" + std::to_string(num_key_cols));
+#endif
+
 	if (num_key_cols >= num_cols) {
 		throw InvalidInputException("pac_diffcols: num_key_cols (" + std::to_string(num_key_cols) +
 		                            ") must be less than number of columns (" + std::to_string(num_cols) +
