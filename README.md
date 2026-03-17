@@ -83,6 +83,7 @@ ALTER TABLE lineitem ADD PAC_LINK (l_orderkey) REFERENCES orders(o_orderkey);
 ALTER TABLE orders ADD PROTECTED (o_comment);
 ALTER TABLE lineitem ADD PROTECTED (l_comment);
 
+SELECT l_returnflag, l_linestatus, SUM(l_extendedprice) FROM lineitem GROUP BY ALL;
 ┌──────────────┬──────────────┬──────────────────────┐
 │ l_returnflag │ l_linestatus │ sum(l_extendedprice) │
 │   varchar    │   varchar    │    decimal(38,2)     │
