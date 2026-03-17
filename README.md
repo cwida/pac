@@ -54,42 +54,119 @@ GROUP BY department;
 
 The noised result is close to the real answer but perturbed — an attacker cannot determine whether any specific employee is in the database. 
 
-## Multi-Table Example: Protecting Customer Orders
+## Multi-Table Example: Protecting Customers and their Purchasing Behavior
 
 PAC propagates privacy through join chains via `PAC_LINK`:
 
 ```sql
--- The privacy unit: customers
-CREATE PU TABLE customers (
-    id INTEGER,
-    name VARCHAR,
-    PAC_KEY (id),
-    PROTECTED (name)
-);
+# generate TPC database
+INSTALL tpch;
+LOAD tpch;
+call dbgen(sf=1);
 
--- Orders are linked to customers — queries on orders get noised too
-CREATE TABLE orders (
-    order_id INTEGER,
-    customer_id INTEGER,
-    amount DECIMAL(10,2),
-    PAC_LINK (customer_id) REFERENCES customers(id)
-);
+-- Mark customer as the privacy unit, after it was created by dbgen
+ALTER TABLE customer ADD PAC_KEY (c_custkey);
+ALTER TABLE customer SET PU;
 
--- Lineitem links through orders (deep chain)
-CREATE TABLE lineitem (
-    item_id INTEGER,
-    order_id INTEGER,
-    price DECIMAL(10,2),
-    PAC_LINK (order_id) REFERENCES orders(order_id)
-);
+-- Protected columns in customer table
+ALTER PU TABLE customer ADD PROTECTED (c_custkey);
+ALTER PU TABLE customer ADD PROTECTED (c_comment);
+ALTER PU TABLE customer ADD PROTECTED (c_acctbal);
+ALTER PU TABLE customer ADD PROTECTED (c_name);
+ALTER PU TABLE customer ADD PROTECTED (c_address);
 
--- PAC automatically follows the chain: lineitem -> orders -> customers
-SELECT SUM(price) FROM lineitem;
-┌───────────────┐
-│  sum(price)   │
-├───────────────┤
-│       1388.79 │
-└───────────────┘
+-- Orders -> Customer and Lineitem->Orders links
+ALTER TABLE orders ADD PAC_LINK (o_custkey) REFERENCES customer(c_custkey);
+ALTER TABLE lineitem ADD PAC_LINK (l_orderkey) REFERENCES orders(o_orderkey);
+
+-- Protect the comment columns, as they may include customer-specific notes
+ALTER TABLE orders ADD PROTECTED (o_comment);
+ALTER TABLE lineitem ADD PROTECTED (l_comment);
+
+┌──────────────┬──────────────┬──────────────────────┐
+│ l_returnflag │ l_linestatus │ sum(l_extendedprice) │
+│   varchar    │   varchar    │    decimal(38,2)     │
+├──────────────┼──────────────┼──────────────────────┤
+│ A            │ F            │       57278925373.44 │
+│ N            │ F            │        1515625185.28 │
+│ N            │ O            │      116295729152.00 │
+│ R            │ F            │       57318996705.28 │
+└──────────────┴──────────────┴──────────────────────┘
+
+-- PAC automatically follows the chain: lineitem -> orders -> o_custkey (fetch PU key)
+EXPLAIN SELECT l_returnflag, l_linestatus, SUM(l_extendedprice) FROM lineitem GROUP BY ALL;
+┌───────────────────────────┐
+│   PERFECT_HASH_GROUP_BY   │
+│    ────────────────────   │
+│      Groups: #0 #1        │
+│        Aggregates:        │
+│   pac_noised_sum(#2, #3)  │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         HASH_JOIN         │
+│    ────────────────────   │
+│      Join Type: INNER     │
+│    Conditions: #3 = #0    ├──────────────┐
+│      ~6,036,047 rows      │              │
+└─────────────┬─────────────┘              │
+┌─────────────┴─────────────┐┌─────────────┴─────────────┐
+│          SEQ_SCAN         ││         PROJECTION        │
+│    ────────────────────   ││    ────────────────────   │
+│    memory.main.lineitem   ││  pac_pu=pac_hash(hash#0)) │
+│        l_returnflag       ││             #0            │
+│        l_linestatus       ││                           │
+│      l_extendedprice      ││                           │
+│         l_orderkey        ││                           │
+│      ~6,001,215 rows      ││      ~1,500,000 rows      │
+└───────────────────────────┘└─────────────┬─────────────┘
+                             ┌─────────────┴─────────────┐
+                             │          SEQ_SCAN         │
+                             │    ────────────────────   │
+                             │     memory.main.orders    │
+                             │         o_orderkey        │
+                             │         o_custkey         │
+                             │      ~1,500,000 rows      │
+                             └───────────────────────────┘
+
+-- every time the result is noised a bit differently (the database is resampled)
+SELECT l_returnflag, l_linestatus, SUM(l_extendedprice) FROM lineitem GROUP BY ALL;
+┌──────────────┬──────────────┬──────────────────────┐
+│ l_returnflag │ l_linestatus │ sum(l_extendedprice) │
+│   varchar    │   varchar    │    decimal(38,2)     │
+├──────────────┼──────────────┼──────────────────────┤
+│ A            │ F            │       58988885442.56 │
+│ N            │ F            │        1613206650.88 │
+│ N            │ O            │      119904634142.72 │
+│ R            │ F            │       58803811778.56 │
+└──────────────┴──────────────┴──────────────────────┘
+
+-- the unnoised correct answer:
+set pac_noise = false;
+SELECT l_returnflag, l_linestatus, SUM(l_extendedprice) FROM lineitem GROUP BY ALL;
+┌──────────────┬──────────────┬──────────────────────┐
+│ l_returnflag │ l_linestatus │ sum(l_extendedprice) │
+│   varchar    │   varchar    │    decimal(38,2)     │
+├──────────────┼──────────────┼──────────────────────┤
+│ A            │ F            │       56586554400.73 │
+│ N            │ F            │        1487504710.38 │
+│ N            │ O            │      114935210409.19 │
+│ R            │ F            │       56568041380.90 │
+└──────────────┴──────────────┴──────────────────────┘
+
+-- measure utility (MAPE, recall, precision)
+set pac_noise = true;
+set pac_diffcols = 2; -- two key columns l_returnflag, l_linestatus,
+SELECT l_returnflag, l_linestatus, SUM(l_extendedprice) FROM lineitem GROUP BY ALL;
+utility=0.510000 recall=1.000000 precision=1.000000 (=4 -0 +0)
+┌──────────────┬──────────────┬──────────────────────┐
+│ l_returnflag │ l_linestatus │ sum(l_extendedprice) │
+│   varchar    │   varchar    │    decimal(38,2)     │
+├──────────────┼──────────────┼──────────────────────┤
+│ A            │ F            │                 0.56 │
+│ N            │ F            │                 0.13 │
+│ N            │ O            │                 0.58 │
+│ R            │ F            │                 0.77 │
+└──────────────┴──────────────┴──────────────────────┘
 ```
 
 ## How It Works
