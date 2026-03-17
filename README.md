@@ -148,7 +148,19 @@ For implementation details, see the [docs/](docs/) folder:
 
 ## Literature
 
-> TODO: Add paper reference and BibTeX citation.
+I. Battiston, D. Yuan, X. Zhu, P. Boncz. [SIMD-PAC-DB: Pretty Performant PAC Privacy](https://arxiv.org/abs/2603.15023). 2026. 
+
+```bibtex
+@misc{battiston2026simdpacdbprettyperformantpac,
+      title={SIMD-PAC-DB: Pretty Performant PAC Privacy},
+      author={Ilaria Battiston and Dandan Yuan and Xiaochen Zhu and Peter Boncz},
+      year={2026},
+      eprint={2603.15023},
+      archivePrefix={arXiv},
+      primaryClass={cs.DB},
+      url={https://arxiv.org/abs/2603.15023},
+}
+```
 
 ## Maintainer
 
