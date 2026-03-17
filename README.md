@@ -5,8 +5,8 @@ PAC is a DuckDB extension that automatically privatizes SQL queries using the PA
 ## Install
 
 ```sql
-INSTALL 'pac';
-LOAD 'pac';        
+INSTALL pac FROM COMMUNITY;
+LOAD pac;        
 ```
 
 ## Example: Protecting Employee Salaries
