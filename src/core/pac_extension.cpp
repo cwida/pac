@@ -170,7 +170,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	OptimizerExtension::Register(db.config, std::move(pac_topk_rule));
 
 	// Register pac_avg rewrite rule (post-optimizer: decomposes pac_noised_avg/pac_avg into sum/count + division).
-	// Runs as a separate optimizer so it works for both compiler-generated and user-written pac_avg() SQL.
+	// This post-optimizer handles user-written pac_avg() in SQL. Compiler-generated pac_noised_avg is already
+	// decomposed during the pre-optimizer phase (in CompilePacBitsliceQuery) so this is a no-op for those.
 	{
 		OptimizerExtension pac_avg_rule;
 		pac_avg_rule.optimize_function = RewritePacAvgToDiv;

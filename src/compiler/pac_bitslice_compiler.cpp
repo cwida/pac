@@ -23,6 +23,7 @@
 #include "query_processing/pac_subquery_handler.hpp"
 #include "compiler/pac_bitslice_add_fkjoins.hpp"
 #include "categorical/pac_categorical_rewriter.hpp"
+#include "query_processing/pac_avg_rewriter.hpp"
 #include "parser/pac_parser.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/planner/operator/logical_aggregate.hpp"
@@ -850,6 +851,17 @@ void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExten
 	if (GetBooleanSetting(input.context, "pac_categorical", true)) {
 		RewriteCategoricalQuery(input, plan, pac_agg_info);
 	}
+
+	// Decompose pac_noised_avg / pac_avg into sum/count + division NOW, in the
+	// pre-optimizer phase.  This must happen before DuckDB's built-in optimizers
+	// (COLUMN_LIFETIME, COMPRESSED_MATERIALIZATION, etc.) run, because those
+	// optimizers may insert thin projections that only pass through columns
+	// currently referenced.  If we defer decomposition to the post-optimizer
+	// (RewritePacAvgToDiv), the newly-appended count column won't be visible
+	// through those thin projections, causing "Failed to bind column reference"
+	// errors.  The post-optimizer still handles user-written pac_avg() in SQL.
+	RewritePacAvgToDiv(input, plan);
+
 #if PAC_DEBUG
 	PAC_DEBUG_PRINT("=== PAC-OPTIMIZED PLAN ===");
 	plan->Print();
