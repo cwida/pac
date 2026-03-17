@@ -28,6 +28,8 @@
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/expression/bound_window_expression.hpp"
 #include "duckdb/planner/operator/logical_aggregate.hpp"
+#include "duckdb/planner/operator/logical_order.hpp"
+#include "duckdb/planner/bound_result_modifier.hpp"
 #include "duckdb/common/types.hpp"
 
 namespace duckdb {
@@ -138,6 +140,33 @@ void ApplyUtilityDiff(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 	auto pac_bindings = plan->GetColumnBindings();
 	auto ref_bindings = ref_plan->GetColumnBindings();
 	auto col_types = plan->types; // copy — plan will be moved
+
+	// Extract ORDER BY from the ref plan (before it gets moved into the join)
+	vector<BoundOrderByNode> saved_orders;
+	{
+		auto *node = ref_plan.get();
+		while (node &&
+		       (node->type == LogicalOperatorType::LOGICAL_LIMIT || node->type == LogicalOperatorType::LOGICAL_TOP_N)) {
+			node = node->children.empty() ? nullptr : node->children[0].get();
+		}
+		if (node && node->type == LogicalOperatorType::LOGICAL_ORDER_BY) {
+			auto &order_op = node->Cast<LogicalOrder>();
+			auto child_bindings = node->children[0]->GetColumnBindings();
+			for (auto &o : order_op.orders) {
+				if (o.expression->type == ExpressionType::BOUND_COLUMN_REF) {
+					auto &ref = o.expression->Cast<BoundColumnRefExpression>();
+					for (idx_t i = 0; i < child_bindings.size(); i++) {
+						if (child_bindings[i] == ref.binding) {
+							saved_orders.emplace_back(
+							    o.type, o.null_order,
+							    make_uniq<BoundColumnRefExpression>(ref.return_type, ColumnBinding(0, i)));
+							break;
+						}
+					}
+				}
+			}
+		}
+	}
 
 	// Extract column names by reading (not modifying) the projection inside the plan
 	auto col_names = ExtractColumnNames(plan.get());
@@ -403,6 +432,19 @@ void ApplyUtilityDiff(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 	idx_t diff_proj_idx = binder.GenerateTableIndex();
 	plan = make_uniq<LogicalProjection>(diff_proj_idx, std::move(new_expressions));
 	plan->children.push_back(std::move(join));
+
+	// ---- Step 4b: Re-apply ORDER BY if the original query had one ----
+	if (!saved_orders.empty()) {
+		for (auto &o : saved_orders) {
+			auto &ref = o.expression->Cast<BoundColumnRefExpression>();
+			idx_t col_idx = ref.binding.column_index;
+			ref.binding = ColumnBinding(diff_proj_idx, col_idx);
+			ref.return_type = col_types[col_idx];
+		}
+		auto order = make_uniq<LogicalOrder>(std::move(saved_orders));
+		order->children.push_back(std::move(plan));
+		plan = std::move(order);
+	}
 
 	// ---- Step 5: Wrap in utility summary operator ----
 	auto summary = make_uniq<LogicalPacUtilitySummary>(num_key_cols, output_path);
