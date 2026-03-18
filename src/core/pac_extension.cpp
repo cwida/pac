@@ -178,6 +178,12 @@ static void LoadInternal(ExtensionLoader &loader) {
 		OptimizerExtension::Register(db.config, std::move(pac_avg_rule));
 	}
 
+	// Register derived_pu read rule (post-optimizer: inject pac_finalize for SELECT on derived_pu tables)
+	{
+		auto pac_derived_read_rule = PACDerivedReadRule();
+		OptimizerExtension::Register(db.config, std::move(pac_derived_read_rule));
+	}
+
 	// Add option to enable/disable PAC noise application (this is useful for testing, since noise affects result
 	// determinism)
 	// ---- User-facing settings ----
@@ -270,6 +276,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	// Register pac_mean scalar function (used by top-k pushdown for ordering)
 	RegisterPacMeanFunction(loader);
+
+	// Register pac_finalize scalar function (LIST<DOUBLE> -> DOUBLE, read-time noise for derived tables)
+	RegisterPacFinalizeFunction(loader);
 
 	// Register pac_hash scalar function (UBIGINT -> UBIGINT with exactly 32 bits set)
 	RegisterPacHashFunction(loader);

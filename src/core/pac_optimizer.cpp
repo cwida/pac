@@ -14,6 +14,8 @@
 #include "parser/pac_parser.hpp"
 // Include utility diff
 #include "diff/pac_utility_diff.hpp"
+// Include derived_pu rewriter (counter conversion + pac_finalize injection)
+#include "query_processing/pac_derived_rewriter.hpp"
 // Include deep copy for utility diff
 #include "duckdb/planner/logical_operator_deep_copy.hpp"
 #include "duckdb/optimizer/optimizer.hpp"
@@ -23,9 +25,13 @@
 // Include DuckDB headers for CTAS metadata propagation
 #include "duckdb/planner/operator/logical_create_table.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
+#include "duckdb/planner/operator/logical_insert.hpp"
 #include "metadata/pac_metadata_manager.hpp"
 #include "metadata/pac_compatibility_check.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
+#include "duckdb/main/client_context_state.hpp"
+#include "duckdb/main/prepared_statement_data.hpp"
+#include "duckdb/execution/physical_plan_generator.hpp"
 
 #include <stack>
 
@@ -215,7 +221,7 @@ static void PropagateCTASMetadata(unique_ptr<LogicalOperator> &outer_plan, uniqu
 
 	// Map source PAC_KEY and protected columns to destination names
 	PACTableMetadata prop(new_table);
-	prop.derived_pu = true;
+	prop.derived_pu = has_aggregate;
 
 	for (auto &pk : source_meta->primary_key_columns) {
 		auto it = src_to_dest_name.find(pk);
@@ -258,6 +264,42 @@ static void PropagateCTASMetadata(unique_ptr<LogicalOperator> &outer_plan, uniqu
 }
 
 // ============================================================================
+// PACDerivedTypePatcher — patches statement types after physical planning
+// ============================================================================
+// When the optimizer changes output types (e.g. LIST<FLOAT> → FLOAT via pac_finalize),
+// the statement's result types (set at plan time) become stale. This state patches them
+// in OnFinalizePrepare, which fires after the physical plan is generated.
+struct PACDerivedTypePatcher : public ClientContextState {
+	RebindQueryInfo OnFinalizePrepare(ClientContext &context, PreparedStatementData &prepared,
+	                                  PreparedStatementMode mode) override {
+		Printer::Print("[PAC TYPE PATCHER] OnFinalizePrepare called, stmt_type=" +
+		               std::to_string((int)prepared.statement_type) +
+		               " has_plan=" + std::to_string(prepared.physical_plan != nullptr));
+		if (!prepared.physical_plan) {
+			return RebindQueryInfo::DO_NOT_REBIND;
+		}
+		if (prepared.statement_type != StatementType::SELECT_STATEMENT) {
+			return RebindQueryInfo::DO_NOT_REBIND;
+		}
+		auto &root_types = prepared.physical_plan->Root().GetTypes();
+		Printer::Print("[PAC TYPE PATCHER] OnFinalizePrepare: physical_plan root types:");
+		for (idx_t i = 0; i < root_types.size(); i++) {
+			string match = (i < prepared.types.size() && root_types[i] != prepared.types[i]) ? " MISMATCH" : "";
+			Printer::Print("  [" + std::to_string(i) + "] physical=" + root_types[i].ToString() +
+			               " statement=" + (i < prepared.types.size() ? prepared.types[i].ToString() : "N/A") + match);
+		}
+		if (root_types.size() == prepared.types.size()) {
+			for (idx_t i = 0; i < root_types.size(); i++) {
+				if (root_types[i] != prepared.types[i]) {
+					prepared.types[i] = root_types[i];
+				}
+			}
+		}
+		return RebindQueryInfo::DO_NOT_REBIND;
+	}
+};
+
+// ============================================================================
 // PACRewriteRule - Main PAC query rewriting optimizer rule
 // ============================================================================
 
@@ -282,6 +324,10 @@ void PACRewriteRule::PACPreOptimizeFunction(OptimizerExtensionInput &input, uniq
 	if (!pac_rewrite_enabled) {
 		return;
 	}
+	// Register type patcher to fix stale statement types after optimizer changes output types.
+	// Read path (pac_finalize injection) is handled by PACDerivedReadRule (post-optimizer)
+	// so it runs after DuckDB's built-in projection removal optimizer.
+	input.context.registered_state->GetOrCreate<PACDerivedTypePatcher>("pac_derived_type_patcher");
 	// If the optimizer extension provided a PACOptimizerInfo, and a replan is already in progress,
 	// skip running the PAC checks to avoid re-entrant behavior.
 	PACOptimizerInfo *pac_info = nullptr;
@@ -461,12 +507,72 @@ void PACRewriteRule::PACPreOptimizeFunction(OptimizerExtensionInput &input, uniq
 			// set replan flag for duration of compilation
 			ReplanGuard scoped2(pac_info);
 			CompilePacBitsliceQuery(check, input, target_plan, privacy_units, normalized, query_hash);
+
+			// For DML targeting derived_pu tables: convert pac_noised_* → pac_* counter variants
+			// so the table stores raw 64-element counter lists instead of noised scalars.
+			// Check the DML TARGET table (not source tables) for derived_pu.
+			// PropagateCTASMetadata already ran (line 276) and set derived_pu on the target.
+			if (is_dml_wrapper) {
+				string target_table;
+				if (outer_plan->type == LogicalOperatorType::LOGICAL_CREATE_TABLE) {
+					auto &create = outer_plan->Cast<LogicalCreateTable>();
+					target_table = create.info->Base().table;
+				} else if (outer_plan->type == LogicalOperatorType::LOGICAL_INSERT) {
+					auto &insert = outer_plan->Cast<LogicalInsert>();
+					target_table = insert.table.name;
+				}
+				if (!target_table.empty()) {
+					auto &mgr = PACMetadataManager::Get();
+					auto *meta = mgr.GetTableMetadata(target_table);
+					if (meta && meta->derived_pu) {
+						ConvertDerivedPuToCounters(input, target_plan);
+						Printer::Print("[PAC DERIVED WRITE] === PLAN AFTER counter conversion ===");
+						target_plan->Print();
+						// Update CTAS column types to match the counter-converted plan output
+						if (outer_plan->type == LogicalOperatorType::LOGICAL_CREATE_TABLE) {
+							target_plan->ResolveOperatorTypes();
+							auto &create = outer_plan->Cast<LogicalCreateTable>();
+							auto &columns = create.info->Base().columns;
+							auto &plan_types = target_plan->types;
+							Printer::Print("[PAC DERIVED] Updating CTAS column types: plan_types=" +
+							               std::to_string(plan_types.size()) + " cols=" +
+							               std::to_string(columns.LogicalColumnCount()));
+							for (idx_t i = 0; i < plan_types.size() && i < columns.LogicalColumnCount(); i++) {
+								auto &col = columns.GetColumnMutable(LogicalIndex(i));
+								Printer::Print("  col " + std::to_string(i) + " '" + col.Name() +
+								               "': " + col.Type().ToString() + " -> " +
+								               plan_types[i].ToString());
+								if (col.Type() != plan_types[i]) {
+									col.SetType(plan_types[i]);
+								}
+							}
+						}
+					}
+				}
+			}
 		}
 	}
 
 	if (do_diff) {
 		ApplyUtilityDiff(input, target_plan, std::move(ref_plan), num_diffcols, diff_output_path);
 	}
+}
+
+// ============================================================================
+// PACDerivedReadRule — post-optimizer (placeholder)
+// ============================================================================
+// Runs AFTER DuckDB's built-in optimizers (which may remove trivial projections).
+// Wraps LIST<FLOAT> column refs from derived_pu tables with pac_finalize().
+void PACDerivedReadRule::PACDerivedReadFunction(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan) {
+	bool pac_rewrite_enabled = GetBooleanSetting(input.context, "pac_rewrite", true);
+	if (!pac_rewrite_enabled) {
+		return;
+	}
+	Printer::Print("[PAC POST-OPT] === PLAN BEFORE pac_finalize injection ===");
+	plan->Print();
+	InjectPacFinalizeForDerivedPu(input, plan);
+	Printer::Print("[PAC POST-OPT] === PLAN AFTER pac_finalize injection ===");
+	plan->Print();
 }
 
 } // namespace duckdb
