@@ -309,7 +309,8 @@ void RegisterPacMinFunctions(ExtensionLoader &loader) {
 	CreateAggregateFunctionInfo info(fcn_set);
 	FunctionDescription desc;
 	desc.description = "Privacy-preserving MIN. Automatically injected by PAC for protected columns.";
-	desc.examples = {"SELECT MIN(salary) FROM employees; -- automatically noised when salary is PROTECTED"};
+	desc.examples = {"SELECT c_mktsegment, pac_noised_min(pac_hash(hash(c_custkey)), c_acctbal) FROM customer GROUP BY "
+	                 "c_mktsegment"};
 	info.descriptions.push_back(std::move(desc));
 	loader.RegisterFunction(std::move(info));
 }
@@ -328,7 +329,8 @@ void RegisterPacMaxFunctions(ExtensionLoader &loader) {
 	CreateAggregateFunctionInfo info(fcn_set);
 	FunctionDescription desc;
 	desc.description = "Privacy-preserving MAX. Automatically injected by PAC for protected columns.";
-	desc.examples = {"SELECT MAX(salary) FROM employees; -- automatically noised when salary is PROTECTED"};
+	desc.examples = {"SELECT c_mktsegment, pac_noised_max(pac_hash(hash(c_custkey)), c_acctbal) FROM customer GROUP BY "
+	                 "c_mktsegment"};
 	info.descriptions.push_back(std::move(desc));
 	loader.RegisterFunction(std::move(info));
 }
