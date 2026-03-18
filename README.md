@@ -58,7 +58,9 @@ SELECT l_returnflag, l_linestatus, SUM(l_extendedprice) FROM lineitem GROUP BY A
 
 The noised result is close to the real answer but perturbed — an attacker cannot determine whether any specific employee is in the database. 
 
--- PAC automatically follows the chain: lineitem -> orders -> o_custkey (fetch PU key)
+-- PAC rewrites the query plan automatically
+-- Note that: (1) the GROUP_BY uses a pac_noised_sum(#2, #3), not a standard sum()
+--            (2) while the query only mentions lineitem, pac joins with orders to get c_cuskey (the PU key)
 EXPLAIN SELECT l_returnflag, l_linestatus, SUM(l_extendedprice) FROM lineitem GROUP BY ALL;
 ┌───────────────────────────┐
 │   PERFECT_HASH_GROUP_BY   │
