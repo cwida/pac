@@ -50,26 +50,28 @@ static bool FindDirectPathToSource(LogicalOperator *current, idx_t target_table_
 		}
 	}
 
-	// Stop at nested aggregates - they have their own column scope.
-	// EXCEPTION: if the aggregate's group_index or aggregate_index IS the target,
-	// this aggregate is the source we're looking for (PU-key passthrough: inner agg output).
+	// If this is a nested aggregate, check if it IS the target or if the target is below it.
+	// Nested aggregates don't pass through bindings, but PropagateSingleBinding handles
+	// them by adding the binding as a group column — so we continue the search.
 	if (!is_start && current->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
 		auto &agg = current->Cast<LogicalAggregate>();
 		if (agg.group_index == target_table_index || agg.aggregate_index == target_table_index) {
 			return true;
 		}
-		return false;
+		// Continue searching through the aggregate's children — PropagateSingleBinding
+		// will add the binding as a group column to pass it through.
 	}
 
 	for (idx_t child_idx = 0; child_idx < current->children.size(); child_idx++) {
 		if (FindDirectPathToSource(current->children[child_idx].get(), target_table_index, path, false)) {
-			if (current->type != LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+			// Skip the starting aggregate (it's the target, not an intermediate operator)
+			// but include nested aggregates so PropagateSingleBinding can add group columns.
+			if (!is_start) {
 				path.push_back({current, child_idx});
 			}
 			return true;
 		}
 	}
-
 	return false;
 }
 
@@ -192,6 +194,25 @@ ColumnBinding PropagateSingleBinding(LogicalOperator &plan_root, idx_t source_ta
 			EnsureInProjectionMap(filter.projection_map, current.column_index);
 			filter.ResolveOperatorTypes();
 			// Binding identity preserved through filters
+
+		} else if (op->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+			auto &agg = op->Cast<LogicalAggregate>();
+			// Check if the binding already passes through as a group column
+			bool found_in_groups = false;
+			for (idx_t i = 0; i < agg.groups.size(); i++) {
+				if (agg.groups[i]->type == ExpressionType::BOUND_COLUMN_REF) {
+					auto &col_ref = agg.groups[i]->Cast<BoundColumnRefExpression>();
+					if (col_ref.binding == current) {
+						current = ColumnBinding(agg.group_index, i);
+						found_in_groups = true;
+						break;
+					}
+				}
+			}
+			if (!found_in_groups) {
+				// Aggregate blocks this binding — cannot propagate
+				return invalid;
+			}
 
 		} else {
 			op->ResolveOperatorTypes();

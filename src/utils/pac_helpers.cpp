@@ -17,6 +17,11 @@
 #include "duckdb/planner/operator/logical_recursive_cte.hpp"
 #include "duckdb/planner/operator/logical_expression_get.hpp"
 #include "duckdb/planner/operator/logical_cteref.hpp"
+#include "duckdb/planner/operator/logical_delim_get.hpp"
+#include "duckdb/planner/operator/logical_unnest.hpp"
+#include "duckdb/planner/operator/logical_any_join.hpp"
+#include "duckdb/planner/operator/logical_distinct.hpp"
+#include "duckdb/planner/operator/logical_order.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
@@ -187,6 +192,14 @@ void ApplyIndexMapToSubtree(LogicalOperator *node, const std::unordered_map<idx_
 	} else if (auto cteref_ptr = dynamic_cast<LogicalCTERef *>(node)) {
 		if (map.find(cteref_ptr->table_index) != map.end()) {
 			cteref_ptr->table_index = map.at(cteref_ptr->table_index);
+		}
+	} else if (auto dg_ptr = dynamic_cast<LogicalDelimGet *>(node)) {
+		if (map.find(dg_ptr->table_index) != map.end()) {
+			dg_ptr->table_index = map.at(dg_ptr->table_index);
+		}
+	} else if (auto unnest_ptr = dynamic_cast<LogicalUnnest *>(node)) {
+		if (map.find(unnest_ptr->unnest_index) != map.end()) {
+			unnest_ptr->unnest_index = map.at(unnest_ptr->unnest_index);
 		}
 	}
 
@@ -851,11 +864,35 @@ void RemapBindingsInSubtree(LogicalOperator &op, const std::unordered_map<idx_t,
 		for (auto &g : agg.groups) {
 			remap_expr(g);
 		}
-	} else if (op.type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
-		auto &join = op.Cast<LogicalComparisonJoin>();
-		for (auto &cond : join.conditions) {
+	} else if (op.type == LogicalOperatorType::LOGICAL_ANY_JOIN) {
+		auto &join = op.Cast<LogicalAnyJoin>();
+		remap_expr(join.condition);
+	}
+
+	// LogicalComparisonJoin (and subclasses like DELIM_JOIN): remap conditions + duplicate_eliminated_columns
+	if (auto *cj = dynamic_cast<LogicalComparisonJoin *>(&op)) {
+		for (auto &cond : cj->conditions) {
 			remap_expr(cond.left);
 			remap_expr(cond.right);
+		}
+		for (auto &expr : cj->duplicate_eliminated_columns) {
+			remap_expr(expr);
+		}
+	}
+
+	// LogicalDistinct: remap distinct_targets
+	if (op.type == LogicalOperatorType::LOGICAL_DISTINCT) {
+		auto &distinct = op.Cast<LogicalDistinct>();
+		for (auto &expr : distinct.distinct_targets) {
+			remap_expr(expr);
+		}
+	}
+
+	// LogicalOrder: remap order expressions
+	if (op.type == LogicalOperatorType::LOGICAL_ORDER_BY) {
+		auto &order = op.Cast<LogicalOrder>();
+		for (auto &node : order.orders) {
+			remap_expr(node.expression);
 		}
 	}
 

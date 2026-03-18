@@ -231,19 +231,33 @@ static ColumnBinding PropagateColumnThroughSubtree(LogicalOperator *root, Logica
 		return get_binding;
 	}
 
-	// Walk from bottom (just above GET) to top, adding column through projections
+	// Walk from bottom (just above GET) to top, adding column through projections.
+	// At each non-projection operator, verify the binding is in the operator's output;
+	// if not, the operator blocks propagation (e.g. aggregate, semi-join, distinct).
 	ColumnBinding current = get_binding;
 	for (int i = static_cast<int>(path.size()) - 1; i >= 0; i--) {
 		auto *op = path[i];
 		if (op->type == LogicalOperatorType::LOGICAL_PROJECTION) {
 			auto &proj = op->Cast<LogicalProjection>();
-			// Add a pass-through expression for this column
 			idx_t new_idx = proj.expressions.size();
 			proj.expressions.push_back(make_uniq<BoundColumnRefExpression>(col_type, current));
 			current = ColumnBinding(proj.table_index, new_idx);
 			proj.ResolveOperatorTypes();
+		} else if (op != &get) {
+			// For non-projection operators, check that the binding passes through
+			auto bindings = op->GetColumnBindings();
+			bool found = false;
+			for (auto &b : bindings) {
+				if (b == current) {
+					found = true;
+					break;
+				}
+			}
+			if (!found) {
+				// Binding is not in this operator's output — propagation is impossible
+				return ColumnBinding(DConstants::INVALID_INDEX, 0);
+			}
 		}
-		// FILTER and other operators pass bindings through unchanged
 	}
 	return current;
 }
@@ -325,8 +339,12 @@ static bool ExpandCTEWithColumns(LogicalOperator *plan_root, const LogicalCTERef
 		    get->projection_ids.empty() ? (get->GetColumnIds().size() - 1) : (get->projection_ids.size() - 1);
 		ColumnBinding get_binding(get->table_index, get_output_idx);
 
-		// Propagate through intermediate operators (projections, filters) in the CTE definition
+		// Propagate through intermediate operators (projections, filters) in the CTE definition.
+		// If propagation fails (binding blocked by aggregate, semi-join, etc.), bail out.
 		auto top_binding = PropagateColumnThroughSubtree(mat_cte->children[0].get(), *get, get_binding, col_type);
+		if (top_binding.table_index == DConstants::INVALID_INDEX) {
+			return false;
+		}
 
 		// Update MATERIALIZED_CTE column_count
 		mat_cte->column_count++;
