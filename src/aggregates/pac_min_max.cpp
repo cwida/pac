@@ -1,5 +1,6 @@
 #include "aggregates/pac_min_max.hpp"
 #include "categorical/pac_categorical.hpp"
+#include "duckdb/parser/parsed_data/create_aggregate_function_info.hpp"
 
 namespace duckdb {
 
@@ -305,7 +306,12 @@ void RegisterPacMinFunctions(ExtensionLoader &loader) {
 	                                      LogicalType::ANY, nullptr, nullptr, nullptr, nullptr, nullptr,
 	                                      FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr, PacMinMaxBind<false>));
 
-	loader.RegisterFunction(fcn_set);
+	CreateAggregateFunctionInfo info(fcn_set);
+	FunctionDescription desc;
+	desc.description = "Privacy-preserving MIN. Automatically injected by PAC for protected columns.";
+	desc.examples = {"SELECT MIN(salary) FROM employees; -- automatically noised when salary is PROTECTED"};
+	info.descriptions.push_back(std::move(desc));
+	loader.RegisterFunction(std::move(info));
 }
 
 void RegisterPacMaxFunctions(ExtensionLoader &loader) {
@@ -319,7 +325,12 @@ void RegisterPacMaxFunctions(ExtensionLoader &loader) {
 	    "pac_noised_max", {LogicalType::UBIGINT, LogicalType::ANY, LogicalType::DOUBLE}, LogicalType::ANY, nullptr,
 	    nullptr, nullptr, nullptr, nullptr, FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr, PacMinMaxBind<true>));
 
-	loader.RegisterFunction(fcn_set);
+	CreateAggregateFunctionInfo info(fcn_set);
+	FunctionDescription desc;
+	desc.description = "Privacy-preserving MAX. Automatically injected by PAC for protected columns.";
+	desc.examples = {"SELECT MAX(salary) FROM employees; -- automatically noised when salary is PROTECTED"};
+	info.descriptions.push_back(std::move(desc));
+	loader.RegisterFunction(std::move(info));
 }
 
 void RegisterPacMinCountersFunctions(ExtensionLoader &loader) {
@@ -333,7 +344,11 @@ void RegisterPacMinCountersFunctions(ExtensionLoader &loader) {
 	// Add list aggregate overload (LIST<DOUBLE> → LIST<DOUBLE>) for subquery/categorical contexts
 	AddPacListAggregateOverload(fcn_set, "min");
 
-	loader.RegisterFunction(fcn_set);
+	CreateAggregateFunctionInfo info(fcn_set);
+	FunctionDescription desc;
+	desc.description = "[INTERNAL] Returns 64 PAC subsample counters as LIST for categorical queries.";
+	info.descriptions.push_back(std::move(desc));
+	loader.RegisterFunction(std::move(info));
 }
 
 void RegisterPacMaxCountersFunctions(ExtensionLoader &loader) {
@@ -347,7 +362,11 @@ void RegisterPacMaxCountersFunctions(ExtensionLoader &loader) {
 	// Add list aggregate overload (LIST<DOUBLE> → LIST<DOUBLE>) for subquery/categorical contexts
 	AddPacListAggregateOverload(fcn_set, "max");
 
-	loader.RegisterFunction(fcn_set);
+	CreateAggregateFunctionInfo info(fcn_set);
+	FunctionDescription desc;
+	desc.description = "[INTERNAL] Returns 64 PAC subsample counters as LIST for categorical queries.";
+	info.descriptions.push_back(std::move(desc));
+	loader.RegisterFunction(std::move(info));
 }
 
 // Explicit template instantiations

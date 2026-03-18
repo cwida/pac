@@ -1,6 +1,7 @@
 #include <locale>
 #include "aggregates/pac_count.hpp"
 #include "categorical/pac_categorical.hpp"
+#include "duckdb/parser/parsed_data/create_aggregate_function_info.hpp"
 
 namespace duckdb {
 
@@ -262,7 +263,12 @@ void RegisterPacCountFunctions(ExtensionLoader &loader) {
 	    PacCountStateSize, PacCountInitialize, PacCountColumnScatterUpdate, PacCountCombine, PacCountFinalize,
 	    FunctionNullHandling::SPECIAL_HANDLING, PacCountColumnUpdate, PacCountBind));
 
-	loader.RegisterFunction(fcn_set);
+	CreateAggregateFunctionInfo info(fcn_set);
+	FunctionDescription desc;
+	desc.description = "Privacy-preserving COUNT. Automatically injected by PAC for protected columns.";
+	desc.examples = {"SELECT COUNT(*) FROM employees; -- automatically noised when table has a PAC_KEY"};
+	info.descriptions.push_back(std::move(desc));
+	loader.RegisterFunction(std::move(info));
 }
 
 // ============================================================================
@@ -285,7 +291,11 @@ void RegisterPacCountCountersFunctions(ExtensionLoader &loader) {
 	// Add list aggregate overload (LIST<DOUBLE> → LIST<DOUBLE>) for subquery/categorical contexts
 	AddPacListAggregateOverload(counters_set, "count");
 
-	loader.RegisterFunction(counters_set);
+	CreateAggregateFunctionInfo counters_info(counters_set);
+	FunctionDescription counters_desc;
+	counters_desc.description = "[INTERNAL] Returns 64 PAC subsample counters as LIST for categorical queries.";
+	counters_info.descriptions.push_back(std::move(counters_desc));
+	loader.RegisterFunction(std::move(counters_info));
 }
 
 // ============================================================================
@@ -304,7 +314,12 @@ void RegisterPacAvgFunctions(ExtensionLoader &loader) {
 	    "pac_noised_avg", {LogicalType::UBIGINT, LogicalType::ANY, LogicalType::DOUBLE}, LogicalType::DOUBLE,
 	    PacCountStateSize, PacCountInitialize, PacCountColumnScatterUpdate, PacCountCombine, PacCountFinalize,
 	    FunctionNullHandling::DEFAULT_NULL_HANDLING, PacCountColumnUpdate, PacCountBind));
-	loader.RegisterFunction(noised_set);
+	CreateAggregateFunctionInfo avg_info(noised_set);
+	FunctionDescription avg_desc;
+	avg_desc.description = "Privacy-preserving AVG. Automatically injected by PAC for protected columns.";
+	avg_desc.examples = {"SELECT AVG(salary) FROM employees; -- automatically noised when salary is PROTECTED"};
+	avg_info.descriptions.push_back(std::move(avg_desc));
+	loader.RegisterFunction(std::move(avg_info));
 
 	// pac_avg(UBIGINT, value_type[, correction]) → LIST<FLOAT> — same implementation as pac_count(UBIGINT, ANY)
 	auto list_float_type = LogicalType::LIST(PacFloatLogicalType());
@@ -317,7 +332,11 @@ void RegisterPacAvgFunctions(ExtensionLoader &loader) {
 	    "pac_avg", {LogicalType::UBIGINT, LogicalType::ANY, LogicalType::DOUBLE}, list_float_type, PacCountStateSize,
 	    PacCountInitialize, PacCountColumnScatterUpdate, PacCountCombine, PacCountFinalizeCounters,
 	    FunctionNullHandling::DEFAULT_NULL_HANDLING, PacCountColumnUpdate, PacCountBind));
-	loader.RegisterFunction(counters_set);
+	CreateAggregateFunctionInfo avg_counters_info(counters_set);
+	FunctionDescription avg_counters_desc;
+	avg_counters_desc.description = "[INTERNAL] Returns 64 PAC subsample counters as LIST for categorical queries.";
+	avg_counters_info.descriptions.push_back(std::move(avg_counters_desc));
+	loader.RegisterFunction(std::move(avg_counters_info));
 }
 
 } // namespace duckdb

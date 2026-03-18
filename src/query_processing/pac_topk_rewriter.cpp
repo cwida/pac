@@ -7,6 +7,7 @@
 
 #include "query_processing/pac_topk_rewriter.hpp"
 #include "pac_debug.hpp"
+#include "duckdb/parser/parsed_data/create_scalar_function_info.hpp"
 #include "utils/pac_helpers.hpp"
 #include "aggregates/pac_aggregate.hpp"
 #include "categorical/pac_categorical_rewriter.hpp"
@@ -86,7 +87,11 @@ static void PacMeanFunction(DataChunk &args, ExpressionState &state, Vector &res
 void RegisterPacMeanFunction(ExtensionLoader &loader) {
 	auto list_type = LogicalType::LIST(PacFloatLogicalType());
 	ScalarFunction pac_mean("pac_mean", {list_type}, PacFloatLogicalType(), PacMeanFunction);
-	loader.RegisterFunction(pac_mean);
+	CreateScalarFunctionInfo info(pac_mean);
+	FunctionDescription desc;
+	desc.description = "[INTERNAL] Computes the mean of 64 PAC subsample counters (true aggregate before noise).";
+	info.descriptions.push_back(std::move(desc));
+	loader.RegisterFunction(std::move(info));
 }
 
 // ============================================================================

@@ -1,6 +1,7 @@
 #include "aggregates/pac_sum.hpp"
 #include "categorical/pac_categorical.hpp"
 #include "duckdb/common/types/decimal.hpp"
+#include "duckdb/parser/parsed_data/create_aggregate_function_info.hpp"
 #include <cmath>
 #include <limits>
 #include <atomic>
@@ -703,7 +704,12 @@ void RegisterPacSumFunctions(ExtensionLoader &loader) {
 	                                      LogicalTypeId::DECIMAL, nullptr, nullptr, nullptr, nullptr, nullptr,
 	                                      FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr, BindDecimalPacSum));
 
-	loader.RegisterFunction(fcn_set);
+	CreateAggregateFunctionInfo info(fcn_set);
+	FunctionDescription desc;
+	desc.description = "Privacy-preserving SUM. Automatically injected by PAC for protected columns.";
+	desc.examples = {"SELECT SUM(salary) FROM employees; -- automatically noised when salary is PROTECTED"};
+	info.descriptions.push_back(std::move(desc));
+	loader.RegisterFunction(std::move(info));
 }
 
 // ============================================================================
@@ -864,7 +870,11 @@ void RegisterPacSumCountersFunctions(ExtensionLoader &loader) {
 	// Add list aggregate overload (LIST<DOUBLE> → LIST<DOUBLE>) for subquery/categorical contexts
 	AddPacListAggregateOverload(counters_set, "sum");
 
-	loader.RegisterFunction(counters_set);
+	CreateAggregateFunctionInfo counters_info(counters_set);
+	FunctionDescription counters_desc;
+	counters_desc.description = "[INTERNAL] Returns 64 PAC subsample counters as LIST for categorical queries.";
+	counters_info.descriptions.push_back(std::move(counters_desc));
+	loader.RegisterFunction(std::move(counters_info));
 }
 
 } // namespace duckdb
