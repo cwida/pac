@@ -270,6 +270,9 @@ static void PropagateCTASMetadata(unique_ptr<LogicalOperator> &outer_plan, uniqu
 // the statement's result types (set at plan time) become stale. This state patches them
 // in OnFinalizePrepare, which fires after the physical plan is generated.
 struct PACDerivedTypePatcher : public ClientContextState {
+	bool CanRequestRebind() override {
+		return true;
+	}
 	RebindQueryInfo OnFinalizePrepare(ClientContext &context, PreparedStatementData &prepared,
 	                                  PreparedStatementMode mode) override {
 		Printer::Print("[PAC TYPE PATCHER] OnFinalizePrepare called, stmt_type=" +
