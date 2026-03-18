@@ -1,6 +1,7 @@
 #include "aggregates/pac_aggregate.hpp"
 
 #include "duckdb.hpp"
+#include "duckdb/parser/parsed_data/create_scalar_function_info.hpp"
 #include "duckdb/common/types/data_chunk.hpp"
 #include "duckdb/common/types/vector.hpp"
 #include "duckdb/common/exception.hpp"
@@ -311,7 +312,11 @@ static void PacHashFunction(DataChunk &args, ExpressionState &state, Vector &res
 
 void RegisterPacHashFunction(ExtensionLoader &loader) {
 	ScalarFunction pac_hash("pac_hash", {LogicalType::UBIGINT}, LogicalType::UBIGINT, PacHashFunction, PacHashBind);
-	loader.RegisterFunction(pac_hash);
+	CreateScalarFunctionInfo info(pac_hash);
+	FunctionDescription desc;
+	desc.description = "[INTERNAL] Hashes a privacy unit key for PAC subsample assignment.";
+	info.descriptions.push_back(std::move(desc));
+	loader.RegisterFunction(std::move(info));
 }
 
 } // namespace duckdb

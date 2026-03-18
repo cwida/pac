@@ -7,6 +7,7 @@
 //
 
 #include "categorical/pac_categorical.hpp"
+#include "duckdb/parser/parsed_data/create_scalar_function_info.hpp"
 #include "pac_debug.hpp"
 #include "aggregates/pac_aggregate.hpp"
 
@@ -359,14 +360,16 @@ template <PacFilterCmpOp CMP>
 static void RegisterPacFilterCmp(ExtensionLoader &loader, const string &name) {
 	auto pf = PacFloatLogicalType();
 	auto ldt = LogicalType::LIST(pf);
-	// 2-arg: (PAC_FLOAT val, LIST<PAC_FLOAT> counters) → BOOLEAN
-	ScalarFunction f2(name, {pf, ldt}, LogicalType::BOOLEAN, PacFilterCmpFunction<CMP, false>, PacCategoricalBind,
-	                  nullptr, nullptr, PacCategoricalInitLocal);
-	loader.RegisterFunction(f2);
-	// 3-arg: (PAC_FLOAT val, LIST<PAC_FLOAT> counters, PAC_FLOAT correction) → BOOLEAN
-	ScalarFunction f3(name, {pf, ldt, pf}, LogicalType::BOOLEAN, PacFilterCmpFunction<CMP, true>, PacCategoricalBind,
-	                  nullptr, nullptr, PacCategoricalInitLocal);
-	loader.RegisterFunction(f3);
+	ScalarFunctionSet fset(name);
+	fset.AddFunction(ScalarFunction(name, {pf, ldt}, LogicalType::BOOLEAN, PacFilterCmpFunction<CMP, false>,
+	                                PacCategoricalBind, nullptr, nullptr, PacCategoricalInitLocal));
+	fset.AddFunction(ScalarFunction(name, {pf, ldt, pf}, LogicalType::BOOLEAN, PacFilterCmpFunction<CMP, true>,
+	                                PacCategoricalBind, nullptr, nullptr, PacCategoricalInitLocal));
+	CreateScalarFunctionInfo info(fset);
+	FunctionDescription desc;
+	desc.description = "[INTERNAL] Categorical comparison + probabilistic filter for PAC queries.";
+	info.descriptions.push_back(std::move(desc));
+	loader.RegisterFunction(std::move(info));
 }
 
 // ============================================================================
@@ -430,10 +433,13 @@ template <PacFilterCmpOp CMP>
 static void RegisterPacSelectCmp(ExtensionLoader &loader, const string &name) {
 	auto pf = PacFloatLogicalType();
 	auto ldt = LogicalType::LIST(pf);
-	// (UBIGINT hash, PAC_FLOAT val, LIST<PAC_FLOAT> counters) → UBIGINT
 	ScalarFunction f(name, {LogicalType::UBIGINT, pf, ldt}, LogicalType::UBIGINT, PacSelectCmpFunction<CMP>,
 	                 PacCategoricalBind);
-	loader.RegisterFunction(f);
+	CreateScalarFunctionInfo info(f);
+	FunctionDescription desc;
+	desc.description = "[INTERNAL] Categorical comparison + mask application for PAC queries.";
+	info.descriptions.push_back(std::move(desc));
+	loader.RegisterFunction(std::move(info));
 }
 
 // ============================================================================
@@ -1138,37 +1144,49 @@ void AddPacListAggregateOverload(AggregateFunctionSet &set, const string &aggr_t
 void RegisterPacCategoricalFunctions(ExtensionLoader &loader) {
 	auto list_bool_type = LogicalType::LIST(LogicalType::BOOLEAN);
 
-	// pac_select(UBIGINT hash, list<bool>) -> UBIGINT : Convert booleans to mask, combined with hash subsampling
+	auto make_scalar_info = [](ScalarFunction &fn, const string &desc) {
+		CreateScalarFunctionInfo info(fn);
+		FunctionDescription fd;
+		fd.description = desc;
+		info.descriptions.push_back(std::move(fd));
+		return info;
+	};
+
+	// pac_select(UBIGINT hash, list<bool>) -> UBIGINT
 	ScalarFunction pac_select_fn("pac_select", {LogicalType::UBIGINT, list_bool_type}, LogicalType::UBIGINT,
 	                             PacSelectFunction, PacCategoricalBind);
-	loader.RegisterFunction(pac_select_fn);
+	loader.RegisterFunction(
+	    make_scalar_info(pac_select_fn, "[INTERNAL] Combines boolean mask with hash for categorical PAC queries."));
 
-	// pac_filter(list<bool>) -> BOOLEAN : Probabilistic filter from list (convenience)
+	// pac_filter(list<bool>) -> BOOLEAN
 	ScalarFunction pac_filter_list("pac_filter", {list_bool_type}, LogicalType::BOOLEAN, PacFilterFromBoolListFunction,
 	                               PacCategoricalBind, nullptr, nullptr, PacCategoricalInitLocal);
-	loader.RegisterFunction(pac_filter_list);
+	loader.RegisterFunction(make_scalar_info(
+	    pac_filter_list, "[INTERNAL] Probabilistic filter from boolean list for categorical queries."));
 
-	// pac_coalesce(list<PAC_FLOAT>) -> list<PAC_FLOAT> : Replace NULL list with 64 NULLs
+	// pac_coalesce(list<PAC_FLOAT>) -> list<PAC_FLOAT>
 	auto list_double_type = LogicalType::LIST(PacFloatLogicalType());
 	ScalarFunction pac_coalesce("pac_coalesce", {list_double_type}, list_double_type, PacCoalesceFunction);
 	pac_coalesce.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
-	loader.RegisterFunction(pac_coalesce);
+	loader.RegisterFunction(make_scalar_info(pac_coalesce, "[INTERNAL] Replaces NULL counter list with 64 zeros."));
 
-	// pac_noised(list<PAC_FLOAT>) -> PAC_FLOAT : Apply noise to 64 counter values
+	// pac_noised(list<PAC_FLOAT>) -> PAC_FLOAT
 	ScalarFunction pac_noised("pac_noised", {list_double_type}, PacFloatLogicalType(), PacNoisedFunction,
 	                          PacCategoricalBind, nullptr, nullptr, PacCategoricalInitLocal);
-	loader.RegisterFunction(pac_noised);
+	loader.RegisterFunction(
+	    make_scalar_info(pac_noised, "[INTERNAL] Applies PAC noise to 64-element counter list, returns scalar."));
 
-	// pac_div(list<PAC_FLOAT>, list<PAC_FLOAT>) -> list<PAC_FLOAT> : Element-wise division of counter lists
+	// pac_div(list<PAC_FLOAT>, list<PAC_FLOAT>) -> list<PAC_FLOAT>
 	ScalarFunction pac_div("pac_div", {list_double_type, list_double_type}, list_double_type, PacDivFunction);
-	loader.RegisterFunction(pac_div);
+	loader.RegisterFunction(make_scalar_info(pac_div, "[INTERNAL] Element-wise division of two counter lists."));
 
-	// pac_noised_div(list<PAC_FLOAT> sum, list<PAC_FLOAT> cnt) -> DOUBLE : Fused avg + noise
+	// pac_noised_div(list<PAC_FLOAT> sum, list<PAC_FLOAT> cnt) -> DOUBLE
 	ScalarFunction pac_noised_div("pac_noised_div", {list_double_type, list_double_type}, LogicalType::DOUBLE,
 	                              PacNoisedDivFunction, PacCategoricalBind, nullptr, nullptr, PacCategoricalInitLocal);
-	loader.RegisterFunction(pac_noised_div);
+	loader.RegisterFunction(
+	    make_scalar_info(pac_noised_div, "[INTERNAL] Fused counter-list division + noise for AVG."));
 
-	// pac_filter_<cmp>: optimized comparison + filter in a single pass (no lambdas)
+	// pac_filter_<cmp>: optimized comparison + filter in a single pass
 	RegisterPacFilterCmp<PacFilterCmpOp::GT>(loader, "pac_filter_gt");
 	RegisterPacFilterCmp<PacFilterCmpOp::GTE>(loader, "pac_filter_gte");
 	RegisterPacFilterCmp<PacFilterCmpOp::LT>(loader, "pac_filter_lt");
@@ -1176,7 +1194,7 @@ void RegisterPacCategoricalFunctions(ExtensionLoader &loader) {
 	RegisterPacFilterCmp<PacFilterCmpOp::EQ>(loader, "pac_filter_eq");
 	RegisterPacFilterCmp<PacFilterCmpOp::NEQ>(loader, "pac_filter_neq");
 
-	// pac_select_<cmp>: compare scalar against counter list, apply mask to hash in one pass
+	// pac_select_<cmp>: compare scalar against counter list, apply mask to hash
 	RegisterPacSelectCmp<PacFilterCmpOp::GT>(loader, "pac_select_gt");
 	RegisterPacSelectCmp<PacFilterCmpOp::GTE>(loader, "pac_select_gte");
 	RegisterPacSelectCmp<PacFilterCmpOp::LT>(loader, "pac_select_lt");

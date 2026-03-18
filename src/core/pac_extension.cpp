@@ -180,58 +180,71 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	// Add option to enable/disable PAC noise application (this is useful for testing, since noise affects result
 	// determinism)
-	db.config.AddExtensionOption("pac_noise", "apply PAC noise", LogicalType::BOOLEAN);
-	db.config.AddExtensionOption("pac_check", "enforce protected column access restrictions", LogicalType::BOOLEAN,
-	                             Value::BOOLEAN(true));
-	db.config.AddExtensionOption("pac_rewrite", "enable PAC query plan rewriting", LogicalType::BOOLEAN,
-	                             Value::BOOLEAN(true));
-	// Add option to set deterministic RNG seed for PAC functions (useful for tests)
-	db.config.AddExtensionOption("pac_seed", "deterministic RNG seed for PAC functions", LogicalType::BIGINT);
-	// Add option to configure the number of samples (m) used by PAC (default 128)
-	db.config.AddExtensionOption("pac_m", "number of per-sample subsets (m)", LogicalType::INTEGER);
-	// Add option to toggle enforcement of per-sample array length == pac_m (default true)
-	db.config.AddExtensionOption("enforce_m_values", "enforce per-sample arrays length equals pac_m",
-	                             LogicalType::BOOLEAN);
-	// Add option to set path where compiled PAC artifacts (CTEs) are written
-	db.config.AddExtensionOption("pac_compiled_path", "path to write compiled PAC artifacts", LogicalType::VARCHAR);
-	// Add option to enable/disable join elimination (stop FK chain before reaching PU)
-	db.config.AddExtensionOption("pac_join_elimination", "eliminate final join to PU table", LogicalType::BOOLEAN,
-	                             Value::BOOLEAN(true));
-	// Add option to enable/disable conservative mode (when false, unsupported operators skip PAC compilation)
-	db.config.AddExtensionOption("pac_conservative_mode",
-	                             "throw errors for unsupported operators (when false, skip PAC compilation)",
-	                             LogicalType::BOOLEAN, Value::BOOLEAN(true));
-	// Add option to set the mi parameter for PAC aggregates (default 1/128)
+	// ---- User-facing settings ----
 	// Controls probabilistic vs deterministic mode for noise/NULL decisions
-	db.config.AddExtensionOption("pac_categorical", "enable categorical query rewrites", LogicalType::BOOLEAN,
-	                             Value::BOOLEAN(true));
-	db.config.AddExtensionOption("pac_select", "use pac_select for categorical filters below pac aggregates",
+	db.config.AddExtensionOption(
+	    "pac_mi",
+	    "Mutual information bound controlling privacy-utility tradeoff (default: 1/128). "
+	    "Lower values = more noise = more privacy. Set to 0 for deterministic (no noise) mode.",
+	    LogicalType::DOUBLE, Value::DOUBLE(1.0 / 128));
+	// Set deterministic RNG seed for PAC functions (useful for tests)
+	db.config.AddExtensionOption("pac_seed", "RNG seed for reproducible noised results", LogicalType::BIGINT);
+	// Enable/disable PAC noise application (useful for testing, since noise affects result determinism)
+	db.config.AddExtensionOption("pac_noise", "Enable/disable PAC noise application (set to false for debugging)",
+	                             LogicalType::BOOLEAN);
+	// Correction factor: multiplies sum/avg/count results; reduces NULL probability for all aggregates
+	db.config.AddExtensionOption("pac_correction", "Correction factor multiplied into aggregate results (default: 1.0)",
+	                             LogicalType::DOUBLE, Value::DOUBLE(1.0));
+	// Utility diff mode: number of key columns for matching + optional output path
+	db.config.AddExtensionOption(
+	    "pac_diffcols", "Measure utility: specify number of key columns and optional output path (e.g. '2:out.csv')",
+	    LogicalType::VARCHAR);
+
+	// ---- Internal settings ----
+	// Enforce protected column access restrictions (prevents direct projection of protected columns)
+	db.config.AddExtensionOption("pac_check", "[INTERNAL] Enforce protected column access restrictions",
 	                             LogicalType::BOOLEAN, Value::BOOLEAN(true));
-	db.config.AddExtensionOption("pac_mi", "mutual information parameter for PAC aggregates", LogicalType::DOUBLE,
-	                             Value::DOUBLE(1.0 / 128));
-	// Add option to set the correction factor for PAC aggregates (default 1.0)
-	// Multiplies sum/avg/count results; reduces NULL probability for all aggregates
-	db.config.AddExtensionOption("pac_correction", "correction factor for PAC aggregates", LogicalType::DOUBLE,
-	                             Value::DOUBLE(1.0));
-	// Add option to enable utility diff mode: number of key columns for matching
-	db.config.AddExtensionOption("pac_diffcols", "key columns and optional output path for utility diff",
-	                             LogicalType::VARCHAR);
-	// Add option to enable top-k pushdown: when true, top-k is applied on true aggregates before noising
-	db.config.AddExtensionOption("pac_pushdown_topk", "apply top-k before noise instead of after", LogicalType::BOOLEAN,
+	// Enable PAC query plan rewriting (the core optimizer that injects noise)
+	db.config.AddExtensionOption("pac_rewrite", "[INTERNAL] Enable PAC query plan rewriting", LogicalType::BOOLEAN,
 	                             Value::BOOLEAN(true));
+	// Number of per-sample subsets (m) used by PAC (default 128)
+	db.config.AddExtensionOption("pac_m", "[INTERNAL] Number of per-sample subsets", LogicalType::INTEGER);
+	// Toggle enforcement of per-sample array length == pac_m
+	db.config.AddExtensionOption("enforce_m_values", "[INTERNAL] Enforce per-sample array length equals pac_m",
+	                             LogicalType::BOOLEAN);
+	// Path where compiled PAC artifacts (CTEs) are written
+	db.config.AddExtensionOption("pac_compiled_path", "[INTERNAL] Path to write compiled PAC artifacts",
+	                             LogicalType::VARCHAR);
+	// Enable/disable join elimination (stop FK chain before reaching PU)
+	db.config.AddExtensionOption("pac_join_elimination", "[INTERNAL] Eliminate final join to PU table",
+	                             LogicalType::BOOLEAN, Value::BOOLEAN(true));
+	// When false, unsupported operators skip PAC compilation instead of throwing
+	db.config.AddExtensionOption("pac_conservative_mode",
+	                             "[INTERNAL] Throw errors for unsupported operators (when false, skip PAC compilation)",
+	                             LogicalType::BOOLEAN, Value::BOOLEAN(true));
+	// Enable categorical query rewrites (comparisons against PAC aggregates)
+	db.config.AddExtensionOption("pac_categorical", "[INTERNAL] Enable categorical query rewrites",
+	                             LogicalType::BOOLEAN, Value::BOOLEAN(true));
+	// Use pac_select for categorical filters below pac aggregates
+	db.config.AddExtensionOption("pac_select", "[INTERNAL] Use pac_select for categorical filters below pac aggregates",
+	                             LogicalType::BOOLEAN, Value::BOOLEAN(true));
+	// Top-k pushdown: when true, top-k is applied on true aggregates before noising
+	db.config.AddExtensionOption("pac_pushdown_topk", "[INTERNAL] Apply top-k before noise instead of after",
+	                             LogicalType::BOOLEAN, Value::BOOLEAN(true));
 	// Expansion factor for top-k superset approach: inner TopN selects ceil(c*K) candidates,
 	// final TopN limits to K. With c=1 (default), no expansion. With c>1, more candidates
 	// are considered before noising and re-ranking, improving utility.
-	db.config.AddExtensionOption("pac_topk_expansion", "expansion factor for top-k superset (1 = no expansion)",
+	db.config.AddExtensionOption("pac_topk_expansion",
+	                             "[INTERNAL] Expansion factor for top-k superset (1 = no expansion)",
 	                             LogicalType::DOUBLE, Value::DOUBLE(1.0));
-	// Add option to control whether pac_hash() repairs hashes to exactly 32 bits set
-	db.config.AddExtensionOption("pac_hash_repair", "pac_hash() repairs hash to exactly 32 bits set",
+	// Control whether pac_hash() repairs hashes to exactly 32 bits set
+	db.config.AddExtensionOption("pac_hash_repair", "[INTERNAL] pac_hash() repairs hash to exactly 32 bits set",
 	                             LogicalType::BOOLEAN, Value::BOOLEAN(false));
-	// Add option to enable/disable persistent secret p-tracking for correct query-level privacy composition.
+	// Enable/disable persistent secret p-tracking for correct query-level privacy composition.
 	// When enabled (default), noise calibration tracks a Bayesian posterior over worlds across all cells
 	// in a query, providing query-level MIA protection. When disabled, each cell uses uniform variance
 	// independently (cell-level MIA only). Only active when pac_mi > 0.
-	db.config.AddExtensionOption("pac_ptracking", "enable persistent secret p-tracking for query-level MIA",
+	db.config.AddExtensionOption("pac_ptracking", "[INTERNAL] Enable persistent secret p-tracking for query-level MIA",
 	                             LogicalType::BOOLEAN, Value::BOOLEAN(true));
 
 	// Register pac_sum aggregate functions
