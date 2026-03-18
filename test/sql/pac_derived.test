@@ -175,7 +175,33 @@ SELECT count(*) FROM mv;
 2
 
 # ==========================================
-# 8. pac_mi=0 counters have zero variance -> no noise
+# 8. Multiple aggregate columns (SUM + COUNT)
+# ==========================================
+
+statement ok
+SET pac_mi = 0;
+
+statement ok
+CREATE TABLE mv2 AS SELECT grp, SUM(value) AS total, COUNT(*) AS cnt FROM scores GROUP BY grp;
+
+statement ok
+SET pac_rewrite = false;
+
+query II
+SELECT typeof(total), typeof(cnt) FROM mv2 LIMIT 1;
+----
+FLOAT[]	FLOAT[]
+
+statement ok
+SET pac_rewrite = true;
+
+query I
+SELECT count(*) FROM mv2;
+----
+2
+
+# ==========================================
+# 9. pac_mi=0 counters have zero variance -> no noise
 # ==========================================
 
 # The counters were created with pac_mi=0, meaning all 64 subsamples

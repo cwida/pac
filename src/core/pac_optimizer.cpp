@@ -275,22 +275,10 @@ struct PACDerivedTypePatcher : public ClientContextState {
 	}
 	RebindQueryInfo OnFinalizePrepare(ClientContext &context, PreparedStatementData &prepared,
 	                                  PreparedStatementMode mode) override {
-		Printer::Print("[PAC TYPE PATCHER] OnFinalizePrepare called, stmt_type=" +
-		               std::to_string((int)prepared.statement_type) +
-		               " has_plan=" + std::to_string(prepared.physical_plan != nullptr));
-		if (!prepared.physical_plan) {
-			return RebindQueryInfo::DO_NOT_REBIND;
-		}
-		if (prepared.statement_type != StatementType::SELECT_STATEMENT) {
+		if (!prepared.physical_plan || prepared.statement_type != StatementType::SELECT_STATEMENT) {
 			return RebindQueryInfo::DO_NOT_REBIND;
 		}
 		auto &root_types = prepared.physical_plan->Root().GetTypes();
-		Printer::Print("[PAC TYPE PATCHER] OnFinalizePrepare: physical_plan root types:");
-		for (idx_t i = 0; i < root_types.size(); i++) {
-			string match = (i < prepared.types.size() && root_types[i] != prepared.types[i]) ? " MISMATCH" : "";
-			Printer::Print("  [" + std::to_string(i) + "] physical=" + root_types[i].ToString() +
-			               " statement=" + (i < prepared.types.size() ? prepared.types[i].ToString() : "N/A") + match);
-		}
 		if (root_types.size() == prepared.types.size()) {
 			for (idx_t i = 0; i < root_types.size(); i++) {
 				if (root_types[i] != prepared.types[i]) {
@@ -529,22 +517,14 @@ void PACRewriteRule::PACPreOptimizeFunction(OptimizerExtensionInput &input, uniq
 					auto *meta = mgr.GetTableMetadata(target_table);
 					if (meta && meta->derived_pu) {
 						ConvertDerivedPuToCounters(input, target_plan);
-						Printer::Print("[PAC DERIVED WRITE] === PLAN AFTER counter conversion ===");
-						target_plan->Print();
 						// Update CTAS column types to match the counter-converted plan output
 						if (outer_plan->type == LogicalOperatorType::LOGICAL_CREATE_TABLE) {
 							target_plan->ResolveOperatorTypes();
 							auto &create = outer_plan->Cast<LogicalCreateTable>();
 							auto &columns = create.info->Base().columns;
 							auto &plan_types = target_plan->types;
-							Printer::Print("[PAC DERIVED] Updating CTAS column types: plan_types=" +
-							               std::to_string(plan_types.size()) + " cols=" +
-							               std::to_string(columns.LogicalColumnCount()));
 							for (idx_t i = 0; i < plan_types.size() && i < columns.LogicalColumnCount(); i++) {
 								auto &col = columns.GetColumnMutable(LogicalIndex(i));
-								Printer::Print("  col " + std::to_string(i) + " '" + col.Name() +
-								               "': " + col.Type().ToString() + " -> " +
-								               plan_types[i].ToString());
 								if (col.Type() != plan_types[i]) {
 									col.SetType(plan_types[i]);
 								}
@@ -571,11 +551,18 @@ void PACDerivedReadRule::PACDerivedReadFunction(OptimizerExtensionInput &input, 
 	if (!pac_rewrite_enabled) {
 		return;
 	}
-	Printer::Print("[PAC POST-OPT] === PLAN BEFORE pac_finalize injection ===");
+	if (!HasDerivedPuCounterGets(plan.get())) {
+		return;
+	}
+	PAC_DEBUG_PRINT("[PAC DERIVED READ] === PLAN BEFORE pac_finalize injection ===");
+#if PAC_DEBUG
 	plan->Print();
+#endif
 	InjectPacFinalizeForDerivedPu(input, plan);
-	Printer::Print("[PAC POST-OPT] === PLAN AFTER pac_finalize injection ===");
+	PAC_DEBUG_PRINT("[PAC DERIVED READ] === PLAN AFTER pac_finalize injection ===");
+#if PAC_DEBUG
 	plan->Print();
+#endif
 }
 
 } // namespace duckdb

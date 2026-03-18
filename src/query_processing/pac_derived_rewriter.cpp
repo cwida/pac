@@ -23,11 +23,8 @@ namespace duckdb {
 // Write path: convert pac_noised_* → pac_* counter variants for derived_pu DML
 // ============================================================================
 
-// Track which aggregate bindings were converted to counter type (uses HashBinding from categorical_detection.hpp)
-using CounterBindings = unordered_set<uint64_t>;
-
 static void ConvertAggregatesRecursive(OptimizerExtensionInput &input, LogicalOperator *op,
-                                       CounterBindings &converted) {
+                                       unordered_set<uint64_t> &converted) {
 	if (!op) {
 		return;
 	}
@@ -40,6 +37,8 @@ static void ConvertAggregatesRecursive(OptimizerExtensionInput &input, LogicalOp
 	}
 
 	auto &agg = op->Cast<LogicalAggregate>();
+	auto list_type = LogicalType::LIST(PacFloatLogicalType());
+
 	for (idx_t i = 0; i < agg.expressions.size(); i++) {
 		auto &expr = agg.expressions[i];
 		if (expr->type != ExpressionType::BOUND_AGGREGATE) {
@@ -56,7 +55,6 @@ static void ConvertAggregatesRecursive(OptimizerExtensionInput &input, LogicalOp
 			continue;
 		}
 
-		// Copy children and rebind with counter variant
 		vector<unique_ptr<Expression>> children;
 		for (auto &child_expr : bound_agg.children) {
 			children.push_back(child_expr->Copy());
@@ -66,26 +64,22 @@ static void ConvertAggregatesRecursive(OptimizerExtensionInput &input, LogicalOp
 		if (new_aggr) {
 			agg.expressions[i] = std::move(new_aggr);
 		} else {
-			// Fallback: rename in place
 			bound_agg.function.name = counters_name;
-			bound_agg.function.return_type = LogicalType::LIST(PacFloatLogicalType());
-			expr->return_type = LogicalType::LIST(PacFloatLogicalType());
+			bound_agg.function.return_type = list_type;
+			expr->return_type = list_type;
 		}
 
-		// Update the aggregate's type vector
 		idx_t types_index = agg.groups.size() + i;
 		if (types_index < agg.types.size()) {
-			agg.types[types_index] = LogicalType::LIST(PacFloatLogicalType());
+			agg.types[types_index] = list_type;
 		}
 
-		// Track this binding for downstream type propagation
 		converted.insert(HashBinding(ColumnBinding(agg.aggregate_index, i)));
 	}
 }
 
-// Fix stale column ref types in all operators after aggregate conversion.
-// Same pattern as categorical rewriter (pac_categorical_rewriter.cpp lines 503-516).
-static void FixStaleColumnRefTypes(LogicalOperator *op, const CounterBindings &converted) {
+// Fix stale column ref types after aggregate conversion (same pattern as categorical rewriter).
+static void FixStaleColumnRefTypes(LogicalOperator *op, const unordered_set<uint64_t> &converted) {
 	if (!op) {
 		return;
 	}
@@ -108,7 +102,7 @@ static void FixStaleColumnRefTypes(LogicalOperator *op, const CounterBindings &c
 }
 
 void ConvertDerivedPuToCounters(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan) {
-	CounterBindings converted;
+	unordered_set<uint64_t> converted;
 	ConvertAggregatesRecursive(input, plan.get(), converted);
 	if (!converted.empty()) {
 		FixStaleColumnRefTypes(plan.get(), converted);
@@ -119,10 +113,9 @@ void ConvertDerivedPuToCounters(OptimizerExtensionInput &input, unique_ptr<Logic
 // Read path: inject pac_finalize for SELECT on derived_pu tables
 // ============================================================================
 
-// Collect GET table_indexes that are derived_pu with counter columns, and which column indices are counters.
 struct DerivedPuGetInfo {
 	idx_t table_index;
-	unordered_set<idx_t> counter_columns; // column indices within the GET that are LIST<FLOAT>
+	unordered_set<idx_t> counter_columns;
 };
 
 static void FindDerivedPuGets(LogicalOperator *op, vector<DerivedPuGetInfo> &gets) {
@@ -158,36 +151,25 @@ static void FindDerivedPuGets(LogicalOperator *op, vector<DerivedPuGetInfo> &get
 	}
 }
 
-// Wrap an expression with pac_finalize using the optimizer's BindScalarFunction
-static unique_ptr<Expression> WrapWithFinalize(OptimizerExtensionInput &input, unique_ptr<Expression> expr) {
-	auto result = input.optimizer.BindScalarFunction("pac_finalize", std::move(expr));
-	if (!result) {
-		Printer::Print("[PAC DERIVED READ] ERROR: BindScalarFunction returned null!");
-	} else {
-		Printer::Print("[PAC DERIVED READ] Bound pac_mean: " + result->ToString() +
-		               " type=" + result->return_type.ToString());
-	}
-	return result;
-}
-
-// Walk all expressions in the plan. For column refs to derived_pu counter columns, wrap with pac_finalize.
-// Also collects changed bindings so parent operators' column refs can be updated.
-static void RewriteExpressionsForFinalize(OptimizerExtensionInput &input, LogicalOperator *op,
-                                          const vector<DerivedPuGetInfo> &gets,
-                                          unordered_set<uint64_t> &changed_bindings) {
+// Wrap column refs to counter columns with pac_finalize, propagating type changes bottom-up.
+// Uses changed_bindings to track which output bindings have changed type so parent operators
+// can have their stale column refs updated.
+static void WrapCounterRefsWithFinalize(OptimizerExtensionInput &input, LogicalOperator *op,
+                                        const vector<DerivedPuGetInfo> &gets,
+                                        unordered_set<uint64_t> &changed_bindings) {
 	if (!op) {
 		return;
 	}
 	for (auto &child : op->children) {
-		RewriteExpressionsForFinalize(input, child.get(), gets, changed_bindings);
+		WrapCounterRefsWithFinalize(input, child.get(), gets, changed_bindings);
 	}
-	// Don't rewrite expressions inside the GET itself
 	if (op->type == LogicalOperatorType::LOGICAL_GET) {
 		return;
 	}
 
-	// First: fix stale column refs from already-changed bindings (propagation from child operators)
 	auto finalized_type = PacFloatLogicalType();
+
+	// Fix stale column refs from already-changed child bindings
 	std::function<void(unique_ptr<Expression> &)> FixExpr = [&](unique_ptr<Expression> &e) {
 		if (e->type == ExpressionType::BOUND_COLUMN_REF) {
 			auto &col_ref = e->Cast<BoundColumnRefExpression>();
@@ -197,11 +179,9 @@ static void RewriteExpressionsForFinalize(OptimizerExtensionInput &input, Logica
 		}
 		ExpressionIterator::EnumerateChildren(*e, FixExpr);
 	};
-	// Fix expressions in the operator
-	LogicalOperatorVisitor::EnumerateExpressions(*op, [&](unique_ptr<Expression> *expr_ptr) {
-		FixExpr(*expr_ptr);
-	});
-	// Also fix ORDER BY expressions (stored in orders, not op->expressions)
+	for (auto &expr : op->expressions) {
+		FixExpr(expr);
+	}
 	if (op->type == LogicalOperatorType::LOGICAL_ORDER_BY) {
 		auto &order = op->Cast<LogicalOrder>();
 		for (auto &node : order.orders) {
@@ -209,36 +189,82 @@ static void RewriteExpressionsForFinalize(OptimizerExtensionInput &input, Logica
 		}
 	}
 
-	// Then: wrap direct counter column refs with pac_finalize
-	for (idx_t i = 0; i < op->expressions.size(); i++) {
-		auto &expr = op->expressions[i];
+	// Wrap direct counter column refs with pac_finalize
+	for (auto &expr : op->expressions) {
 		if (expr->type == ExpressionType::BOUND_COLUMN_REF) {
 			auto &col_ref = expr->Cast<BoundColumnRefExpression>();
 			for (auto &info : gets) {
 				if (col_ref.binding.table_index == info.table_index &&
 				    info.counter_columns.count(col_ref.binding.column_index)) {
-					expr = WrapWithFinalize(input, std::move(expr));
+					expr = input.optimizer.BindScalarFunction("pac_finalize", std::move(expr));
 					break;
 				}
 			}
 		}
 	}
 
-	// Track this operator's output bindings that changed type (for propagation to parents)
+	// Track changed output bindings for parent propagation
 	if (op->type == LogicalOperatorType::LOGICAL_PROJECTION) {
 		auto &proj = op->Cast<LogicalProjection>();
 		for (idx_t i = 0; i < proj.expressions.size(); i++) {
-			if (proj.expressions[i]->return_type == finalized_type) {
-				// Check if this was originally a counter column (FLOAT[])
-				// by seeing if the binding was in our changed set or was just wrapped
-				auto binding = ColumnBinding(proj.table_index, i);
-				if (proj.expressions[i]->type == ExpressionType::BOUND_FUNCTION) {
-					// This is a pac_finalize wrapper — track the output binding
-					changed_bindings.insert(HashBinding(binding));
-				}
+			if (proj.expressions[i]->return_type == finalized_type &&
+			    proj.expressions[i]->type == ExpressionType::BOUND_FUNCTION) {
+				changed_bindings.insert(HashBinding(ColumnBinding(proj.table_index, i)));
 			}
 		}
 	}
+}
+
+// After ResolveOperatorTypes, fix all column refs whose return_type doesn't match
+// the source operator's output type. Handles projections, ORDER BY, filters, subqueries.
+static void FixAllStaleRefs(LogicalOperator *op) {
+	if (!op) {
+		return;
+	}
+	for (auto &child : op->children) {
+		FixAllStaleRefs(child.get());
+	}
+
+	// Build binding → type map from child operators
+	unordered_map<uint64_t, LogicalType> binding_types;
+	for (auto &child : op->children) {
+		auto bindings = child->GetColumnBindings();
+		for (idx_t i = 0; i < bindings.size() && i < child->types.size(); i++) {
+			binding_types[HashBinding(bindings[i])] = child->types[i];
+		}
+	}
+
+	if (binding_types.empty()) {
+		return;
+	}
+
+	// Fix column refs in any expression
+	std::function<void(unique_ptr<Expression> &)> Fix = [&](unique_ptr<Expression> &e) {
+		if (e->type == ExpressionType::BOUND_COLUMN_REF) {
+			auto &col_ref = e->Cast<BoundColumnRefExpression>();
+			auto it = binding_types.find(HashBinding(col_ref.binding));
+			if (it != binding_types.end() && col_ref.return_type != it->second) {
+				col_ref.return_type = it->second;
+			}
+		}
+		ExpressionIterator::EnumerateChildren(*e, Fix);
+	};
+
+	for (auto &expr : op->expressions) {
+		Fix(expr);
+	}
+	if (op->type == LogicalOperatorType::LOGICAL_ORDER_BY) {
+		auto &order = op->Cast<LogicalOrder>();
+		for (auto &node : order.orders) {
+			Fix(node.expression);
+		}
+	}
+}
+
+bool HasDerivedPuCounterGets(LogicalOperator *plan) {
+	vector<DerivedPuGetInfo> gets;
+	FindDerivedPuGets(plan, gets);
+	return !gets.empty();
 }
 
 void InjectPacFinalizeForDerivedPu(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan) {
@@ -247,55 +273,10 @@ void InjectPacFinalizeForDerivedPu(OptimizerExtensionInput &input, unique_ptr<Lo
 	if (gets.empty()) {
 		return;
 	}
-	Printer::Print("[PAC DERIVED READ] === PLAN BEFORE pac_finalize injection ===");
-	plan->Print();
 	unordered_set<uint64_t> changed_bindings;
-	RewriteExpressionsForFinalize(input, plan.get(), gets, changed_bindings);
-	// Resolve types so all operator type vectors are consistent
+	WrapCounterRefsWithFinalize(input, plan.get(), gets, changed_bindings);
 	plan->ResolveOperatorTypes();
-
-	// Now fix ALL stale column refs: for each operator, build a type map from child bindings,
-	// then update any column ref whose return_type doesn't match.
-	std::function<void(LogicalOperator *)> FixAllStaleRefs = [&](LogicalOperator *op) {
-		if (!op) {
-			return;
-		}
-		for (auto &child : op->children) {
-			FixAllStaleRefs(child.get());
-		}
-		// Build binding → type map from child operators
-		unordered_map<uint64_t, LogicalType> binding_types;
-		for (auto &child : op->children) {
-			auto bindings = child->GetColumnBindings();
-			for (idx_t i = 0; i < bindings.size() && i < child->types.size(); i++) {
-				binding_types[HashBinding(bindings[i])] = child->types[i];
-			}
-		}
-		// Fix column refs in expressions
-		std::function<void(unique_ptr<Expression> &)> Fix = [&](unique_ptr<Expression> &e) {
-			if (e->type == ExpressionType::BOUND_COLUMN_REF) {
-				auto &col_ref = e->Cast<BoundColumnRefExpression>();
-				auto it = binding_types.find(HashBinding(col_ref.binding));
-				if (it != binding_types.end() && col_ref.return_type != it->second) {
-					col_ref.return_type = it->second;
-				}
-			}
-			ExpressionIterator::EnumerateChildren(*e, Fix);
-		};
-		for (auto &expr : op->expressions) {
-			Fix(expr);
-		}
-		// Also fix ORDER BY orders
-		if (op->type == LogicalOperatorType::LOGICAL_ORDER_BY) {
-			auto &order = op->Cast<LogicalOrder>();
-			for (auto &node : order.orders) {
-				Fix(node.expression);
-			}
-		}
-	};
 	FixAllStaleRefs(plan.get());
-	Printer::Print("[PAC DERIVED READ] === PLAN AFTER pac_finalize injection ===");
-	plan->Print();
 }
 
 } // namespace duckdb

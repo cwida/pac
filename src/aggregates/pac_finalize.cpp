@@ -8,56 +8,19 @@
 namespace duckdb {
 
 // ============================================================================
-// pac_finalize bind data — stable world picking (no ActiveQuery mixing)
-// ============================================================================
-struct PacFinalizeBindData : public FunctionData {
-	double mi;
-	uint64_t seed;
-	uint64_t query_hash;
-
-	explicit PacFinalizeBindData(ClientContext &ctx) {
-		mi = GetPacMiFromSetting(ctx);
-
-		Value pac_seed_val;
-		if (ctx.TryGetCurrentSetting("pac_seed", pac_seed_val) && !pac_seed_val.IsNull()) {
-			seed = uint64_t(pac_seed_val.GetValue<int64_t>());
-		} else {
-			seed = 42;
-		}
-		// Stable world: do NOT mix in ActiveQuery — same counters always produce same noise
-		query_hash = (seed * PAC_MAGIC_HASH) ^ PAC_MAGIC_HASH;
-	}
-
-	unique_ptr<FunctionData> Copy() const override {
-		auto copy = make_uniq<PacFinalizeBindData>(*this);
-		return copy;
-	}
-
-	bool Equals(const FunctionData &other) const override {
-		auto &o = other.Cast<PacFinalizeBindData>();
-		return mi == o.mi && seed == o.seed && query_hash == o.query_hash;
-	}
-};
-
-static unique_ptr<FunctionData> PacFinalizeBind(ClientContext &context, ScalarFunction &bound_function,
-                                                vector<unique_ptr<Expression>> &arguments) {
-	return make_uniq<PacFinalizeBindData>(context);
-}
-
-// ============================================================================
-// pac_finalize(LIST<DOUBLE>) -> DOUBLE
+// pac_finalize(LIST<FLOAT>) -> FLOAT
 // Takes 64 subsample counters and returns a noised scalar value.
 // Counters already include 2x correction from pac_sum/pac_count finalize.
+// Uses stable world picking: pac_seed without ActiveQuery mixing.
 // ============================================================================
 static void PacFinalizeFunction(DataChunk &args, ExpressionState &state, Vector &result) {
-	// Check context availability first
 	auto &context = state.GetContext();
 	double mi = GetPacMiFromSetting(context);
+
 	Value pac_seed_val;
 	uint64_t seed = (context.TryGetCurrentSetting("pac_seed", pac_seed_val) && !pac_seed_val.IsNull())
 	                    ? uint64_t(pac_seed_val.GetValue<int64_t>())
 	                    : 42;
-	// Stable world: no ActiveQuery mixing
 	uint64_t query_hash = (seed * PAC_MAGIC_HASH) ^ PAC_MAGIC_HASH;
 
 	auto &list_vec = args.data[0];
@@ -90,25 +53,22 @@ static void PacFinalizeFunction(DataChunk &args, ExpressionState &state, Vector 
 			continue;
 		}
 
-		// Extract 64 counters
 		PAC_FLOAT counters[64];
 		for (idx_t j = 0; j < 64; j++) {
 			auto child_idx = child_data.sel->get_index(entry.offset + j);
 			counters[j] = child_data.validity.RowIsValid(child_idx) ? child_values[child_idx] : 0;
 		}
 
-		// Seed RNG deterministically per row using seed + row index
-		std::mt19937_64 gen(seed ^ (i * PAC_MAGIC_HASH));
+		// RNG seeded per row using seed + list offset (stable across DataChunk batches)
+		std::mt19937_64 gen(seed ^ (entry.offset * PAC_MAGIC_HASH));
 
-		// correction = 1.0 (already baked into counters), is_null = 0 (all counters valid), no pstate
 		result_data[i] = PacNoisySampleFrom64Counters(counters, mi, 1.0, gen, 0ULL, query_hash, nullptr);
 	}
 }
 
 void RegisterPacFinalizeFunction(ExtensionLoader &loader) {
 	auto list_type = LogicalType::LIST(PacFloatLogicalType());
-	ScalarFunction pac_finalize("pac_finalize", {list_type}, PacFloatLogicalType(), PacFinalizeFunction,
-	                            PacFinalizeBind);
+	ScalarFunction pac_finalize("pac_finalize", {list_type}, PacFloatLogicalType(), PacFinalizeFunction);
 	loader.RegisterFunction(pac_finalize);
 }
 

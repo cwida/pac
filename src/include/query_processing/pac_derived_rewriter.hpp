@@ -6,13 +6,14 @@
 
 namespace duckdb {
 
-// Write path: after CompilePacBitsliceQuery, convert pac_noised_* aggregates to pac_* counter variants
-// for DML operations targeting derived_pu tables.
+// Write path: convert pac_noised_* → pac_* counter variants for DML targeting derived_pu tables.
 void ConvertDerivedPuToCounters(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan);
 
-// Read path: for SELECT queries on derived_pu tables, inject pac_finalize projections
-// for LIST<DOUBLE> columns so downstream operators see scalar values.
+// Read path: inject pac_finalize for LIST<FLOAT> columns from derived_pu tables.
 void InjectPacFinalizeForDerivedPu(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan);
+
+// Check if the plan reads from any derived_pu table with counter columns.
+bool HasDerivedPuCounterGets(LogicalOperator *plan);
 
 } // namespace duckdb
 
