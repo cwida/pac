@@ -100,26 +100,36 @@ WHERE pac_filter(
     list_transform(subquery_counters, x -> x > 100));
 ```
 
-## Fused Comparison Variants
+## Fused Variants
 
 Optimized versions that combine a comparison with `pac_select` or `pac_filter` in a single call, avoiding the `list_transform` lambda overhead. The rewriter emits these automatically when it detects simple comparisons against counter lists.
 
 ### pac_select variants
 
 `pac_select_gt(UBIGINT hash, ANY value, LIST<FLOAT> counters) → UBIGINT`
+
 `pac_select_gte(UBIGINT hash, ANY value, LIST<FLOAT> counters) → UBIGINT`
+
 `pac_select_lt(UBIGINT hash, ANY value, LIST<FLOAT> counters) → UBIGINT`
+
 `pac_select_lte(UBIGINT hash, ANY value, LIST<FLOAT> counters) → UBIGINT`
+
 `pac_select_eq(UBIGINT hash, ANY value, LIST<FLOAT> counters) → UBIGINT`
+
 `pac_select_neq(UBIGINT hash, ANY value, LIST<FLOAT> counters) → UBIGINT`
 
 ### pac_filter variants
 
 `pac_filter_gt(ANY value, LIST<FLOAT> counters) → BOOLEAN`
+
 `pac_filter_gte(ANY value, LIST<FLOAT> counters) → BOOLEAN`
+
 `pac_filter_lt(ANY value, LIST<FLOAT> counters) → BOOLEAN`
+
 `pac_filter_lte(ANY value, LIST<FLOAT> counters) → BOOLEAN`
+
 `pac_filter_eq(ANY value, LIST<FLOAT> counters) → BOOLEAN`
+
 `pac_filter_neq(ANY value, LIST<FLOAT> counters) → BOOLEAN`
 
 ### Example
@@ -130,10 +140,41 @@ SELECT pac_select_gt(pac_hash(hash(c_custkey)), 100,
     pac_count(pac_hash(hash(c_custkey))))
 FROM customer;
 ```
+### pac_noised variants
 
+Scalar-returning convenience functions that compose a counter aggregate with `pac_noised`. These are what standard SQL aggregates (`COUNT(*)`, `SUM(x)`, etc.) get rewritten to by the PAC compiler.
+
+`pac_noised_count(UBIGINT hash) → BIGINT`
+
+`pac_noised_count(UBIGINT hash, DOUBLE correction) → BIGINT`
+
+`pac_noised_sum(UBIGINT hash, ANY value) → numeric`
+
+`pac_noised_sum(UBIGINT hash, ANY value, DOUBLE correction) → numeric`
+
+`pac_noised_avg(UBIGINT hash, ANY value) → DOUBLE`
+
+`pac_noised_avg(UBIGINT hash, ANY value, DOUBLE correction) → DOUBLE`
+
+`pac_noised_min(UBIGINT hash, ANY value) → type`
+
+`pac_noised_min(UBIGINT hash, ANY value, DOUBLE correction) → type`
+
+`pac_noised_max(UBIGINT hash, ANY value) → type`
+
+`pac_noised_max(UBIGINT hash, ANY value, DOUBLE correction) → type`
+
+The optional `correction` parameter adjusts the noise calibration. Internally, `pac_noised_avg` is rewritten to `pac_noised_div(pac_sum(...), pac_count(...))`.
+
+```sql
+-- Standard SQL rewriting: SELECT COUNT(*) FROM customer
+-- becomes:
+SELECT pac_noised_count(pac_hash(hash(c_custkey))) FROM customer;
+```
 ## AVG Handling
 
 PAC decomposes averages into sum/count pairs, since averaging across sub-samples requires independent counter lists for numerator and denominator.
+It registers `pac_avg` and `pac_noised_avg` functions, but does not implement them. Rather it rewrites them in a last pass over the plan into `pac_avg()` -> `pac_div(pac_sum(..), pac_count())` resp. `pac_noised_avg()`-> `pac_noised_div(pac_sum(..), pac_count())`. Here, `pac_div(s,c)` has the same semantics as `list_transform(list_zip(s,c), lambda x: x[1]/x[2])` but is implemented in C++ (fused) for more performance.
 
 ### pac_div
 
@@ -145,12 +186,7 @@ Element-wise division of two counter lists. Used as an intermediate step when co
 
 `pac_noised_div(LIST<FLOAT> sum_counters, LIST<FLOAT> count_counters) → FLOAT`
 
-Fused division and noise application. Divides sum counters by count counters element-wise, then applies the PAC noise mechanism. This is what `pac_noised_avg` is rewritten to internally.
-
-### Decomposition
-
-- `pac_avg(hash, value)` → `pac_div(pac_sum(hash, value), pac_count(hash, value))`
-- `pac_noised_avg(hash, value)` → `pac_noised_div(pac_sum(hash, value), pac_count(hash, value))`
+Fused division and noise application. Divides sum counters by count counters element-wise, then applies the PAC noise mechanism, i.e. `pac_noised()`. This is what `pac_noised_avg` is rewritten to internally.
 
 ### Example
 
@@ -160,29 +196,6 @@ SELECT pac_noised_div(
     pac_sum(pac_hash(hash(c_custkey)), c_acctbal),
     pac_count(pac_hash(hash(c_custkey))))
 FROM customer;
-```
-
-## Noised Aggregates
-
-Scalar-returning convenience functions that compose a counter aggregate with `pac_noised`. These are what standard SQL aggregates (`COUNT(*)`, `SUM(x)`, etc.) get rewritten to by the PAC compiler.
-
-`pac_noised_count(UBIGINT hash) → BIGINT`
-`pac_noised_count(UBIGINT hash, DOUBLE correction) → BIGINT`
-`pac_noised_sum(UBIGINT hash, ANY value) → numeric`
-`pac_noised_sum(UBIGINT hash, ANY value, DOUBLE correction) → numeric`
-`pac_noised_avg(UBIGINT hash, ANY value) → DOUBLE`
-`pac_noised_avg(UBIGINT hash, ANY value, DOUBLE correction) → DOUBLE`
-`pac_noised_min(UBIGINT hash, ANY value) → type`
-`pac_noised_min(UBIGINT hash, ANY value, DOUBLE correction) → type`
-`pac_noised_max(UBIGINT hash, ANY value) → type`
-`pac_noised_max(UBIGINT hash, ANY value, DOUBLE correction) → type`
-
-The optional `correction` parameter adjusts the noise calibration. Internally, `pac_noised_avg` is rewritten to `pac_noised_div(pac_sum(...), pac_count(...))`.
-
-```sql
--- Standard SQL rewriting: SELECT COUNT(*) FROM customer
--- becomes:
-SELECT pac_noised_count(pac_hash(hash(c_custkey))) FROM customer;
 ```
 
 ## Utility
