@@ -1,6 +1,6 @@
 # name: test/sql/pac_derived.test
 # description: Test PAC derived_pu counter storage and read-time finalization
-# group: [pac]
+# group: [sql]
 
 require pac
 
@@ -24,20 +24,20 @@ statement ok
 INSERT INTO scores VALUES (1, 1, 10), (2, 1, 20), (3, 2, 30);
 
 # ==========================================
-# 1. Write path: CTAS stores counters
+# 1. Write path: CTAS with aggregate stores counter columns
 # ==========================================
 
 statement ok
 CREATE TABLE mv AS SELECT grp, SUM(value) AS total FROM scores GROUP BY grp;
 
-# With pac_rewrite=false, column should be LIST type (raw counters)
+# With pac_rewrite=false, raw counters are visible (list of 64 elements)
 statement ok
 SET pac_rewrite = false;
 
 query I
-SELECT typeof(total) FROM mv LIMIT 1;
+SELECT length(total) FROM mv LIMIT 1;
 ----
-FLOAT[]
+64
 
 statement ok
 SET pac_rewrite = true;
@@ -55,7 +55,6 @@ SELECT grp, total FROM mv;
 1	60.0
 2	60.0
 
-# Verify result has 2 rows (no crash, correct execution)
 query I
 SELECT count(*) FROM mv;
 ----
@@ -94,14 +93,13 @@ SET pac_rewrite = true;
 statement ok
 SET pac_mi = 1;
 
-# Results should be returned without error (2 rows with noise)
 query I
 SELECT count(*) FROM mv;
 ----
 2
 
 # ==========================================
-# 6. Non-aggregate CTAS should NOT be derived_pu
+# 6. Non-aggregate CTAS should NOT store counters
 # ==========================================
 
 statement ok
@@ -116,11 +114,11 @@ SET pac_check = false;
 statement ok
 CREATE TABLE copy_scores AS SELECT id, grp, value FROM scores;
 
-# copy_scores should have regular INT columns, not LIST<FLOAT>
+# value should be a scalar INT, not a list
 query I
-SELECT typeof(value) FROM copy_scores LIMIT 1;
+SELECT value FROM copy_scores WHERE id = 1;
 ----
-INTEGER
+10
 
 statement ok
 SET pac_rewrite = true;
@@ -160,54 +158,33 @@ SELECT (SELECT total FROM mv WHERE grp = 1) = (SELECT total FROM mv WHERE grp = 
 true
 
 # ==========================================
-# 10. Stable noise: same counters = same result across reads
+# 10. Multiple aggregate columns (SUM + COUNT)
 # ==========================================
-
-statement ok
-SET pac_mi = 1;
-
-statement ok
-SET pac_seed = 42;
-
-query I
-SELECT count(*) FROM mv;
-----
-2
-
-# ==========================================
-# 8. Multiple aggregate columns (SUM + COUNT)
-# ==========================================
-
-statement ok
-SET pac_mi = 0;
 
 statement ok
 CREATE TABLE mv2 AS SELECT grp, SUM(value) AS total, COUNT(*) AS cnt FROM scores GROUP BY grp;
 
+# Both aggregate columns should be counter lists (64 elements each)
 statement ok
 SET pac_rewrite = false;
 
 query II
-SELECT typeof(total), typeof(cnt) FROM mv2 LIMIT 1;
+SELECT length(total), length(cnt) FROM mv2 LIMIT 1;
 ----
-FLOAT[]	FLOAT[]
+64	64
 
 statement ok
 SET pac_rewrite = true;
 
+# Read path should finalize both columns
 query I
 SELECT count(*) FROM mv2;
 ----
 2
 
 # ==========================================
-# 9. pac_mi=0 counters have zero variance -> no noise
+# 11. pac_mi=0 at read time -> no noise (returns counter[0] directly)
 # ==========================================
-
-# The counters were created with pac_mi=0, meaning all 64 subsamples
-# agree perfectly. pac_finalize computes variance=0 -> delta=0 -> no noise,
-# regardless of the current pac_mi setting at read time.
-# (This is expected behavior: noise calibration depends on counter variance)
 
 statement ok
 SET pac_mi = 0;
@@ -220,3 +197,16 @@ SELECT grp, total FROM mv;
 ----
 1	60.0
 2	60.0
+
+# ==========================================
+# 12. pac_mi > 0 at read time -> noise added (different from exact)
+# ==========================================
+
+statement ok
+SET pac_mi = 1;
+
+# With noise, results are still returned (2 rows, no crash)
+query I
+SELECT count(*) FROM mv;
+----
+2

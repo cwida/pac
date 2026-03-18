@@ -270,6 +270,9 @@ static void PropagateCTASMetadata(unique_ptr<LogicalOperator> &outer_plan, uniqu
 // the statement's result types (set at plan time) become stale. This state patches them
 // in OnFinalizePrepare, which fires after the physical plan is generated.
 struct PACDerivedTypePatcher : public ClientContextState {
+	// Must return true so OnFinalizePrepare is called (DuckDB skips it otherwise).
+	// This causes DuckDB to plan on a statement copy — minor overhead for all queries
+	// when PAC is loaded. Only the actual type patching is gated on SELECT + type mismatch.
 	bool CanRequestRebind() override {
 		return true;
 	}
@@ -542,7 +545,7 @@ void PACRewriteRule::PACPreOptimizeFunction(OptimizerExtensionInput &input, uniq
 }
 
 // ============================================================================
-// PACDerivedReadRule — post-optimizer (placeholder)
+// PACDerivedReadRule — post-optimizer: finalize derived_pu counter columns
 // ============================================================================
 // Runs AFTER DuckDB's built-in optimizers (which may remove trivial projections).
 // Wraps LIST<FLOAT> column refs from derived_pu tables with pac_finalize().
