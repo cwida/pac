@@ -221,7 +221,7 @@ static void PropagateCTASMetadata(unique_ptr<LogicalOperator> &outer_plan, uniqu
 
 	// Map source PAC_KEY and protected columns to destination names
 	PACTableMetadata prop(new_table);
-	prop.derived_pu = has_aggregate;
+	prop.derived_pu = true;
 
 	for (auto &pk : source_meta->primary_key_columns) {
 		auto it = src_to_dest_name.find(pk);
@@ -553,6 +553,25 @@ void PACDerivedReadRule::PACDerivedReadFunction(OptimizerExtensionInput &input, 
 	bool pac_rewrite_enabled = GetBooleanSetting(input.context, "pac_rewrite", true);
 	if (!pac_rewrite_enabled) {
 		return;
+	}
+	// Skip pac_finalize injection for DML (INSERT/UPDATE/DELETE) — these must operate
+	// on raw counter data. Only inject for user-facing SELECTs.
+	if (plan->type == LogicalOperatorType::LOGICAL_INSERT ||
+	    plan->type == LogicalOperatorType::LOGICAL_UPDATE ||
+	    plan->type == LogicalOperatorType::LOGICAL_DELETE) {
+		return;
+	}
+	// Also check for CTE-wrapped DML (WITH ... INSERT INTO ...)
+	if (plan->type == LogicalOperatorType::LOGICAL_MATERIALIZED_CTE) {
+		LogicalOperator *inner = plan.get();
+		while (inner->type == LogicalOperatorType::LOGICAL_MATERIALIZED_CTE && inner->children.size() > 1) {
+			inner = inner->children[1].get();
+		}
+		if (inner->type == LogicalOperatorType::LOGICAL_INSERT ||
+		    inner->type == LogicalOperatorType::LOGICAL_UPDATE ||
+		    inner->type == LogicalOperatorType::LOGICAL_DELETE) {
+			return;
+		}
 	}
 	if (!HasDerivedPuCounterGets(plan.get())) {
 		return;
