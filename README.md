@@ -2,7 +2,7 @@
 
 PAC is a DuckDB extension that automatically privatizes SQL queries using the PAC Privacy framework, protecting against Membership Inference Attacks by adding noise to aggregate query results. Unlike Differential Privacy, PAC works automatically and transparently — no per-query analysis by a privacy specialist is needed.
 
-This works on DuckDB v1.5 and beyond. See https://duckdb.org/install to install. This extension is also distributed in WASM, so you can also just run these examples in https://shell.duckdb.org in a browser, without installing duckdb. 
+This works on DuckDB v1.5 and beyond. See https://duckdb.org/install to install. Or if you do not want to install anything: this extension is also distributed in WASM, so you can run the examples also in https://shell.duckdb.org in a browser. 
 
 ## Install
 
@@ -45,6 +45,7 @@ SELECT c_name FROM employees;
 -- Error: protected column 'customer.c_name' can only be accessed inside
 -- aggregate functions (e.g., SUM, COUNT, AVG, MIN, MAX)
 
+--The noised result is close to the real answer but perturbed — an attacker cannot determine whether any specific employee is in the database. 
 SELECT l_returnflag, l_linestatus, SUM(l_extendedprice) FROM lineitem GROUP BY ALL;
 ┌──────────────┬──────────────┬──────────────────────┐
 │ l_returnflag │ l_linestatus │ sum(l_extendedprice) │
@@ -55,8 +56,6 @@ SELECT l_returnflag, l_linestatus, SUM(l_extendedprice) FROM lineitem GROUP BY A
 │ N            │ O            │      116295729152.00 │
 │ R            │ F            │       57318996705.28 │
 └──────────────┴──────────────┴──────────────────────┘
-
-The noised result is close to the real answer but perturbed — an attacker cannot determine whether any specific employee is in the database. 
 
 -- PAC rewrites the query plan automatically
 -- Note that: (1) the GROUP_BY uses a pac_noised_sum(#2, #3), not a standard sum()
