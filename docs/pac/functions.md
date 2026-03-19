@@ -41,8 +41,11 @@ SELECT pac_sum(pac_hash(hash(c_custkey)), c_acctbal) FROM customer;
 Each counter aggregate has a `LIST<FLOAT>` overload for combining counter lists across subqueries or nested aggregations.
 
 `pac_count(LIST<FLOAT>) → LIST<FLOAT>`
+
 `pac_sum(LIST<FLOAT>) → LIST<FLOAT>`
+
 `pac_min(LIST<FLOAT>) → LIST<FLOAT>`
+
 `pac_max(LIST<FLOAT>) → LIST<FLOAT>`
 
 ### Example
@@ -91,7 +94,7 @@ FROM customer;
 
 `pac_filter(LIST<BOOL>) → BOOLEAN`
 
-Probabilistic row filter for categorical queries where no PAC aggregate sits above the filter. Checks the bit at position `query_hash % 64`; the row passes if the bit is set. When `pac_mi = 0`, deterministic majority voting is used instead (passes if popcount > 32). See [categorical queries](query_operators.md#case-2-pac_filter--filters-on-non-sensitive-tuples).
+Probabilistic row filter for categorical queries where no PAC aggregate sits above the filter. The probability to pass is proportional to the amount of true-s in the 64 possible worlds. When `pac_mi = 0`, deterministic majority voting is used instead (passes if popcount > 32). See [categorical queries](query_operators.md#case-2-pac_filter--filters-on-non-sensitive-tuples).
 
 ```sql
 -- Filter rows where the subquery count exceeds 100 across worlds
@@ -174,7 +177,7 @@ SELECT pac_noised_count(pac_hash(hash(c_custkey))) FROM customer;
 ## AVG Handling
 
 PAC decomposes averages into sum/count pairs, since averaging across sub-samples requires independent counter lists for numerator and denominator.
-It registers `pac_avg` and `pac_noised_avg` functions, but does not implement them. Rather it rewrites them in a last pass over the plan into `pac_avg()` -> `pac_div(pac_sum(..), pac_count())` resp. `pac_noised_avg()`-> `pac_noised_div(pac_sum(..), pac_count())`. Here, `pac_div(s,c)` has the same semantics as `list_transform(list_zip(s,c), lambda x: x[1]/x[2])` but is implemented in C++ (fused) for more performance.
+It registers `pac_avg` and `pac_noised_avg` functions, but does not implement them. Rather, it rewrites them in a last pass over the plan into `pac_avg()` -> `pac_div(pac_sum(..), pac_count())` resp. `pac_noised_avg()`-> `pac_noised_div(pac_sum(..), pac_count())`. Here, `pac_div(s,c)` has the same semantics as `list_transform(list_zip(s,c), lambda x: x[1]/x[2])` but is implemented in C++ (fused) for more performance.
 
 ### pac_div
 
