@@ -442,13 +442,6 @@ static void RegisterPacSelectCmp(ExtensionLoader &loader, const string &name) {
 	loader.RegisterFunction(std::move(info));
 }
 
-// ============================================================================
-// PAC_NOISED: Apply noise to a list of 64 counter values
-// ============================================================================
-// pac_noised(list<double> counters) -> DOUBLE
-// Takes a list of 64 counter values, reconstructs key_hash from NULL/non-NULL pattern,
-// and returns a single noised value using PacNoisySampleFrom64Counters.
-// This is essentially what pac_sum/avg/count/min/max aggregates do in their finalize.
 // pac_coalesce(LIST<DOUBLE>) -> LIST<DOUBLE>
 // If the input list is NULL, returns a list of 64 NULL doubles.
 // Otherwise returns the input unchanged. This is needed because COALESCE
@@ -552,6 +545,13 @@ static void PacCoalesceFunction(DataChunk &args, ExpressionState &state, Vector 
 	}
 }
 
+// ============================================================================
+// PAC_NOISED: Apply noise to a list of 64 counter values
+// ============================================================================
+// pac_noised(list<double> counters) -> DOUBLE
+// Takes a list of 64 counter values, reconstructs key_hash from NULL/non-NULL pattern,
+// and returns a single noised value using PacNoisySampleFrom64Counters.
+// This is essentially what pac_sum/avg/count/min/max aggregates do in their finalize.
 static void PacNoisedFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &list_vec = args.data[0];
 	idx_t count = args.size();
