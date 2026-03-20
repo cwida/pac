@@ -518,11 +518,16 @@ void PACRewriteRule::PACPreOptimizeFunction(OptimizerExtensionInput &input, uniq
 				if (!target_table.empty()) {
 					auto &mgr = PACMetadataManager::Get();
 					auto *meta = mgr.GetTableMetadata(target_table);
+					PAC_DEBUG_PRINT("[PAC TRACE] DML target='" + target_table +
+					                "' has_meta=" + std::to_string(meta != nullptr) +
+					                " derived_pu=" + std::to_string(meta ? meta->derived_pu : false));
 					if (meta && meta->derived_pu) {
+						PAC_DEBUG_PRINT("[PAC TRACE] Converting to counters for derived_pu table");
 						ConvertDerivedPuToCounters(input, target_plan);
+						// Resolve types so parent operators reflect the counter conversion
+						target_plan->ResolveOperatorTypes();
 						// Update CTAS column types to match the counter-converted plan output
 						if (outer_plan->type == LogicalOperatorType::LOGICAL_CREATE_TABLE) {
-							target_plan->ResolveOperatorTypes();
 							auto &create = outer_plan->Cast<LogicalCreateTable>();
 							auto &columns = create.info->Base().columns;
 							auto &plan_types = target_plan->types;

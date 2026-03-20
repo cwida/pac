@@ -1,6 +1,8 @@
 #include "query_processing/pac_derived_rewriter.hpp"
 
 #include "aggregates/pac_aggregate.hpp"
+#include "pac_debug.hpp"
+#include "duckdb/common/printer.hpp"
 #include "categorical/pac_categorical_detection.hpp"
 #include "metadata/pac_metadata_manager.hpp"
 #include "duckdb/catalog/catalog_entry/duck_table_entry.hpp"
@@ -9,6 +11,7 @@
 #include "duckdb/optimizer/optimizer.hpp"
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
+#include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/planner/logical_operator_visitor.hpp"
@@ -46,11 +49,14 @@ static void ConvertAggregatesRecursive(OptimizerExtensionInput &input, LogicalOp
 		}
 
 		auto &bound_agg = expr->Cast<BoundAggregateExpression>();
+		PAC_DEBUG_PRINT("[PAC TRACE] ConvertAgg: checking aggregate '" + bound_agg.function.name +
+		                "' IsPac=" + std::to_string(IsPacAggregate(bound_agg.function.name)));
 		if (!IsPacAggregate(bound_agg.function.name)) {
 			continue;
 		}
 
 		string counters_name = GetCountersVariant(bound_agg.function.name);
+		PAC_DEBUG_PRINT("[PAC TRACE] ConvertAgg: counters_name='" + counters_name + "'");
 		if (counters_name.empty()) {
 			continue;
 		}
@@ -61,7 +67,11 @@ static void ConvertAggregatesRecursive(OptimizerExtensionInput &input, LogicalOp
 		}
 
 		auto new_aggr = RebindAggregate(input.context, counters_name, std::move(children), bound_agg.IsDistinct());
+		PAC_DEBUG_PRINT("[PAC TRACE] ConvertAgg: RebindAggregate returned " + std::to_string(new_aggr != nullptr));
 		if (new_aggr) {
+			PAC_DEBUG_PRINT("[PAC TRACE] ConvertAgg: rebound to '" +
+			                new_aggr->Cast<BoundAggregateExpression>().function.name +
+			                "' return_type=" + new_aggr->return_type.ToString());
 			agg.expressions[i] = std::move(new_aggr);
 		} else {
 			bound_agg.function.name = counters_name;
@@ -101,11 +111,36 @@ static void FixStaleColumnRefTypes(LogicalOperator *op, const unordered_set<uint
 	}
 }
 
+// After counter conversion, the binder's inserted casts (e.g. BIGINT→FLOAT[]) may become
+// redundant (FLOAT[]→FLOAT[]) because the aggregate now returns the counter list type directly.
+// Strip these no-op casts to avoid "Unimplemented type for cast" errors at execution time.
+static void StripRedundantCasts(LogicalOperator *op) {
+	if (!op) {
+		return;
+	}
+	for (auto &child : op->children) {
+		StripRedundantCasts(child.get());
+	}
+	for (auto &expr : op->expressions) {
+		std::function<void(unique_ptr<Expression> &)> Strip = [&](unique_ptr<Expression> &e) {
+			ExpressionIterator::EnumerateChildren(*e, Strip);
+			if (e->GetExpressionClass() == ExpressionClass::BOUND_CAST) {
+				auto &cast = e->Cast<BoundCastExpression>();
+				if (cast.child->return_type == cast.return_type) {
+					e = std::move(cast.child);
+				}
+			}
+		};
+		Strip(expr);
+	}
+}
+
 void ConvertDerivedPuToCounters(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan) {
 	unordered_set<uint64_t> converted;
 	ConvertAggregatesRecursive(input, plan.get(), converted);
 	if (!converted.empty()) {
 		FixStaleColumnRefTypes(plan.get(), converted);
+		StripRedundantCasts(plan.get());
 	}
 }
 
@@ -189,17 +224,44 @@ static void WrapCounterRefsWithFinalize(OptimizerExtensionInput &input, LogicalO
 		}
 	}
 
-	// Wrap direct counter column refs with pac_finalize
-	for (auto &expr : op->expressions) {
-		if (expr->type == ExpressionType::BOUND_COLUMN_REF) {
-			auto &col_ref = expr->Cast<BoundColumnRefExpression>();
+	// Wrap counter column refs with pac_finalize — recursively, so refs nested
+	// inside comparisons, filters, casts, etc. are also handled.
+	auto list_type = LogicalType::LIST(PacFloatLogicalType());
+	std::function<void(unique_ptr<Expression> &)> WrapExpr = [&](unique_ptr<Expression> &e) {
+		// Recurse into children first (bottom-up)
+		ExpressionIterator::EnumerateChildren(*e, WrapExpr);
+		// Wrap counter column refs
+		if (e->type == ExpressionType::BOUND_COLUMN_REF) {
+			auto &col_ref = e->Cast<BoundColumnRefExpression>();
 			for (auto &info : gets) {
 				if (col_ref.binding.table_index == info.table_index &&
 				    info.counter_columns.count(col_ref.binding.column_index)) {
-					expr = input.optimizer.BindScalarFunction("pac_finalize", std::move(expr));
+					e = input.optimizer.BindScalarFunction("pac_finalize", std::move(e));
 					break;
 				}
 			}
+		}
+		// Fix casts that the binder inserted targeting FLOAT[] (counter list type).
+		// After wrapping counter refs with pac_finalize, comparisons now expect scalars,
+		// so CAST(scalar → FLOAT[]) should become CAST(scalar → FLOAT).
+		// Also strip no-op casts where source == target type.
+		if (e->GetExpressionClass() == ExpressionClass::BOUND_CAST) {
+			auto &cast = e->Cast<BoundCastExpression>();
+			if (cast.return_type == list_type && cast.child->return_type != list_type) {
+				// Binder-inserted cast targeting counter list type — retarget to scalar
+				e = BoundCastExpression::AddDefaultCastToType(std::move(cast.child), finalized_type);
+			} else if (cast.child->return_type == cast.return_type) {
+				e = std::move(cast.child);
+			}
+		}
+	};
+	for (auto &expr : op->expressions) {
+		WrapExpr(expr);
+	}
+	if (op->type == LogicalOperatorType::LOGICAL_ORDER_BY) {
+		auto &order = op->Cast<LogicalOrder>();
+		for (auto &node : order.orders) {
+			WrapExpr(node.expression);
 		}
 	}
 
