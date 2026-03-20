@@ -11,7 +11,6 @@ namespace duckdb {
 // pac_finalize(LIST<FLOAT>) -> FLOAT
 // Takes 64 subsample counters and returns a noised scalar value.
 // Counters already include 2x correction from pac_sum/pac_count finalize.
-// Uses stable world picking: pac_seed without ActiveQuery mixing.
 // ============================================================================
 static void PacFinalizeFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &context = state.GetContext();
@@ -21,6 +20,9 @@ static void PacFinalizeFunction(DataChunk &args, ExpressionState &state, Vector 
 	uint64_t seed = (context.TryGetCurrentSetting("pac_seed", pac_seed_val) && !pac_seed_val.IsNull())
 	                    ? uint64_t(pac_seed_val.GetValue<int64_t>())
 	                    : 42;
+	if (mi != 0.0) {
+		seed ^= PAC_MAGIC_HASH * static_cast<uint64_t>(context.ActiveTransaction().GetActiveQuery());
+	}
 	uint64_t query_hash = (seed * PAC_MAGIC_HASH) ^ PAC_MAGIC_HASH;
 
 	auto &list_vec = args.data[0];
