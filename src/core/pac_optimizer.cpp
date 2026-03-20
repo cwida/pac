@@ -556,8 +556,7 @@ void PACDerivedReadRule::PACDerivedReadFunction(OptimizerExtensionInput &input, 
 	}
 	// Skip pac_finalize injection for DML (INSERT/UPDATE/DELETE) — these must operate
 	// on raw counter data. Only inject for user-facing SELECTs.
-	if (plan->type == LogicalOperatorType::LOGICAL_INSERT ||
-	    plan->type == LogicalOperatorType::LOGICAL_UPDATE ||
+	if (plan->type == LogicalOperatorType::LOGICAL_INSERT || plan->type == LogicalOperatorType::LOGICAL_UPDATE ||
 	    plan->type == LogicalOperatorType::LOGICAL_DELETE) {
 		return;
 	}
@@ -567,8 +566,7 @@ void PACDerivedReadRule::PACDerivedReadFunction(OptimizerExtensionInput &input, 
 		while (inner->type == LogicalOperatorType::LOGICAL_MATERIALIZED_CTE && inner->children.size() > 1) {
 			inner = inner->children[1].get();
 		}
-		if (inner->type == LogicalOperatorType::LOGICAL_INSERT ||
-		    inner->type == LogicalOperatorType::LOGICAL_UPDATE ||
+		if (inner->type == LogicalOperatorType::LOGICAL_INSERT || inner->type == LogicalOperatorType::LOGICAL_UPDATE ||
 		    inner->type == LogicalOperatorType::LOGICAL_DELETE) {
 			return;
 		}
