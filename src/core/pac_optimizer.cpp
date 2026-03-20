@@ -297,6 +297,18 @@ struct PACDerivedTypePatcher : public ClientContextState {
 // PACRewriteRule - Main PAC query rewriting optimizer rule
 // ============================================================================
 
+static bool PlanHasAggregate(const LogicalOperator &op) {
+	if (op.type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+		return true;
+	}
+	for (auto &child : op.children) {
+		if (PlanHasAggregate(*child)) {
+			return true;
+		}
+	}
+	return false;
+}
+
 // PAC rewrites run in the pre-optimizer phase, BEFORE DuckDB's built-in optimizers.
 // This way DuckDB's join ordering, filter pushdown, column lifetime, compressed
 // materialization etc. all run on the PAC-transformed plan automatically.
@@ -393,7 +405,8 @@ void PACRewriteRule::PACPreOptimizeFunction(OptimizerExtensionInput &input, uniq
 	PAC_DEBUG_PRINT("[PAC TRACE] is_dml_wrapper=" + std::to_string(is_dml_wrapper) + " is_cte_dml=" +
 	                std::to_string(is_cte_dml) + " fk_paths.empty=" + std::to_string(check.fk_paths.empty()) +
 	                " scanned_pu_tables.empty=" + std::to_string(check.scanned_pu_tables.empty()));
-	if ((is_dml_wrapper || is_cte_dml) && check.fk_paths.empty() && check.scanned_pu_tables.empty()) {
+	if ((is_dml_wrapper || is_cte_dml) && check.fk_paths.empty() && check.scanned_pu_tables.empty() &&
+	    PlanHasAggregate(*target_plan)) {
 		auto &mgr = PACMetadataManager::Get();
 		std::unordered_map<string, idx_t> scan_counts;
 		CountScans(*target_plan, scan_counts);
@@ -559,10 +572,10 @@ void PACDerivedReadRule::PACDerivedReadFunction(OptimizerExtensionInput &input, 
 	if (!pac_rewrite_enabled) {
 		return;
 	}
-	// Skip pac_finalize injection for DML (INSERT/UPDATE/DELETE) — these must operate
-	// on raw counter data. Only inject for user-facing SELECTs.
+	// Skip pac_finalize injection for DML — these must operate on raw counter data.
+	// CTAS is included: copying from a derived_pu table should preserve counter lists.
 	if (plan->type == LogicalOperatorType::LOGICAL_INSERT || plan->type == LogicalOperatorType::LOGICAL_UPDATE ||
-	    plan->type == LogicalOperatorType::LOGICAL_DELETE) {
+	    plan->type == LogicalOperatorType::LOGICAL_DELETE || plan->type == LogicalOperatorType::LOGICAL_CREATE_TABLE) {
 		return;
 	}
 	// Also check for CTE-wrapped DML (WITH ... INSERT INTO ...)

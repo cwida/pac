@@ -228,16 +228,28 @@ static void WrapCounterRefsWithFinalize(OptimizerExtensionInput &input, LogicalO
 	// inside comparisons, filters, casts, etc. are also handled.
 	auto list_type = LogicalType::LIST(PacFloatLogicalType());
 	std::function<void(unique_ptr<Expression> &)> WrapExpr = [&](unique_ptr<Expression> &e) {
+		// If the binder inserted CAST(counter_col AS FLOAT) via our registered implicit cast,
+		// the cast already performs pac_finalize — don't recurse into it.
+		if (e->GetExpressionClass() == ExpressionClass::BOUND_CAST) {
+			auto &cast = e->Cast<BoundCastExpression>();
+			if (cast.child->return_type == list_type && cast.return_type != list_type) {
+				return;
+			}
+		}
 		// Recurse into children first (bottom-up)
 		ExpressionIterator::EnumerateChildren(*e, WrapExpr);
-		// Wrap counter column refs
+		// Wrap counter column refs — only if they still have the list type.
+		// If the binder/optimizer already changed the type (via implicit cast pushdown),
+		// the registered FLOAT[]→FLOAT cast handles finalization at execution time.
 		if (e->type == ExpressionType::BOUND_COLUMN_REF) {
 			auto &col_ref = e->Cast<BoundColumnRefExpression>();
-			for (auto &info : gets) {
-				if (col_ref.binding.table_index == info.table_index &&
-				    info.counter_columns.count(col_ref.binding.column_index)) {
-					e = input.optimizer.BindScalarFunction("pac_finalize", std::move(e));
-					break;
+			if (col_ref.return_type == list_type) {
+				for (auto &info : gets) {
+					if (col_ref.binding.table_index == info.table_index &&
+					    info.counter_columns.count(col_ref.binding.column_index)) {
+						e = input.optimizer.BindScalarFunction("pac_finalize", std::move(e));
+						break;
+					}
 				}
 			}
 		}
