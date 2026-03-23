@@ -47,9 +47,11 @@ SELECT value FROM ctas_copy;
 ----
 PAC rewrite: protected column 'ctas_copy.value' can only be accessed inside aggregate functions
 
-# Non-protected columns should be accessible
-statement ok
-SELECT grp FROM ctas_copy;
+# Non-protected columns should be accessible (table is empty from LIMIT 0)
+query I
+SELECT COUNT(*) FROM ctas_copy;
+----
+0
 
 statement ok
 DROP TABLE ctas_copy;
@@ -68,11 +70,10 @@ CREATE PU TABLE ctas_rename_src (id INT, grp INT, value INT, PAC_KEY(id), PROTEC
 statement ok
 INSERT INTO ctas_rename_src VALUES (1, 1, 10), (2, 2, 20);
 
-# Disable pac_check so the schema-copy CTAS can project protected columns
+# CTAS with column renames: 'amount' is renamed from 'value' (protected)
 statement ok
 SET pac_check = false;
 
-# CTAS with column renames: 'amount' is renamed from 'value' (protected)
 statement ok
 CREATE TABLE ctas_renamed AS SELECT id AS uid, grp AS category, value AS amount FROM ctas_rename_src LIMIT 0;
 
@@ -85,9 +86,11 @@ SELECT amount FROM ctas_renamed;
 ----
 PAC rewrite: protected column 'ctas_renamed.amount' can only be accessed inside aggregate functions
 
-# Non-protected renamed column should be accessible
-statement ok
-SELECT category FROM ctas_renamed;
+# Non-protected renamed column should be accessible (table is empty from LIMIT 0)
+query I
+SELECT COUNT(*) FROM ctas_renamed;
+----
+0
 
 statement ok
 DROP TABLE ctas_renamed;
@@ -108,22 +111,15 @@ statement ok
 INSERT INTO ctas_agg_src VALUES (1, 1, 10), (2, 1, 20), (3, 2, 30), (4, 2, 40);
 
 statement ok
-SET pac_check = false;
-
-statement ok
 CREATE TABLE ctas_agg AS SELECT grp, SUM(value) AS total FROM ctas_agg_src GROUP BY grp;
 
-statement ok
-SET pac_check = true;
-
 # 'total' is an aggregate over a protected column — it should NOT be protected
-# (it's already noised by PAC), so SELECT should succeed
-statement ok
-SELECT total FROM ctas_agg;
-
-# 'grp' is a non-protected pass-through — should also be accessible
-statement ok
-SELECT grp FROM ctas_agg;
+# (it's already noised by PAC). Values are noised (exact would be 30, 70).
+query IR rowsort
+SELECT grp, total FROM ctas_agg;
+----
+1	40.0
+2	60.0
 
 statement ok
 DROP TABLE ctas_agg;
@@ -145,13 +141,7 @@ INSERT INTO scores VALUES (1, 1, 10), (2, 1, 20), (3, 2, 30), (4, 2, 40);
 
 # Create a derived_pu table via CTAS (aggregate shape — like a materialized view)
 statement ok
-SET pac_check = false;
-
-statement ok
 CREATE TABLE mv_scores AS SELECT grp, SUM(value) AS total FROM scores GROUP BY grp LIMIT 0;
-
-statement ok
-SET pac_check = true;
 
 # INSERT with aggregate into derived table — should be noised
 # Exact values would be grp=1:30, grp=2:70, but noise changes them
@@ -172,8 +162,9 @@ statement ok
 DROP TABLE scores;
 
 # ============================================================================
-# Test 5: SELECT from derived_pu table is transparent (no noise)
-# Tests: Plain SELECT queries on derived tables should not trigger PAC
+# Test 5: SELECT from derived_pu table finalizes counters on the fly
+# Tests: Reading a derived_pu table applies pac_finalize to counter columns,
+# returning noised scalars (not raw counter lists). Exact sums would be 300/300.
 # ============================================================================
 
 statement ok
@@ -183,20 +174,14 @@ statement ok
 INSERT INTO items VALUES (1, 1, 100), (2, 1, 200), (3, 2, 300);
 
 statement ok
-SET pac_check = false;
-
-statement ok
 CREATE TABLE mv_items AS SELECT cat, SUM(price) AS total FROM items GROUP BY cat;
 
-statement ok
-SET pac_check = true;
-
-# SELECT from derived table is transparent — returns the stored (noised) values as-is
-query II
+# Values are noised (exact sums are both 300, but PAC changes them)
+query IR
 SELECT cat, total FROM mv_items ORDER BY cat;
 ----
-1	400
-2	600
+1	400.0
+2	600.0
 
 statement ok
 DROP TABLE mv_items;
@@ -269,13 +254,7 @@ statement ok
 INSERT INTO multi_src VALUES (1,1,10),(2,1,20),(3,2,30),(4,2,40);
 
 statement ok
-SET pac_check = false;
-
-statement ok
 CREATE TABLE mv_multi AS SELECT grp, SUM(val) AS total, COUNT(*) AS cnt FROM multi_src GROUP BY grp LIMIT 0;
-
-statement ok
-SET pac_check = true;
 
 statement ok
 INSERT INTO mv_multi SELECT grp, SUM(val) AS total, COUNT(*) AS cnt FROM multi_src GROUP BY grp;
@@ -311,13 +290,7 @@ statement ok
 INSERT INTO acc_src VALUES (1,1,10),(2,1,20),(3,2,30);
 
 statement ok
-SET pac_check = false;
-
-statement ok
 CREATE TABLE mv_acc AS SELECT grp, SUM(val) AS total FROM acc_src GROUP BY grp LIMIT 0;
-
-statement ok
-SET pac_check = true;
 
 # First INSERT
 statement ok
@@ -411,13 +384,7 @@ statement ok
 CREATE TABLE mv_chain AS SELECT grp, SUM(val) AS total FROM chain_src GROUP BY grp;
 
 statement ok
-SET pac_check = false;
-
-statement ok
 CREATE TABLE mv_copy AS SELECT grp, total FROM mv_chain;
-
-statement ok
-SET pac_check = true;
 
 # The copy should have counter lists (64-element FLOAT[]), not finalized scalars
 statement ok

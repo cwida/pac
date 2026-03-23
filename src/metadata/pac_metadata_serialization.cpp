@@ -102,6 +102,16 @@ string PACMetadataManager::SerializeToJSON(const PACTableMetadata &metadata, con
 	}
 	ss << "],\n";
 
+	// Serialize counter columns
+	ss << indent << "  \"counter_columns\": [";
+	for (size_t i = 0; i < metadata.counter_columns.size(); i++) {
+		if (i > 0) {
+			ss << ", ";
+		}
+		ss << "\"" << metadata.counter_columns[i] << "\"";
+	}
+	ss << "],\n";
+
 	// Serialize is_privacy_unit flag
 	ss << indent << "  \"is_privacy_unit\": " << (metadata.is_privacy_unit ? "true" : "false") << ",\n";
 
@@ -328,6 +338,18 @@ PACTableMetadata PACMetadataManager::DeserializeFromJSON(const string &json) {
 		auto end = std::sregex_iterator();
 		for (auto it = begin; it != end; ++it) {
 			metadata.protected_columns.push_back((*it)[1].str());
+		}
+	}
+
+	// Extract counter columns
+	std::regex counter_regex(R"xxx("counter_columns"\s*:\s*\[(.*?)\])xxx");
+	if (std::regex_search(json, match, counter_regex)) {
+		string counter_list = match[1].str();
+		std::regex col_regex2(R"xxx("([^"]+)")xxx");
+		auto begin2 = std::sregex_iterator(counter_list.begin(), counter_list.end(), col_regex2);
+		auto end2 = std::sregex_iterator();
+		for (auto it = begin2; it != end2; ++it) {
+			metadata.counter_columns.push_back((*it)[1].str());
 		}
 	}
 

@@ -18,6 +18,10 @@
 #include "duckdb/planner/operator/logical_aggregate.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/planner/operator/logical_order.hpp"
+#include "duckdb/planner/expression/bound_subquery_expression.hpp"
+#include "duckdb/planner/operator/logical_cte.hpp"
+#include "duckdb/planner/operator/logical_cteref.hpp"
+#include "duckdb/planner/operator/logical_distinct.hpp"
 #include "duckdb/planner/operator/logical_projection.hpp"
 
 namespace duckdb {
@@ -173,10 +177,15 @@ static void FindDerivedPuGets(LogicalOperator *op, vector<DerivedPuGetInfo> &get
 	if (!meta || !meta->derived_pu) {
 		return;
 	}
+	// Identify counter columns by type — only FLOAT[] columns from derived_pu tables.
+	// The counter_columns metadata is used at the propagation level to distinguish
+	// user FLOAT[] columns from PAC counter columns (see WrapCounterRefsWithFinalize).
 	auto list_type = LogicalType::LIST(PacFloatLogicalType());
 	DerivedPuGetInfo info;
 	info.table_index = get.table_index;
 	for (idx_t i = 0; i < get.returned_types.size(); i++) {
+		PAC_DEBUG_PRINT("[PAC FINALIZE] GET col[" + std::to_string(i) + "] type=" + get.returned_types[i].ToString() +
+		                " table_idx=" + std::to_string(get.table_index));
 		if (get.returned_types[i] == list_type) {
 			info.counter_columns.insert(i);
 		}
@@ -186,48 +195,94 @@ static void FindDerivedPuGets(LogicalOperator *op, vector<DerivedPuGetInfo> &get
 	}
 }
 
-// Wrap column refs to counter columns with pac_finalize, propagating type changes bottom-up.
-// Uses changed_bindings to track which output bindings have changed type so parent operators
-// can have their stale column refs updated.
+// Wrap counter column refs with pac_finalize, bottom-up through the plan.
+// Tracks counter column bindings as they flow through projections so that
+// intermediate projections (added by DuckDB's optimizer) don't break matching.
 static void WrapCounterRefsWithFinalize(OptimizerExtensionInput &input, LogicalOperator *op,
-                                        const vector<DerivedPuGetInfo> &gets,
-                                        unordered_set<uint64_t> &changed_bindings) {
+                                        const vector<DerivedPuGetInfo> &gets, unordered_set<uint64_t> &counter_bindings,
+                                        unordered_set<uint64_t> &finalized_bindings, bool suppress = false) {
 	if (!op) {
 		return;
 	}
+	// Suppress wrapping inside AGGREGATE subtrees — aggregates (e.g. first() in scalar
+	// subqueries) need raw FLOAT[] input. pac_finalize is applied above the aggregate.
+	bool child_suppress = suppress || (op->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY);
 	for (auto &child : op->children) {
-		WrapCounterRefsWithFinalize(input, child.get(), gets, changed_bindings);
+		WrapCounterRefsWithFinalize(input, child.get(), gets, counter_bindings, finalized_bindings, child_suppress);
 	}
+	bool skip_wrapping = suppress;
+
+	auto list_type = LogicalType::LIST(PacFloatLogicalType());
+	auto finalized_type = PacFloatLogicalType();
+
+	// At a GET node: seed counter_bindings using resolved output types + bindings
 	if (op->type == LogicalOperatorType::LOGICAL_GET) {
+		auto &get = op->Cast<LogicalGet>();
+		bool is_derived = false;
+		for (auto &info : gets) {
+			if (info.table_index == get.table_index) {
+				is_derived = true;
+				break;
+			}
+		}
+		if (is_derived) {
+			auto bindings = op->GetColumnBindings();
+			auto &types = op->types;
+			for (idx_t i = 0; i < bindings.size() && i < types.size(); i++) {
+				PAC_DEBUG_PRINT("[PAC FINALIZE] GET binding (" + std::to_string(bindings[i].table_index) + "," +
+				                std::to_string(bindings[i].column_index) + ") type=" + types[i].ToString());
+				if (types[i] == list_type) {
+					counter_bindings.insert(HashBinding(bindings[i]));
+				}
+			}
+		}
 		return;
 	}
 
-	auto finalized_type = PacFloatLogicalType();
+	// Propagate counter bindings through PROJECTION operators only.
+	// Projections remap bindings (new table_index), so we need to track them.
+	// Other operators (DISTINCT, ORDER BY, etc.) pass through child bindings
+	// unchanged — FixExpr handles their expression types via finalized_bindings.
+	// Propagate counter bindings through PROJECTION and AGGREGATE output.
+	if (op->type == LogicalOperatorType::LOGICAL_PROJECTION ||
+	    op->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+		auto out_bindings = op->GetColumnBindings();
+		auto &out_types = op->types;
+		for (idx_t i = 0; i < out_bindings.size() && i < out_types.size(); i++) {
+			if (out_types[i] == list_type) {
+				counter_bindings.insert(HashBinding(out_bindings[i]));
+			}
+		}
+	}
 
-	// Fix stale column refs from already-changed child bindings
+	if (skip_wrapping) {
+		return;
+	}
+
+	// First: update stale column refs that were finalized by a child operator
 	std::function<void(unique_ptr<Expression> &)> FixExpr = [&](unique_ptr<Expression> &e) {
 		if (e->type == ExpressionType::BOUND_COLUMN_REF) {
 			auto &col_ref = e->Cast<BoundColumnRefExpression>();
-			if (changed_bindings.count(HashBinding(col_ref.binding))) {
+			if (finalized_bindings.count(HashBinding(col_ref.binding))) {
 				col_ref.return_type = finalized_type;
 			}
 		}
 		ExpressionIterator::EnumerateChildren(*e, FixExpr);
 	};
-	for (auto &expr : op->expressions) {
-		FixExpr(expr);
-	}
-	if (op->type == LogicalOperatorType::LOGICAL_ORDER_BY) {
-		auto &order = op->Cast<LogicalOrder>();
-		for (auto &node : order.orders) {
-			FixExpr(node.expression);
-		}
-	}
+	LogicalOperatorVisitor::EnumerateExpressions(*op, [&](unique_ptr<Expression> *expr_ptr) { FixExpr(*expr_ptr); });
 
-	// Wrap counter column refs with pac_finalize — recursively, so refs nested
-	// inside comparisons, filters, casts, etc. are also handled.
-	auto list_type = LogicalType::LIST(PacFloatLogicalType());
+	// Wrap/fix expressions: any FLOAT[] column ref in a derived_pu plan gets pac_finalize.
+	// We match by type (FLOAT[]) rather than tracking bindings through intermediate
+	// projections, because DuckDB's optimizer reorders columns and breaks binding chains.
 	std::function<void(unique_ptr<Expression> &)> WrapExpr = [&](unique_ptr<Expression> &e) {
+		// Skip expressions already wrapped with pac_finalize (prevents double-wrapping
+		// when EnumerateExpressions traverses into subquery plans)
+		if (e->type == ExpressionType::BOUND_FUNCTION) {
+			auto &func = e->Cast<BoundFunctionExpression>();
+			if (func.function.name == "pac_finalize") {
+				return;
+			}
+		}
 		// If the binder inserted CAST(counter_col AS FLOAT) via our registered implicit cast,
 		// the cast already performs pac_finalize — don't recurse into it.
 		if (e->GetExpressionClass() == ExpressionClass::BOUND_CAST) {
@@ -236,54 +291,56 @@ static void WrapCounterRefsWithFinalize(OptimizerExtensionInput &input, LogicalO
 				return;
 			}
 		}
-		// Recurse into children first (bottom-up)
 		ExpressionIterator::EnumerateChildren(*e, WrapExpr);
-		// Wrap counter column refs — only if they still have the list type.
-		// If the binder/optimizer already changed the type (via implicit cast pushdown),
-		// the registered FLOAT[]→FLOAT cast handles finalization at execution time.
+		// Wrap any FLOAT[] column ref — in a plan with derived_pu GETs, these are counter columns
 		if (e->type == ExpressionType::BOUND_COLUMN_REF) {
 			auto &col_ref = e->Cast<BoundColumnRefExpression>();
-			if (col_ref.return_type == list_type) {
-				for (auto &info : gets) {
-					if (col_ref.binding.table_index == info.table_index &&
-					    info.counter_columns.count(col_ref.binding.column_index)) {
-						e = input.optimizer.BindScalarFunction("pac_finalize", std::move(e));
-						break;
-					}
-				}
+			if (col_ref.return_type == list_type && !finalized_bindings.count(HashBinding(col_ref.binding))) {
+				auto binding_hash = HashBinding(col_ref.binding);
+				e = input.optimizer.BindScalarFunction("pac_finalize", std::move(e));
+				finalized_bindings.insert(binding_hash);
 			}
 		}
-		// Fix casts that the binder inserted targeting FLOAT[] (counter list type).
-		// After wrapping counter refs with pac_finalize, comparisons now expect scalars,
-		// so CAST(scalar → FLOAT[]) should become CAST(scalar → FLOAT).
-		// Also strip no-op casts where source == target type.
+		// Fix stale casts
 		if (e->GetExpressionClass() == ExpressionClass::BOUND_CAST) {
 			auto &cast = e->Cast<BoundCastExpression>();
 			if (cast.return_type == list_type && cast.child->return_type != list_type) {
-				// Binder-inserted cast targeting counter list type — retarget to scalar
 				e = BoundCastExpression::AddDefaultCastToType(std::move(cast.child), finalized_type);
 			} else if (cast.child->return_type == cast.return_type) {
 				e = std::move(cast.child);
 			}
 		}
 	};
-	for (auto &expr : op->expressions) {
-		WrapExpr(expr);
-	}
-	if (op->type == LogicalOperatorType::LOGICAL_ORDER_BY) {
-		auto &order = op->Cast<LogicalOrder>();
-		for (auto &node : order.orders) {
-			WrapExpr(node.expression);
-		}
-	}
+	LogicalOperatorVisitor::EnumerateExpressions(*op, [&](unique_ptr<Expression> *expr_ptr) { WrapExpr(*expr_ptr); });
 
-	// Track changed output bindings for parent propagation
+	// After wrapping, immediately update this operator's output types so parent
+	// operators see correct types during their propagation step.
+	// For projections: derive from expressions. For others: sync from child types.
 	if (op->type == LogicalOperatorType::LOGICAL_PROJECTION) {
 		auto &proj = op->Cast<LogicalProjection>();
 		for (idx_t i = 0; i < proj.expressions.size(); i++) {
-			if (proj.expressions[i]->return_type == finalized_type &&
-			    proj.expressions[i]->type == ExpressionType::BOUND_FUNCTION) {
-				changed_bindings.insert(HashBinding(ColumnBinding(proj.table_index, i)));
+			if (i < proj.types.size()) {
+				proj.types[i] = proj.expressions[i]->return_type;
+			}
+			if (proj.expressions[i]->return_type == finalized_type) {
+				finalized_bindings.insert(HashBinding(ColumnBinding(proj.table_index, i)));
+			}
+		}
+	} else {
+		// For pass-through operators (DISTINCT, ORDER BY, etc.): if child types changed
+		// from FLOAT[] to FLOAT, update our types to match.
+		for (idx_t i = 0; i < op->types.size(); i++) {
+			if (op->types[i] == list_type) {
+				// Check if any child at this position now produces FLOAT
+				for (auto &child : op->children) {
+					if (i < child->types.size() && child->types[i] == finalized_type) {
+						op->types[i] = finalized_type;
+						auto out_bindings = op->GetColumnBindings();
+						if (i < out_bindings.size()) {
+							finalized_bindings.insert(HashBinding(out_bindings[i]));
+						}
+					}
+				}
 			}
 		}
 	}
@@ -308,17 +365,46 @@ static void FixAllStaleRefs(LogicalOperator *op) {
 		}
 	}
 
-	if (binding_types.empty()) {
-		return;
-	}
+	auto finalized_type = PacFloatLogicalType();
+	auto list_type = LogicalType::LIST(PacFloatLogicalType());
 
-	// Fix column refs in any expression
+	// Fix column refs and subquery expressions
 	std::function<void(unique_ptr<Expression> &)> Fix = [&](unique_ptr<Expression> &e) {
 		if (e->type == ExpressionType::BOUND_COLUMN_REF) {
 			auto &col_ref = e->Cast<BoundColumnRefExpression>();
 			auto it = binding_types.find(HashBinding(col_ref.binding));
 			if (it != binding_types.end() && col_ref.return_type != it->second) {
 				col_ref.return_type = it->second;
+			}
+		}
+		// Fix subquery: resolve types in the subquery plan and update return_type
+		if (e->GetExpressionClass() == ExpressionClass::BOUND_SUBQUERY) {
+			auto &subq = e->Cast<BoundSubqueryExpression>();
+			if (subq.subquery.plan) {
+				subq.subquery.plan->ResolveOperatorTypes();
+				FixAllStaleRefs(subq.subquery.plan.get());
+				// Update return_type and child_types/child_targets to match the plan output
+				auto &plan_types = subq.subquery.plan->types;
+				for (idx_t j = 0; j < plan_types.size(); j++) {
+					if (plan_types[j] == finalized_type) {
+						if (subq.return_type == list_type) {
+							subq.return_type = finalized_type;
+						}
+						if (j < subq.child_types.size() && subq.child_types[j] == list_type) {
+							subq.child_types[j] = finalized_type;
+						}
+						if (j < subq.child_targets.size() && subq.child_targets[j] == list_type) {
+							subq.child_targets[j] = finalized_type;
+						}
+					}
+				}
+				// Also update the BoundStatement types
+				for (idx_t j = 0; j < subq.subquery.types.size(); j++) {
+					if (subq.subquery.types[j] == list_type && j < plan_types.size() &&
+					    plan_types[j] == finalized_type) {
+						subq.subquery.types[j] = finalized_type;
+					}
+				}
 			}
 		}
 		ExpressionIterator::EnumerateChildren(*e, Fix);
@@ -341,14 +427,50 @@ bool HasDerivedPuCounterGets(LogicalOperator *plan) {
 	return !gets.empty();
 }
 
+// After pac_finalize injection, CTE_REF operators still have stale chunk_types (FLOAT[]).
+// Walk the plan and update CTE_REF chunk_types to match the CTE definition's output.
+static void FixCTERefTypes(LogicalOperator *op, const LogicalType &list_type, const LogicalType &finalized_type) {
+	if (!op) {
+		return;
+	}
+	if (op->type == LogicalOperatorType::LOGICAL_MATERIALIZED_CTE) {
+		// child[0] = CTE definition, child[1] = consumer
+		if (op->children.size() >= 2) {
+			auto &def_types = op->children[0]->types;
+			// Find all CTE_REF in the consumer subtree and update their chunk_types
+			std::function<void(LogicalOperator *)> FixRefs = [&](LogicalOperator *node) {
+				if (node->type == LogicalOperatorType::LOGICAL_CTE_REF) {
+					auto &ref = node->Cast<LogicalCTERef>();
+					for (idx_t i = 0; i < ref.chunk_types.size() && i < def_types.size(); i++) {
+						if (ref.chunk_types[i] == list_type && def_types[i] == finalized_type) {
+							ref.chunk_types[i] = finalized_type;
+						}
+					}
+				}
+				for (auto &child : node->children) {
+					FixRefs(child.get());
+				}
+			};
+			FixRefs(op->children[1].get());
+		}
+	}
+	for (auto &child : op->children) {
+		FixCTERefTypes(child.get(), list_type, finalized_type);
+	}
+}
+
 void InjectPacFinalizeForDerivedPu(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan) {
 	vector<DerivedPuGetInfo> gets;
 	FindDerivedPuGets(plan.get(), gets);
 	if (gets.empty()) {
 		return;
 	}
-	unordered_set<uint64_t> changed_bindings;
-	WrapCounterRefsWithFinalize(input, plan.get(), gets, changed_bindings);
+	unordered_set<uint64_t> counter_bindings;
+	unordered_set<uint64_t> finalized_bindings;
+	WrapCounterRefsWithFinalize(input, plan.get(), gets, counter_bindings, finalized_bindings);
+	auto list_type = LogicalType::LIST(PacFloatLogicalType());
+	auto finalized_type = PacFloatLogicalType();
+	FixCTERefTypes(plan.get(), list_type, finalized_type);
 	plan->ResolveOperatorTypes();
 	FixAllStaleRefs(plan.get());
 }

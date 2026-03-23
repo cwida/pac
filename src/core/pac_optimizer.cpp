@@ -3,6 +3,7 @@
 //
 
 #include "core/pac_optimizer.hpp"
+#include "aggregates/pac_aggregate.hpp"
 #include "pac_debug.hpp"
 #include <string>
 #include <algorithm>
@@ -252,6 +253,16 @@ static void PropagateCTASMetadata(unique_ptr<LogicalOperator> &outer_plan, uniqu
 			if (new_col_names.count(prot) > 0) {
 				prop.protected_columns.push_back(prot);
 			}
+		}
+	}
+
+	// Track counter columns: for non-aggregate CTAS from derived_pu, propagate the source's
+	// counter_columns. For aggregate CTAS, counter_columns are populated after ConvertDerivedPuToCounters
+	// sets the column types (see the DML target_table block below).
+	if (!has_aggregate && source_meta->derived_pu) {
+		for (auto &cc : source_meta->counter_columns) {
+			auto it = src_to_dest_name.find(cc);
+			prop.counter_columns.push_back(it != src_to_dest_name.end() ? it->second : cc);
 		}
 	}
 
@@ -539,15 +550,21 @@ void PACRewriteRule::PACPreOptimizeFunction(OptimizerExtensionInput &input, uniq
 						ConvertDerivedPuToCounters(input, target_plan);
 						// Resolve types so parent operators reflect the counter conversion
 						target_plan->ResolveOperatorTypes();
-						// Update CTAS column types to match the counter-converted plan output
+						// Update CTAS column types and record counter columns in metadata
 						if (outer_plan->type == LogicalOperatorType::LOGICAL_CREATE_TABLE) {
 							auto &create = outer_plan->Cast<LogicalCreateTable>();
 							auto &columns = create.info->Base().columns;
 							auto &plan_types = target_plan->types;
+							auto counter_list_type = LogicalType::LIST(PacFloatLogicalType());
+							PACTableMetadata *mut_meta =
+							    const_cast<PACTableMetadata *>(mgr.GetTableMetadata(target_table));
 							for (idx_t i = 0; i < plan_types.size() && i < columns.LogicalColumnCount(); i++) {
 								auto &col = columns.GetColumnMutable(LogicalIndex(i));
 								if (col.Type() != plan_types[i]) {
 									col.SetType(plan_types[i]);
+								}
+								if (plan_types[i] == counter_list_type && mut_meta) {
+									mut_meta->counter_columns.push_back(col.Name());
 								}
 							}
 						}
