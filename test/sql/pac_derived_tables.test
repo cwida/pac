@@ -574,11 +574,13 @@ SELECT COUNT(*) FROM mv_a JOIN mv_b ON mv_a.grp = mv_b.grp;
 ----
 3
 
-# Both counter columns should be finalized to scalars
+# Both counter columns should be finalized to scalars.
+# All 3 groups have positive true sums (30, 300, 50). pac_filter_lt(0, counters)
+# uses majority voting: grp=3 (single PU, 32/64 subsamples positive) passes at threshold.
 query I
 SELECT COUNT(*) FROM mv_a JOIN mv_b ON mv_a.grp = mv_b.grp WHERE total_a > 0 AND total_b > 0;
 ----
-2
+3
 
 statement ok
 DROP TABLE mv_a;
@@ -759,11 +761,12 @@ INSERT INTO neq_src VALUES (1,1,10),(2,1,20),(3,2,100),(4,2,200),(5,3,5);
 statement ok
 CREATE TABLE mv_neq AS SELECT grp, SUM(val) AS total FROM neq_src GROUP BY grp;
 
-# All noised totals should be != 0 except possibly grp=3 (small exact sum=5)
+# All noised totals should be != 0. pac_filter_neq uses majority voting:
+# even grp=3 (single PU, exact sum=5) has 32/64 subsamples with non-zero counters.
 query I
 SELECT COUNT(*) FROM mv_neq WHERE total != 0;
 ----
-2
+3
 
 statement ok
 DROP TABLE mv_neq;
@@ -785,11 +788,12 @@ INSERT INTO nif_src VALUES (1,1,10),(2,1,20),(3,2,100),(4,2,200),(5,3,5);
 statement ok
 CREATE TABLE mv_nif AS SELECT grp, SUM(val) AS total FROM nif_src GROUP BY grp;
 
-# NULLIF(total, 0) should return NULL for 0-valued totals, non-null otherwise
+# NULLIF(total, 0) should return NULL for 0-valued totals, non-null otherwise.
+# All 3 groups have non-zero true sums; pac_filter_<cmp> majority voting keeps them all.
 query I
 SELECT COUNT(*) FROM mv_nif WHERE NULLIF(total, 0) IS NOT NULL;
 ----
-2
+3
 
 statement ok
 DROP TABLE mv_nif;

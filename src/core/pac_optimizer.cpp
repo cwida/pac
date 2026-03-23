@@ -588,10 +588,20 @@ void PACDerivedReadRule::PACDerivedReadFunction(OptimizerExtensionInput &input, 
 	if (!pac_rewrite_enabled) {
 		return;
 	}
-	// Skip pac_finalize injection for DML — these must operate on raw counter data.
-	// CTAS is included: copying from a derived_pu table should preserve counter lists.
+	// Skip pac_finalize injection for DML that writes raw counter data.
+	// INSERT/CTAS need raw LIST<FLOAT> counters preserved.
+	// UPDATE SET on counter columns is unusual — skip for now.
 	if (plan->type == LogicalOperatorType::LOGICAL_INSERT || plan->type == LogicalOperatorType::LOGICAL_UPDATE ||
-	    plan->type == LogicalOperatorType::LOGICAL_DELETE || plan->type == LogicalOperatorType::LOGICAL_CREATE_TABLE) {
+	    plan->type == LogicalOperatorType::LOGICAL_CREATE_TABLE) {
+		return;
+	}
+	// DELETE: the WHERE clause needs pac_filter_<cmp> for counter column comparisons,
+	// but the DELETE operator itself only reads row IDs. Run the rewriter on the child
+	// subtree (the read side) so filters are rewritten without touching DELETE's state.
+	if (plan->type == LogicalOperatorType::LOGICAL_DELETE && !plan->children.empty()) {
+		if (HasDerivedPuCounterGets(plan->children[0].get())) {
+			InjectPacFinalizeForDerivedPu(input, plan->children[0]);
+		}
 		return;
 	}
 	// Also check for CTE-wrapped DML (WITH ... INSERT INTO ...)

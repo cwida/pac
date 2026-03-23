@@ -184,8 +184,12 @@ static void LoadInternal(ExtensionLoader &loader) {
 		OptimizerExtension::Register(db.config, std::move(pac_derived_read_rule));
 	}
 
-	// Add option to enable/disable PAC noise application (this is useful for testing, since noise affects result
-	// determinism)
+	// Enable lenient implicit casting so the binder can resolve comparisons (>, <, etc.)
+	// on derived_pu counter columns (LIST<FLOAT>) at bind time. Without this, the new
+	// casting rules reject FLOAT[] vs scalar comparisons before our optimizer can rewrite
+	// them to pac_filter_<cmp> calls.
+	db.config.SetOptionByName("old_implicit_casting", Value::BOOLEAN(true));
+
 	// ---- User-facing settings ----
 	// Controls probabilistic vs deterministic mode for noise/NULL decisions
 	db.config.AddExtensionOption(

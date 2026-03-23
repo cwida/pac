@@ -133,6 +133,40 @@ void RegisterPacFinalizeFunction(ExtensionLoader &loader) {
 	};
 	loader.RegisterCastFunction(list_type, LogicalType::FLOAT, BoundCastInfo(pac_finalize_cast), 200);
 	loader.RegisterCastFunction(list_type, LogicalType::DOUBLE, BoundCastInfo(pac_finalize_cast), 200);
+
+	// Register reverse casts (scalar → FLOAT[]) so the binder can resolve comparisons
+	// on counter columns at bind time. With old_implicit_casting=true, ForceMaxLogicalType
+	// picks FLOAT[] as the common type and needs this cast to convert the scalar side.
+	// The post-optimizer rewrites these comparisons to pac_filter_<cmp> calls before
+	// execution, so the cast is never actually run in comparison contexts.
+	auto scalar_to_list_cast = [](Vector &source, Vector &result, idx_t count, CastParameters &parameters) -> bool {
+		auto &child_vec = ListVector::GetEntry(result);
+		auto child_data = FlatVector::GetData<PAC_FLOAT>(child_vec);
+		auto list_entries = FlatVector::GetData<list_entry_t>(result);
+		UnifiedVectorFormat source_data;
+		source.ToUnifiedFormat(count, source_data);
+		idx_t offset = 0;
+		for (idx_t i = 0; i < count; i++) {
+			auto src_idx = source_data.sel->get_index(i);
+			if (!source_data.validity.RowIsValid(src_idx)) {
+				FlatVector::Validity(result).SetInvalid(i);
+				list_entries[i] = {offset, 0};
+				continue;
+			}
+			auto val = static_cast<PAC_FLOAT>(source.GetValue(src_idx).GetValue<double>());
+			list_entries[i] = {offset, 64};
+			for (idx_t j = 0; j < 64; j++) {
+				child_data[offset + j] = val;
+			}
+			offset += 64;
+		}
+		ListVector::SetListSize(result, offset);
+		return true;
+	};
+	for (auto &src_type : {LogicalType::TINYINT, LogicalType::SMALLINT, LogicalType::INTEGER, LogicalType::BIGINT,
+	                       LogicalType::FLOAT, LogicalType::DOUBLE, LogicalType::HUGEINT}) {
+		loader.RegisterCastFunction(src_type, list_type, BoundCastInfo(scalar_to_list_cast), 300);
+	}
 }
 
 } // namespace duckdb
