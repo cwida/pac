@@ -38,12 +38,9 @@
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
-#include "duckdb/planner/expression/bound_subquery_expression.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/planner/logical_operator_visitor.hpp"
 #include "duckdb/planner/operator/logical_aggregate.hpp"
-#include "duckdb/planner/operator/logical_cte.hpp"
-#include "duckdb/planner/operator/logical_cteref.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/planner/operator/logical_projection.hpp"
 
@@ -358,94 +355,6 @@ static void WrapCounterRefsWithFinalize(OptimizerExtensionInput &input, LogicalO
 	}
 }
 
-// Fix stale column refs and subquery return types after pac_finalize injection.
-static void FixAllStaleRefs(LogicalOperator *op) {
-	if (!op) {
-		return;
-	}
-	for (auto &child : op->children) {
-		FixAllStaleRefs(child.get());
-	}
-
-	unordered_map<uint64_t, LogicalType> binding_types;
-	for (auto &child : op->children) {
-		auto bindings = child->GetColumnBindings();
-		for (idx_t i = 0; i < bindings.size() && i < child->types.size(); i++) {
-			binding_types[HashBinding(bindings[i])] = child->types[i];
-		}
-	}
-
-	auto finalized_type = PacFloatLogicalType();
-	auto list_type = CounterListType();
-
-	std::function<void(unique_ptr<Expression> &)> Fix = [&](unique_ptr<Expression> &e) {
-		if (e->type == ExpressionType::BOUND_COLUMN_REF) {
-			auto &col_ref = e->Cast<BoundColumnRefExpression>();
-			auto it = binding_types.find(HashBinding(col_ref.binding));
-			if (it != binding_types.end() && col_ref.return_type != it->second) {
-				col_ref.return_type = it->second;
-			}
-		}
-		// Fix scalar subquery return types to match the finalized inner plan
-		if (e->GetExpressionClass() == ExpressionClass::BOUND_SUBQUERY) {
-			auto &subq = e->Cast<BoundSubqueryExpression>();
-			if (subq.subquery.plan) {
-				subq.subquery.plan->ResolveOperatorTypes();
-				FixAllStaleRefs(subq.subquery.plan.get());
-				auto &plan_types = subq.subquery.plan->types;
-				for (idx_t j = 0; j < plan_types.size(); j++) {
-					if (plan_types[j] != finalized_type) {
-						continue;
-					}
-					if (subq.return_type == list_type) {
-						subq.return_type = finalized_type;
-					}
-					if (j < subq.child_types.size() && subq.child_types[j] == list_type) {
-						subq.child_types[j] = finalized_type;
-					}
-					if (j < subq.child_targets.size() && subq.child_targets[j] == list_type) {
-						subq.child_targets[j] = finalized_type;
-					}
-					if (j < subq.subquery.types.size() && subq.subquery.types[j] == list_type) {
-						subq.subquery.types[j] = finalized_type;
-					}
-				}
-			}
-		}
-		ExpressionIterator::EnumerateChildren(*e, Fix);
-	};
-	LogicalOperatorVisitor::EnumerateExpressions(*op, [&](unique_ptr<Expression> *expr_ptr) { Fix(*expr_ptr); });
-}
-
-// Fix CTE_REF chunk_types after the CTE definition's output types changed.
-static void FixCTERefTypes(LogicalOperator *op) {
-	if (!op) {
-		return;
-	}
-	auto list_type = CounterListType();
-	auto finalized_type = PacFloatLogicalType();
-	if (op->type == LogicalOperatorType::LOGICAL_MATERIALIZED_CTE && op->children.size() >= 2) {
-		auto &def_types = op->children[0]->types;
-		std::function<void(LogicalOperator *)> FixRefs = [&](LogicalOperator *node) {
-			if (node->type == LogicalOperatorType::LOGICAL_CTE_REF) {
-				auto &ref = node->Cast<LogicalCTERef>();
-				for (idx_t i = 0; i < ref.chunk_types.size() && i < def_types.size(); i++) {
-					if (ref.chunk_types[i] == list_type && def_types[i] == finalized_type) {
-						ref.chunk_types[i] = finalized_type;
-					}
-				}
-			}
-			for (auto &child : node->children) {
-				FixRefs(child.get());
-			}
-		};
-		FixRefs(op->children[1].get());
-	}
-	for (auto &child : op->children) {
-		FixCTERefTypes(child.get());
-	}
-}
-
 // --- Public API ---
 
 bool HasDerivedPuCounterGets(LogicalOperator *plan) {
@@ -465,9 +374,7 @@ void InjectPacFinalizeForDerivedPu(OptimizerExtensionInput &input, unique_ptr<Lo
 	unordered_set<uint64_t> counter_bindings;
 	unordered_set<uint64_t> finalized_bindings;
 	WrapCounterRefsWithFinalize(input, plan.get(), derived_table_indices, counter_bindings, finalized_bindings);
-	FixCTERefTypes(plan.get());
 	plan->ResolveOperatorTypes();
-	FixAllStaleRefs(plan.get());
 }
 
 } // namespace duckdb
