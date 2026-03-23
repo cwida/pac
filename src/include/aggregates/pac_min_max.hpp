@@ -32,6 +32,10 @@ void RegisterPacMinFunctions(ExtensionLoader &loader);
 void RegisterPacMaxFunctions(ExtensionLoader &loader);
 void RegisterPacMinCountersFunctions(ExtensionLoader &loader);
 void RegisterPacMaxCountersFunctions(ExtensionLoader &loader);
+void RegisterPacNoisedClipMinFunctions(ExtensionLoader &loader);
+void RegisterPacNoisedClipMaxFunctions(ExtensionLoader &loader);
+void RegisterPacClipMinFunctions(ExtensionLoader &loader);
+void RegisterPacClipMaxFunctions(ExtensionLoader &loader);
 
 // ============================================================================
 // PAC_MIN/PAC_MAX(hash_key, value) aggregate functions
