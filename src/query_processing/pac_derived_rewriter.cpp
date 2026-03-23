@@ -249,13 +249,19 @@ static void WrapCounterRefsWithFinalize(OptimizerExtensionInput &input, LogicalO
 		auto out_bindings = op->GetColumnBindings();
 		auto &out_types = op->types;
 		for (idx_t i = 0; i < out_bindings.size() && i < out_types.size(); i++) {
+			PAC_DEBUG_PRINT("[PAC FINALIZE] Propagate op_type=" + std::to_string((int)op->type) + " binding (" +
+			                std::to_string(out_bindings[i].table_index) + "," +
+			                std::to_string(out_bindings[i].column_index) + ") type=" + out_types[i].ToString());
 			if (out_types[i] == list_type) {
 				counter_bindings.insert(HashBinding(out_bindings[i]));
 			}
 		}
 	}
 
-	if (skip_wrapping) {
+	// Also skip wrapping for the AGGREGATE operator itself — its expressions
+	// (e.g. first(#[8.0])) need raw FLOAT[] input.
+	if (skip_wrapping || op->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+		PAC_DEBUG_PRINT("[PAC FINALIZE] skip_wrapping for op_type=" + std::to_string((int)op->type));
 		return;
 	}
 
