@@ -1,0 +1,214 @@
+# name: test/sql/pac_clip_sum.test
+# description: Test pac_clip_sum and pac_noised_clip_sum aggregate functions with clipping
+# group: [sql]
+
+require pac
+
+statement ok
+PRAGMA clear_pac_metadata;
+
+statement ok
+SET pac_seed = 42
+
+statement ok
+SET threads = 1
+
+statement ok
+SET pac_mi = 0
+
+# ============================================================================
+# Basic pac_clip_sum correctness (returns LIST<FLOAT>)
+# ============================================================================
+
+statement ok
+CREATE TABLE test_data AS
+SELECT i AS rowid, i % 3 AS grp, (i % 100) AS value
+FROM range(4000) t(i)
+
+# pac_clip_sum returns LIST<FLOAT> (64 counters)
+query I
+SELECT typeof(pac_clip_sum(hash(rowid)::UBIGINT, value::INTEGER)) FROM test_data
+----
+FLOAT[]
+
+# pac_noised_clip_sum returns HUGEINT (fused noised scalar)
+query I
+SELECT typeof(pac_noised_clip_sum(hash(rowid)::UBIGINT, value::INTEGER)) FROM test_data
+----
+HUGEINT
+
+# Works with different types
+query I
+SELECT pac_noised_clip_sum(hash(rowid)::UBIGINT, value::BIGINT) IS NOT NULL FROM test_data
+----
+true
+
+query I
+SELECT pac_noised_clip_sum(hash(rowid)::UBIGINT, value::SMALLINT) IS NOT NULL FROM test_data
+----
+true
+
+# Grouped aggregation
+query I
+SELECT count(*) FROM (
+  SELECT grp, pac_noised_clip_sum(hash(rowid)::UBIGINT, value::INTEGER) as s
+  FROM test_data GROUP BY grp
+) t WHERE s IS NOT NULL
+----
+3
+
+# NULL handling
+query I
+SELECT pac_noised_clip_sum(hash(rowid)::UBIGINT, CASE WHEN rowid % 2 = 0 THEN value ELSE NULL END) IS NOT NULL
+FROM test_data
+----
+true
+
+# ============================================================================
+# Clipping: outlier elimination via pac_noised_clip_sum
+# ============================================================================
+
+# Create data with 1000 normal rows and 1 huge outlier
+statement ok
+CREATE TABLE outlier_test AS
+SELECT i as id,
+  CASE WHEN i <= 1000 THEN (i % 10) + 1
+       ELSE 1000000
+  END as value
+FROM range(1, 1002) t(i)
+
+# Without clip_support: result includes the outlier (expect ~1M+ range)
+query I
+SELECT pac_noised_clip_sum(hash(id)::UBIGINT, value) > 100000 FROM outlier_test
+----
+true
+
+# With clip_support=5: outlier level has only 1 contributor, gets clipped
+# Result should be close to sum without outlier = 5500
+statement ok
+SET pac_clip_support = 5
+
+query I
+SELECT pac_noised_clip_sum(hash(id)::UBIGINT, value) < 100000 FROM outlier_test
+----
+true
+
+# Verify the clipped result is in the right ballpark (within 5x of 5500)
+query I
+SELECT abs(pac_noised_clip_sum(hash(id)::UBIGINT, value) - 5500) < 5500 * 5 FROM outlier_test
+----
+true
+
+# Soft clamp: outlier contributes a small nonzero amount (not hard-zeroed)
+# Compare with a baseline that has no outlier at all
+query I
+SELECT (SELECT pac_noised_clip_sum(hash(id)::UBIGINT, value) FROM outlier_test)
+     > (SELECT pac_noised_clip_sum(hash(i)::UBIGINT, (i % 10) + 1) FROM range(1, 1001) t(i))
+----
+true
+
+# ============================================================================
+# Clipping with grouped data: outlier in one group, normal in another
+# ============================================================================
+
+statement ok
+CREATE TABLE grouped_outlier AS
+SELECT i as id, i % 2 as grp,
+  CASE WHEN i <= 1000 THEN (i % 10) + 1
+       WHEN i = 1001 THEN 10000000  -- massive outlier in group 1
+       ELSE (i % 10) + 1
+  END as value
+FROM range(1, 1003) t(i)
+
+# Group 0 (even ids): ~500 normal values, no outlier
+# Group 1 (odd ids): ~500 normal values + one 10M outlier
+# With clip_support: the outlier's level should be clipped in group 1
+query IT
+SELECT grp, pac_noised_clip_sum(hash(id)::UBIGINT, value) < 100000 as reasonable
+FROM grouped_outlier
+GROUP BY grp
+ORDER BY grp
+----
+0	true
+1	true
+
+# ============================================================================
+# Clipping with negative values (two-sided)
+# ============================================================================
+
+statement ok
+CREATE TABLE neg_outlier AS
+SELECT i as id,
+  CASE WHEN i <= 1000 THEN i - 500      -- normal: -499 to 500
+       ELSE -5000000                     -- single negative outlier
+  END as value
+FROM range(1, 1002) t(i)
+
+# Without clip_support: outlier drags result very negative
+statement ok
+SET pac_clip_support = NULL
+
+query I
+SELECT pac_noised_clip_sum(hash(id)::UBIGINT, value) < -100000 FROM neg_outlier
+----
+true
+
+# With clip_support: outlier clipped, result near 500 (sum of 1..500 - sum of 1..499 = 500)
+statement ok
+SET pac_clip_support = 5
+
+query I
+SELECT pac_noised_clip_sum(hash(id)::UBIGINT, value) > -100000 FROM neg_outlier
+----
+true
+
+# ============================================================================
+# HUGEINT support
+# ============================================================================
+
+statement ok
+SET pac_clip_support = NULL
+
+query I
+SELECT pac_noised_clip_sum(hash(i)::UBIGINT, i::HUGEINT) IS NOT NULL FROM range(1, 101) t(i)
+----
+true
+
+# ============================================================================
+# Clip synonyms: pac_clip_count, pac_clip_min, pac_clip_max exist
+# ============================================================================
+
+query I
+SELECT typeof(pac_clip_count(hash(i)::UBIGINT)) FROM range(1, 101) t(i)
+----
+FLOAT[]
+
+query I
+SELECT typeof(pac_noised_clip_count(hash(i)::UBIGINT)) FROM range(1, 101) t(i)
+----
+BIGINT
+
+# ============================================================================
+# pac_clip_support setting via compiler (sum → pac_noised_clip_sum)
+# ============================================================================
+
+statement ok
+SET pac_clip_support = 64
+
+statement ok
+CREATE TABLE compiler_test (id INTEGER, value INTEGER)
+
+statement ok
+ALTER TABLE compiler_test ADD PAC_KEY (id)
+
+statement ok
+ALTER TABLE compiler_test SET PU
+
+statement ok
+INSERT INTO compiler_test SELECT i, i % 100 FROM range(1, 1001) t(i)
+
+# When pac_clip_support is set, regular SUM should go through clip rewrite
+query I
+SELECT sum(value) IS NOT NULL FROM compiler_test
+----
+true

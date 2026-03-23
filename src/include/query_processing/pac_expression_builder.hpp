@@ -10,6 +10,7 @@
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/planner/operator/logical_aggregate.hpp"
 #include "duckdb/planner/operator/logical_cteref.hpp"
+#include "metadata/pac_compatibility_check.hpp"
 
 namespace duckdb {
 
@@ -66,6 +67,13 @@ unique_ptr<Expression> BindBitOrAggregate(OptimizerExtensionInput &input, unique
 void ModifyAggregatesWithPacFunctions(OptimizerExtensionInput &input, LogicalAggregate *agg,
                                       unique_ptr<Expression> &hash_input_expr, unique_ptr<LogicalOperator> &plan,
                                       double correction = 1.0);
+
+// Rewrite PAC aggregates to use clipping variants when pac_clip_support is set.
+// Inserts a lower aggregate with plain DuckDB aggregates (GROUP BY groups + PU hash),
+// and rewrites the top aggregate to use pac_noised_clip_* / pac_clip_* functions.
+// Skips insertion if child already groups by PU key (Q13 exception).
+void RewriteClipAggregates(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
+                           const PACCompatibilityResult &check, const vector<string> &privacy_units);
 
 } // namespace duckdb
 

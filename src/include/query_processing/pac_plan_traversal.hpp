@@ -115,6 +115,9 @@ vector<LogicalAggregate *> FilterTargetAggregatesWithPUKeyCheck(const vector<Log
 bool AggregateGroupsByPUKey(LogicalAggregate *agg, const PACCompatibilityResult &check,
                             const vector<string> &privacy_units);
 
+// Find the first aggregate in a subtree (depth-first).
+LogicalAggregate *FindFirstChildAggregate(LogicalOperator *op);
+
 // Check if a target node is inside a DELIM_JOIN's subquery branch (children[1]).
 // This is important for correlated subqueries where nodes in the subquery branch
 // cannot directly access tables from the outer query.
