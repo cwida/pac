@@ -328,8 +328,37 @@ static void WrapCounterRefsWithFinalize(OptimizerExtensionInput &input, LogicalO
 			if (i < proj.types.size()) {
 				proj.types[i] = proj.expressions[i]->return_type;
 			}
-			if (proj.expressions[i]->return_type == finalized_type) {
+			// Mark as finalized if the expression returns FLOAT or contains pac_finalize
+			// (e.g. CASE WHEN ... ELSE pac_finalize(x) END has FLOAT[] return type but
+			// is effectively finalized)
+			bool is_finalized = (proj.expressions[i]->return_type == finalized_type);
+			if (!is_finalized) {
+				std::function<bool(const Expression &)> HasFinalize = [&](const Expression &e) -> bool {
+					if (e.type == ExpressionType::BOUND_FUNCTION) {
+						auto &func = e.Cast<BoundFunctionExpression>();
+						if (func.function.name == "pac_finalize") {
+							return true;
+						}
+					}
+					bool found = false;
+					ExpressionIterator::EnumerateChildren(const_cast<Expression &>(e), [&](Expression &child) {
+						if (HasFinalize(child)) {
+							found = true;
+						}
+					});
+					return found;
+				};
+				is_finalized = HasFinalize(*proj.expressions[i]);
+			}
+			if (is_finalized) {
 				finalized_bindings.insert(HashBinding(ColumnBinding(proj.table_index, i)));
+				// Update the projection type and expression return_type
+				if (i < proj.types.size() && proj.types[i] == list_type) {
+					proj.types[i] = finalized_type;
+				}
+				if (proj.expressions[i]->return_type == list_type) {
+					proj.expressions[i]->return_type = finalized_type;
+				}
 			}
 		}
 	} else {
