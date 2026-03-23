@@ -1,3 +1,28 @@
+//
+// PAC Derived Table Rewriter
+//
+// Handles read and write paths for derived_pu tables (materialized views of PU data).
+// Derived_pu tables store PAC counter lists (LIST<FLOAT>, 64 elements) instead of scalar values.
+//
+// Write path (ConvertDerivedPuToCounters):
+//   Converts pac_noised_* aggregates to pac_* counter variants in INSERT/CTAS plans,
+//   so the table stores raw counter lists instead of finalized noised scalars.
+//
+// Read path (InjectPacFinalizeForDerivedPu):
+//   Wraps counter column refs with pac_finalize() in SELECT plans, converting
+//   LIST<FLOAT> counters to noised FLOAT scalars at read time.
+//   Runs as a post-optimizer rule (after DuckDB's built-in optimizers).
+//
+// Key challenges:
+//   - DuckDB's optimizer reorders columns and inserts intermediate projections,
+//     so we use op->types (resolved output) for binding identification rather than
+//     position-based matching against the original GET.
+//   - AGGREGATE operators (e.g. first() in scalar subqueries) need raw FLOAT[] input,
+//     so pac_finalize injection is suppressed inside aggregate subtrees.
+//   - Scalar subqueries use CTEs internally; CTE_REF chunk_types and subquery
+//     return types must be updated after pac_finalize changes the plan output.
+//
+
 #include "query_processing/pac_derived_rewriter.hpp"
 
 #include "aggregates/pac_aggregate.hpp"
@@ -24,22 +49,20 @@
 
 namespace duckdb {
 
-// Shared type constants for the entire file.
+// --- Helpers ---
+
 static LogicalType CounterListType() {
 	return LogicalType::LIST(PacFloatLogicalType());
 }
 
 // Returns true if the expression tree contains a pac_finalize call.
 static bool ExpressionContainsPacFinalize(const Expression &e) {
-	if (e.type == ExpressionType::BOUND_FUNCTION) {
-		auto &func = e.Cast<BoundFunctionExpression>();
-		if (func.function.name == "pac_finalize") {
-			return true;
-		}
+	if (e.type == ExpressionType::BOUND_FUNCTION && e.Cast<BoundFunctionExpression>().function.name == "pac_finalize") {
+		return true;
 	}
 	bool found = false;
 	ExpressionIterator::EnumerateChildren(const_cast<Expression &>(e), [&](Expression &child) {
-		if (ExpressionContainsPacFinalize(child)) {
+		if (!found && ExpressionContainsPacFinalize(child)) {
 			found = true;
 		}
 	});
@@ -88,6 +111,8 @@ static void ConvertAggregatesRecursive(OptimizerExtensionInput &input, LogicalOp
 
 		auto new_aggr = RebindAggregate(input.context, counters_name, std::move(children), bound_agg.IsDistinct());
 		if (new_aggr) {
+			PAC_DEBUG_PRINT("[PAC DERIVED WRITE] Rebound " + bound_agg.function.name + " → " +
+			                new_aggr->Cast<BoundAggregateExpression>().function.name);
 			agg.expressions[i] = std::move(new_aggr);
 		} else {
 			bound_agg.function.name = counters_name;
@@ -158,6 +183,7 @@ void ConvertDerivedPuToCounters(OptimizerExtensionInput &input, unique_ptr<Logic
 // Read path: inject pac_finalize for SELECT on derived_pu tables
 // ============================================================================
 
+// Find all GET operators that scan derived_pu tables with counter columns.
 static void FindDerivedPuGets(LogicalOperator *op, unordered_set<idx_t> &derived_table_indices) {
 	if (!op) {
 		return;
@@ -188,9 +214,13 @@ static void FindDerivedPuGets(LogicalOperator *op, unordered_set<idx_t> &derived
 }
 
 // Wrap counter column refs with pac_finalize, bottom-up through the plan.
+//
 // Uses op->types (resolved after DuckDB's optimizer) to identify counter columns
 // because the optimizer may reorder columns, making position-based matching unreliable.
-// Suppresses wrapping inside AGGREGATE subtrees (e.g. first() in scalar subqueries).
+//
+// Suppresses wrapping inside AGGREGATE subtrees — aggregates (e.g. first() in scalar
+// subqueries, SUM() over counter columns) need raw FLOAT[] input. pac_finalize is
+// applied above the aggregate via projection wrapping or the registered implicit cast.
 static void WrapCounterRefsWithFinalize(OptimizerExtensionInput &input, LogicalOperator *op,
                                         const unordered_set<idx_t> &derived_table_indices,
                                         unordered_set<uint64_t> &counter_bindings,
@@ -198,6 +228,7 @@ static void WrapCounterRefsWithFinalize(OptimizerExtensionInput &input, LogicalO
 	if (!op) {
 		return;
 	}
+	// Propagate suppress flag into AGGREGATE subtrees
 	bool child_suppress = suppress || (op->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY);
 	for (auto &child : op->children) {
 		WrapCounterRefsWithFinalize(input, child.get(), derived_table_indices, counter_bindings, finalized_bindings,
@@ -207,7 +238,7 @@ static void WrapCounterRefsWithFinalize(OptimizerExtensionInput &input, LogicalO
 	auto list_type = CounterListType();
 	auto finalized_type = PacFloatLogicalType();
 
-	// At a GET node: seed counter_bindings using resolved output types
+	// Seed counter_bindings from derived_pu GET nodes
 	if (op->type == LogicalOperatorType::LOGICAL_GET) {
 		auto &get = op->Cast<LogicalGet>();
 		if (derived_table_indices.count(get.table_index)) {
@@ -216,6 +247,9 @@ static void WrapCounterRefsWithFinalize(OptimizerExtensionInput &input, LogicalO
 			for (idx_t i = 0; i < bindings.size() && i < types.size(); i++) {
 				if (types[i] == list_type) {
 					counter_bindings.insert(HashBinding(bindings[i]));
+					PAC_DEBUG_PRINT("[PAC DERIVED READ] Seeded counter binding (" +
+					                std::to_string(bindings[i].table_index) + "," +
+					                std::to_string(bindings[i].column_index) + ")");
 				}
 			}
 		}
@@ -269,11 +303,13 @@ static void WrapCounterRefsWithFinalize(OptimizerExtensionInput &input, LogicalO
 		if (e->type == ExpressionType::BOUND_COLUMN_REF) {
 			auto &col_ref = e->Cast<BoundColumnRefExpression>();
 			if (col_ref.return_type == list_type && !finalized_bindings.count(HashBinding(col_ref.binding))) {
+				PAC_DEBUG_PRINT("[PAC DERIVED READ] Wrapping binding (" + std::to_string(col_ref.binding.table_index) +
+				                "," + std::to_string(col_ref.binding.column_index) + ") with pac_finalize");
 				finalized_bindings.insert(HashBinding(col_ref.binding));
 				e = input.optimizer.BindScalarFunction("pac_finalize", std::move(e));
 			}
 		}
-		// Fix stale casts: retarget CAST(scalar→FLOAT[]) to CAST(scalar→FLOAT), strip no-ops
+		// Retarget CAST(scalar→FLOAT[]) to CAST(scalar→FLOAT), strip no-op casts
 		if (e->GetExpressionClass() == ExpressionClass::BOUND_CAST) {
 			auto &cast = e->Cast<BoundCastExpression>();
 			if (cast.return_type == list_type && cast.child->return_type != list_type) {
@@ -305,7 +341,7 @@ static void WrapCounterRefsWithFinalize(OptimizerExtensionInput &input, LogicalO
 			}
 		}
 	} else {
-		// For pass-through operators: sync types from child
+		// For pass-through operators (DISTINCT, ORDER BY, etc.): sync types from child
 		for (idx_t i = 0; i < op->types.size(); i++) {
 			if (op->types[i] == list_type) {
 				for (auto &child : op->children) {
@@ -350,6 +386,7 @@ static void FixAllStaleRefs(LogicalOperator *op) {
 				col_ref.return_type = it->second;
 			}
 		}
+		// Fix scalar subquery return types to match the finalized inner plan
 		if (e->GetExpressionClass() == ExpressionClass::BOUND_SUBQUERY) {
 			auto &subq = e->Cast<BoundSubqueryExpression>();
 			if (subq.subquery.plan) {
@@ -409,6 +446,8 @@ static void FixCTERefTypes(LogicalOperator *op) {
 	}
 }
 
+// --- Public API ---
+
 bool HasDerivedPuCounterGets(LogicalOperator *plan) {
 	unordered_set<idx_t> indices;
 	FindDerivedPuGets(plan, indices);
@@ -421,6 +460,8 @@ void InjectPacFinalizeForDerivedPu(OptimizerExtensionInput &input, unique_ptr<Lo
 	if (derived_table_indices.empty()) {
 		return;
 	}
+	PAC_DEBUG_PRINT("[PAC DERIVED READ] Injecting pac_finalize for " + std::to_string(derived_table_indices.size()) +
+	                " derived_pu table(s)");
 	unordered_set<uint64_t> counter_bindings;
 	unordered_set<uint64_t> finalized_bindings;
 	WrapCounterRefsWithFinalize(input, plan.get(), derived_table_indices, counter_bindings, finalized_bindings);
