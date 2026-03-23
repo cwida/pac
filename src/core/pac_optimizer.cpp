@@ -556,8 +556,7 @@ void PACRewriteRule::PACPreOptimizeFunction(OptimizerExtensionInput &input, uniq
 							auto &columns = create.info->Base().columns;
 							auto &plan_types = target_plan->types;
 							auto counter_list_type = LogicalType::LIST(PacFloatLogicalType());
-							PACTableMetadata *mut_meta =
-							    const_cast<PACTableMetadata *>(mgr.GetTableMetadata(target_table));
+							auto *mut_meta = mgr.GetMutableTableMetadata(target_table);
 							for (idx_t i = 0; i < plan_types.size() && i < columns.LogicalColumnCount(); i++) {
 								auto &col = columns.GetColumnMutable(LogicalIndex(i));
 								if (col.Type() != plan_types[i]) {

@@ -92,6 +92,13 @@ const PACTableMetadata *PACMetadataManager::GetTableMetadata(const string &table
 	return nullptr;
 }
 
+PACTableMetadata *PACMetadataManager::GetMutableTableMetadata(const string &table_name) {
+	std::lock_guard<std::mutex> lock(metadata_mutex);
+	string normalized_name = StringUtil::Lower(table_name);
+	auto it = table_metadata.find(normalized_name);
+	return it != table_metadata.end() ? &it->second : nullptr;
+}
+
 /**
  * HasMetadata: Checks if metadata exists for a table
  *

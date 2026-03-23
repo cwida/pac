@@ -53,12 +53,12 @@ static LogicalType CounterListType() {
 }
 
 // Returns true if the expression tree contains a pac_finalize call.
-static bool ExpressionContainsPacFinalize(const Expression &e) {
+static bool ExpressionContainsPacFinalize(Expression &e) {
 	if (e.type == ExpressionType::BOUND_FUNCTION && e.Cast<BoundFunctionExpression>().function.name == "pac_finalize") {
 		return true;
 	}
 	bool found = false;
-	ExpressionIterator::EnumerateChildren(const_cast<Expression &>(e), [&](Expression &child) {
+	ExpressionIterator::EnumerateChildren(e, [&](Expression &child) {
 		if (!found && ExpressionContainsPacFinalize(child)) {
 			found = true;
 		}
