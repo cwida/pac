@@ -98,3 +98,36 @@ SET pac_mi = 0;        -- disable noise for testing
 SET pac_seed = 42;     -- reproducible results
 SET pac_clip_support = 40;  -- enable clip rewrite with support threshold
 ```
+
+## Code style (clang-tidy)
+
+The project uses clang-tidy with DuckDB's configuration (`.clang-tidy`). Key naming rules:
+
+- **Classes/Enums**: `CamelCase` (e.g., `PacClipSumIntState`)
+- **Functions**: `CamelCase` (e.g., `GetLevel`, `AllocateLevel`)
+- **Variables/parameters/members**: `lower_case` (e.g., `max_level_used`, `key_hash`)
+- **Constants/static/constexpr**: `UPPER_CASE` (e.g., `PAC2_NUM_LEVELS`, `PAC2_LEVEL_SHIFT`)
+- **Macros**: `UPPER_CASE` (e.g., `PAC_DEBUG_PRINT`)
+- **Typedefs**: `lower_case_t` suffix (e.g., `aggregate_update_t`)
+
+Other style rules (from `.clang-format`, based on LLVM):
+
+- **Tabs for indentation**, width 4
+- **Column limit**: 120
+- **Braces**: same line as statement (K&R / Allman-attached)
+- **Pointers**: right-aligned (`int *ptr`, not `int* ptr`)
+- **No short functions on single line**
+- **Templates**: always break after `template<...>`
+- **Long arguments**: align after open bracket
+
+Run `make format-fix` to auto-format. Formatting runs automatically via hook after edits.
+
+## Attack evaluation
+
+Attack scripts live in `attacks/`. Results are documented in `attacks/clip_attack_results.md`.
+
+```bash
+bash attacks/clip_attack_test.sh 2>/dev/null     # main attack suite
+bash attacks/clip_multirow_test.sh 2>/dev/null   # 20K small items test
+bash attacks/clip_hardzero_stress.sh 2>/dev/null  # stress tests
+```
