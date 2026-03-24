@@ -67,8 +67,42 @@ via ALTER TABLE internally.
 - `PROTECTED salary` — wrong. Must have parentheses: `PROTECTED (salary)`.
 - ALTER TABLE on a PU table requires `ALTER PU TABLE`, not `ALTER TABLE`.
 
+### Metadata files
+
+PAC metadata (PU tables, links, protected columns) is stored in JSON sidecar files
+next to the database file. The naming convention is:
+
+```
+pac_metadata_<dbname>_<schema>.json
+```
+
+For example, `tpch_sf1.db` produces `pac_metadata_tpch_sf1_main.json` in the same
+directory.
+
+**Auto-loading**: When the PAC extension loads (`LOAD pac`), it automatically looks
+for a matching metadata file next to the attached database and loads it. No manual
+`PRAGMA load_pac_metadata` needed for persistent databases.
+
+**Saving**: After setting up PAC_KEY/PAC_LINK/PROTECTED, save with:
+```sql
+PRAGMA save_pac_metadata('/path/to/pac_metadata_mydb_main.json');
+```
+
+**Clearing**: Reset all in-memory PAC metadata:
+```sql
+PRAGMA clear_pac_metadata;
+```
+
+**Important**: If you delete or recreate a database file, also delete the
+corresponding `pac_metadata_*.json` file. Stale metadata causes confusing errors
+(references to tables/columns that no longer exist).
+
+For in-memory databases, metadata file is named `pac_metadata_memory_main.json`
+in the current working directory.
+
 ### Key source files
 
 - `src/parser/pac_parser.cpp` — main parser hook (intercepts SQL statements)
 - `src/parser/pac_parser_helpers.cpp` — extraction of PAC_KEY, PAC_LINK, PROTECTED
 - `src/core/pac_metadata.cpp` — in-memory metadata storage for PU/link/protected info
+- `src/core/pac_extension.cpp` — auto-loading of metadata on extension load (LoadInternal)
