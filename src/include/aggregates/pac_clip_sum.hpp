@@ -18,7 +18,7 @@ void RegisterPacNoisedClipSumCountFunctions(ExtensionLoader &loader);
 // ============================================================================
 // Constants
 // ============================================================================
-constexpr int PAC2_NUM_LEVELS = 32;        // 32 levels × 2-bit bands covers 64-bit; HUGEINT clamps to level 31
+constexpr int PAC2_NUM_LEVELS = 62;        // 62 levels × 2-bit bands covers full 128-bit (int64 uses ≤30)
 constexpr int PAC2_NORMAL_SWAR = 16;       // 16 x uint64_t = 64 x uint16_t SWAR counters
 constexpr int PAC2_NORMAL_ELEMENTS = 18;   // 16 SWAR + 1 packed ptr/ec + 1 bitmap
 constexpr int PAC2_OVERFLOW_SWAR = 32;     // 32 x uint64_t = 64 x uint32_t SWAR counters
@@ -65,13 +65,13 @@ struct PacClipSumIntState {
 	int8_t max_level_used;   // -1 if none
 	int8_t inline_level_idx; // which level uses inline, -1 if none
 
-	// 32 level pointers = 256 bytes.
-	// Inline optimization: last 18 slots (indices 14..31) = 144 bytes = one normal level.
-	// Levels 0-13 can use inline storage without overlapping their own pointer slot.
+	// 62 level pointers = 496 bytes.
+	// Inline optimization: last 18 slots (indices 44..61) = 144 bytes = one normal level.
+	// Levels 0-43 can use inline storage without overlapping their own pointer slot.
 	union {
-		uint64_t *levels[PAC2_NUM_LEVELS]; // 256 bytes
+		uint64_t *levels[PAC2_NUM_LEVELS]; // 496 bytes
 		struct {
-			uint64_t *_ptrs[14];                         // levels 0-13 pointers (112 bytes)
+			uint64_t *_ptrs[44];                         // levels 0-43 pointers (352 bytes)
 			uint64_t inline_level[PAC2_NORMAL_ELEMENTS]; // 144 bytes for one inline level
 		};
 	};
@@ -100,16 +100,16 @@ struct PacClipSumIntState {
 	// Level allocation
 	// ========================================================================
 	inline void AllocateLevel(ArenaAllocator &allocator, int k) {
-		if (k >= 14 && inline_level_idx >= 0) {
+		if (k >= 44 && inline_level_idx >= 0) {
 			// Evict inline level to arena
 			auto *ext = reinterpret_cast<uint64_t *>(allocator.Allocate(PAC2_NORMAL_ELEMENTS * sizeof(uint64_t)));
 			memcpy(ext, inline_level, PAC2_NORMAL_ELEMENTS * sizeof(uint64_t));
 			levels[inline_level_idx] = ext;
 			inline_level_idx = -1;
-			// Clear inline area so levels[14..31] read as nullptr
+			// Clear inline area so levels[44..61] read as nullptr
 			memset(inline_level, 0, PAC2_NORMAL_ELEMENTS * sizeof(uint64_t));
 		}
-		if (k < 14 && inline_level_idx < 0) {
+		if (k < 44 && inline_level_idx < 0) {
 			// Use inline storage
 			levels[k] = inline_level;
 			memset(inline_level, 0, PAC2_NORMAL_ELEMENTS * sizeof(uint64_t));
