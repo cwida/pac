@@ -18,12 +18,12 @@ void RegisterPacNoisedClipSumCountFunctions(ExtensionLoader &loader);
 // ============================================================================
 // Constants
 // ============================================================================
-constexpr int PAC2_NUM_LEVELS = 31;
+constexpr int PAC2_NUM_LEVELS = 62;        // 62 levels × 2-bit bands covers full 128-bit (int64 uses ≤30)
 constexpr int PAC2_NORMAL_SWAR = 16;       // 16 x uint64_t = 64 x uint16_t SWAR counters
 constexpr int PAC2_NORMAL_ELEMENTS = 18;   // 16 SWAR + 1 packed ptr/ec + 1 bitmap
 constexpr int PAC2_OVERFLOW_SWAR = 32;     // 32 x uint64_t = 64 x uint32_t SWAR counters
 constexpr int PAC2_OVERFLOW_ELEMENTS = 33; // 32 SWAR + 1 exact_count
-constexpr int PAC2_LEVEL_SHIFT = 4;
+constexpr int PAC2_LEVEL_SHIFT = 2;        // 2^2 = 4x per level (was 4 = 16x per level)
 constexpr uint64_t PAC2_SWAR_MASK_16 = 0x0001000100010001ULL;
 
 // ============================================================================
@@ -65,13 +65,13 @@ struct PacClipSumIntState {
 	int8_t max_level_used;   // -1 if none
 	int8_t inline_level_idx; // which level uses inline, -1 if none
 
-	// 31 level pointers = 248 bytes.
-	// Inline optimization: last 18 slots (indices 13..30) = 144 bytes = one normal level.
-	// Levels 0-12 can use inline storage without overlapping their own pointer slot.
+	// 62 level pointers = 496 bytes.
+	// Inline optimization: last 18 slots (indices 44..61) = 144 bytes = one normal level.
+	// Levels 0-43 can use inline storage without overlapping their own pointer slot.
 	union {
-		uint64_t *levels[PAC2_NUM_LEVELS]; // 248 bytes
+		uint64_t *levels[PAC2_NUM_LEVELS]; // 496 bytes
 		struct {
-			uint64_t *_ptrs[13];                         // levels 0-12 pointers (104 bytes)
+			uint64_t *_ptrs[44];                         // levels 0-43 pointers (352 bytes)
 			uint64_t inline_level[PAC2_NORMAL_ELEMENTS]; // 144 bytes for one inline level
 		};
 	};
@@ -84,32 +84,32 @@ struct PacClipSumIntState {
 			return 0;
 		}
 		int bit_pos = 63 - pac_clzll(abs_val);
-		return (bit_pos - 4) >> 2;
+		return std::min((bit_pos - 4) >> 1, PAC2_NUM_LEVELS - 1);
 	}
 
-	// For 128-bit (hugeint) values
+	// For 128-bit (hugeint) values — clamps to max level for very large values
 	static inline int GetLevel128(uint64_t upper, uint64_t lower) {
 		if (upper == 0) {
 			return GetLevel(lower);
 		}
 		int bit_pos = 127 - pac_clzll(upper);
-		return (bit_pos - 4) >> 2;
+		return std::min((bit_pos - 4) >> 1, PAC2_NUM_LEVELS - 1);
 	}
 
 	// ========================================================================
 	// Level allocation
 	// ========================================================================
 	inline void AllocateLevel(ArenaAllocator &allocator, int k) {
-		if (k >= 13 && inline_level_idx >= 0) {
+		if (k >= 44 && inline_level_idx >= 0) {
 			// Evict inline level to arena
 			auto *ext = reinterpret_cast<uint64_t *>(allocator.Allocate(PAC2_NORMAL_ELEMENTS * sizeof(uint64_t)));
 			memcpy(ext, inline_level, PAC2_NORMAL_ELEMENTS * sizeof(uint64_t));
 			levels[inline_level_idx] = ext;
 			inline_level_idx = -1;
-			// Clear inline area so levels[13..30] read as nullptr
+			// Clear inline area so levels[44..61] read as nullptr
 			memset(inline_level, 0, PAC2_NORMAL_ELEMENTS * sizeof(uint64_t));
 		}
-		if (k < 13 && inline_level_idx < 0) {
+		if (k < 44 && inline_level_idx < 0) {
 			// Use inline storage
 			levels[k] = inline_level;
 			memset(inline_level, 0, PAC2_NORMAL_ELEMENTS * sizeof(uint64_t));
@@ -239,8 +239,8 @@ struct PacClipSumIntState {
 					// Prefix: clamp scale up to first supported level
 					effective_level = first_supported;
 				} else if (k > last_supported) {
-					// Suffix: clamp scale down to last supported level
-					effective_level = last_supported;
+					// Suffix: hard zero — unsupported outlier levels contribute nothing
+					continue;
 				}
 			} else if (clip_support_threshold > 0 && first_supported < 0) {
 				// No supported levels at all — zero everything

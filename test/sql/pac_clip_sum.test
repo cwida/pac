@@ -99,11 +99,11 @@ SELECT abs(pac_noised_clip_sum(hash(id)::UBIGINT, value) - 5500) < 5500 * 5 FROM
 ----
 true
 
-# Soft clamp: outlier contributes a small nonzero amount (not hard-zeroed)
-# Compare with a baseline that has no outlier at all
+# Hard-zero: outlier level is unsupported and contributes nothing,
+# so result should be >= no-outlier baseline (equal or greater due to noise)
 query I
 SELECT (SELECT pac_noised_clip_sum(hash(id)::UBIGINT, value) FROM outlier_test)
-     > (SELECT pac_noised_clip_sum(hash(i)::UBIGINT, (i % 10) + 1) FROM range(1, 1001) t(i))
+     >= (SELECT pac_noised_clip_sum(hash(i)::UBIGINT, (i % 10) + 1) FROM range(1, 1001) t(i))
 ----
 true
 
@@ -212,3 +212,158 @@ query I
 SELECT sum(value) IS NOT NULL FROM compiler_test
 ----
 true
+
+# ============================================================================
+# Level boundary tests (4x bands with shift=2)
+# Values at exact level boundaries should be correctly routed
+# ============================================================================
+
+statement ok
+SET pac_clip_support = 5
+
+# Level 0: 0-255, Level 1: 256-1023, Level 2: 1024-4095, Level 3: 4096-16383
+# 1000 rows at value=100 (level 0), 1 outlier at 4096 (level 3) → different level → clipped
+statement ok
+CREATE TABLE boundary_test AS
+SELECT i as id,
+  CASE WHEN i <= 1000 THEN 100
+       ELSE 4096
+  END as value
+FROM range(1, 1002) t(i)
+
+query I
+SELECT pac_noised_clip_sum(hash(id)::UBIGINT, value) < 200000 FROM boundary_test
+----
+true
+
+# Outlier at 255 (max level 0) — same level as value=100 → NOT clipped
+statement ok
+CREATE TABLE same_level_test AS
+SELECT i as id,
+  CASE WHEN i <= 1000 THEN 100
+       ELSE 255
+  END as value
+FROM range(1, 1002) t(i)
+
+# Without clipping: sum = 1000*100 + 255 = 100255
+statement ok
+SET pac_clip_support = NULL
+
+query I
+SELECT abs(pac_noised_clip_sum(hash(id)::UBIGINT, value) - 100255) < 50000 FROM same_level_test
+----
+true
+
+# With clipping: 255 is same level as 100, so it's NOT clipped — result similar
+statement ok
+SET pac_clip_support = 5
+
+query I
+SELECT abs(pac_noised_clip_sum(hash(id)::UBIGINT, value) - 100255) < 50000 FROM same_level_test
+----
+true
+
+# ============================================================================
+# HUGEINT outlier clipping (levels 30+, beyond int64 range)
+# ============================================================================
+
+statement ok
+SET pac_clip_support = 5
+
+# Normal values + one HUGEINT outlier at 2^70
+statement ok
+CREATE TABLE hugeint_outlier AS
+SELECT i as id,
+  CASE WHEN i <= 1000 THEN i::HUGEINT
+       ELSE (1::HUGEINT << 70)
+  END as value
+FROM range(1, 1002) t(i)
+
+# Without clip_support: result includes the huge outlier
+statement ok
+SET pac_clip_support = NULL
+
+query I
+SELECT pac_noised_clip_sum(hash(id)::UBIGINT, value) > 1000000000000 FROM hugeint_outlier
+----
+true
+
+# With clip_support: outlier at high level gets hard-zeroed
+statement ok
+SET pac_clip_support = 5
+
+query I
+SELECT pac_noised_clip_sum(hash(id)::UBIGINT, value) < 1000000000000 FROM hugeint_outlier
+----
+true
+
+# ============================================================================
+# Negative HUGEINT outlier
+# ============================================================================
+
+statement ok
+CREATE TABLE neg_hugeint_outlier AS
+SELECT i as id,
+  CASE WHEN i <= 1000 THEN (i * 100)::HUGEINT
+       ELSE -(1::HUGEINT << 70)
+  END as value
+FROM range(1, 1002) t(i)
+
+# Without clip_support: huge negative outlier dominates
+statement ok
+SET pac_clip_support = NULL
+
+query I
+SELECT pac_noised_clip_sum(hash(id)::UBIGINT, value) < -1000000000000 FROM neg_hugeint_outlier
+----
+true
+
+# With clip_support: negative outlier clipped via neg_state
+statement ok
+SET pac_clip_support = 5
+
+query I
+SELECT pac_noised_clip_sum(hash(id)::UBIGINT, value) > -1000000000000 FROM neg_hugeint_outlier
+----
+true
+
+# ============================================================================
+# Over-clipping: pac_clip_support higher than group size → zero result
+# ============================================================================
+
+statement ok
+CREATE TABLE tiny_group AS SELECT i as id, i * 10 as value FROM range(1, 4) t(i)
+
+# 3 rows, clip_support=10 → no level has 10 contributors → all zeroed
+statement ok
+SET pac_clip_support = 10
+
+query I
+SELECT pac_noised_clip_sum(hash(id)::UBIGINT, value) FROM tiny_group
+----
+0
+
+# ============================================================================
+# Multi-group with outlier in one group only
+# ============================================================================
+
+statement ok
+SET pac_clip_support = 5
+
+statement ok
+CREATE TABLE multigroup AS
+SELECT i as id, i % 4 as grp,
+  CASE WHEN i = 997 THEN 9999999  -- outlier in group 1 (997 % 4 = 1)
+       ELSE (i % 50) + 1
+  END as value
+FROM range(1, 1001) t(i)
+
+# Group 1 has the outlier — should be clipped to reasonable range
+# Other groups are normal
+query I
+SELECT count(*) FROM (
+  SELECT grp, pac_noised_clip_sum(hash(id)::UBIGINT, value) as s
+  FROM multigroup GROUP BY grp
+) t WHERE abs(s) < 500000
+----
+4
