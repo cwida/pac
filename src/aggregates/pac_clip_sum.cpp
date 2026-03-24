@@ -14,7 +14,7 @@ AUTOVECTORIZE inline void PacClipSumUpdateOneInternal(PacClipSumIntState &state,
 	state.key_hash |= key_hash;
 
 	int level = PacClipSumIntState::GetLevel(value);
-	uint64_t shift = level << 2;
+	uint64_t shift = level << 1;
 	uint16_t shifted_val = static_cast<uint16_t>(value >> shift); // max 255 (8 bits)
 
 	state.EnsureLevelAllocated(allocator, level);
@@ -46,7 +46,7 @@ AUTOVECTORIZE inline void PacClipSumUpdateOneInternal(PacClipSumIntState &state,
 	}
 
 	int level = PacClipSumIntState::GetLevel128(upper, lower);
-	uint64_t shift = level << 2;
+	uint64_t shift = level << 1;
 
 	// Shift the 128-bit value right by shift bits, take lower 8 bits
 	uint16_t shifted_val;
@@ -96,7 +96,7 @@ inline void PacClipSumRouteHugeint(PacClipSumStateWrapper &wrapper, PacClipSumIn
 			uint64_t upper = static_cast<uint64_t>(abs_val.upper);
 			uint64_t lower = abs_val.lower;
 			int level = PacClipSumIntState::GetLevel128(upper, lower);
-			uint64_t shift = level << 2;
+			uint64_t shift = level << 1;
 			uint16_t shifted_val;
 			if (shift >= 64) {
 				shifted_val = static_cast<uint16_t>(upper >> (shift - 64));
@@ -305,7 +305,7 @@ static void PacClipSumUpdateUHugeInt(Vector inputs[], AggregateInputData &aggr, 
 			uint64_t upper = static_cast<uint64_t>(v.upper);
 			uint64_t lower = v.lower;
 			int level = PacClipSumIntState::GetLevel128(upper, lower);
-			uint64_t shift = level << 2;
+			uint64_t shift = level << 1;
 			uint16_t shifted_val;
 			if (shift >= 64) {
 				shifted_val = static_cast<uint16_t>(upper >> (shift - 64));
@@ -347,7 +347,7 @@ static void PacClipSumScatterUpdateUHugeInt(Vector inputs[], AggregateInputData 
 			uint64_t upper = static_cast<uint64_t>(v.upper);
 			uint64_t lower = v.lower;
 			int level = PacClipSumIntState::GetLevel128(upper, lower);
-			uint64_t shift = level << 2;
+			uint64_t shift = level << 1;
 			uint16_t shifted_val;
 			if (shift >= 64) {
 				shifted_val = static_cast<uint16_t>(upper >> (shift - 64));
