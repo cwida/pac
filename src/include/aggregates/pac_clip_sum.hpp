@@ -239,8 +239,8 @@ struct PacClipSumIntState {
 					// Prefix: clamp scale up to first supported level
 					effective_level = first_supported;
 				} else if (k > last_supported) {
-					// Suffix: clamp scale down to last supported level
-					effective_level = last_supported;
+					// Suffix: hard zero — unsupported outlier levels contribute nothing
+					continue;
 				}
 			} else if (clip_support_threshold > 0 && first_supported < 0) {
 				// No supported levels at all — zero everything
