@@ -99,11 +99,11 @@ SELECT abs(pac_noised_clip_sum(hash(id)::UBIGINT, value) - 5500) < 5500 * 5 FROM
 ----
 true
 
-# Soft clamp: outlier contributes a small nonzero amount (not hard-zeroed)
-# Compare with a baseline that has no outlier at all
+# Hard-zero: outlier level is unsupported and contributes nothing,
+# so result should be >= no-outlier baseline (equal or greater due to noise)
 query I
 SELECT (SELECT pac_noised_clip_sum(hash(id)::UBIGINT, value) FROM outlier_test)
-     > (SELECT pac_noised_clip_sum(hash(i)::UBIGINT, (i % 10) + 1) FROM range(1, 1001) t(i))
+     >= (SELECT pac_noised_clip_sum(hash(i)::UBIGINT, (i % 10) + 1) FROM range(1, 1001) t(i))
 ----
 true
 
