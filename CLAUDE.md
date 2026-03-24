@@ -10,9 +10,19 @@ Always test your changes with real queries (e.g., TPC-H on sf1) before declaring
 
 Never execute git commands that could lose code. Always ask the user for permission on those.
 
+## Development rules
+
+- **New features must have tests.** Ask the user whether to create a new test file or extend an existing one in `test/sql/`.
+- **Never remove a failing test to "fix" a failure.** If a test fails, fix the underlying bug. Tests exist for a reason.
+- **Before implementing anything, search the existing codebase** for similar patterns or solutions. Check if a helper function, utility, or prior approach already addresses the problem. Reuse before reinventing.
+- **Use helper functions.** Factor shared logic into helpers rather than duplicating code. Check `src/include/utils/` and existing helpers in the file you're editing.
+- **Never edit the `duckdb/` submodule.** The DuckDB source is read-only. All PAC logic lives in `src/` and `test/`. If you need DuckDB internals, use the public API or ask the user.
+- **Keep the paper in mind.** The PAC mechanism is described in [SIMD-PAC-DB: Pretty Performant PAC Privacy](https://arxiv.org/abs/2603.15023). Refer to it for the theoretical foundations (noise calibration, mutual information bounds, counter semantics) before making changes to core aggregate logic.
+- **Add `PAC_DEBUG_PRINT` statements** at major code flow points (entry/exit of compilation phases, aggregate rewrites, clipping decisions). Use the existing `PAC_DEBUG_PRINT` macro from `src/include/pac_debug.hpp` — it's compiled out when `PAC_DEBUG` is 0.
+
 ## What is PAC?
 
-PAC (Pretty Accurate Counting) is a DuckDB extension that automatically privatizes SQL aggregate queries. It protects against Membership Inference Attacks by maintaining 64 parallel counters per aggregate (one per "world" bit), adding calibrated noise at finalization. Queries are rewritten transparently — users write normal SQL and PAC transforms it.
+PAC (Probably Approximately Correct) is a DuckDB extension that automatically privatizes SQL aggregate queries. It protects against Membership Inference Attacks by maintaining 64 parallel counters per aggregate (one per "world" bit), adding calibrated noise at finalization. Queries are rewritten transparently — users write normal SQL and PAC transforms it.
 
 ## Build & Test
 
