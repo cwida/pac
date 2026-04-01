@@ -1,0 +1,282 @@
+# name: test/sql/pac_clip_min_max.test
+# description: Test pac_clip_min/max with level-based clipping
+# group: [sql]
+
+require pac
+
+statement ok
+PRAGMA clear_pac_metadata;
+
+statement ok
+SET pac_seed = 42
+
+statement ok
+SET threads = 1
+
+statement ok
+SET pac_mi = 0
+
+# ============================================================================
+# Basic type checks
+# ============================================================================
+
+query I
+SELECT typeof(pac_clip_max(hash(i)::UBIGINT, i::INTEGER)) FROM range(1, 101) t(i)
+----
+FLOAT[]
+
+query I
+SELECT typeof(pac_noised_clip_max(hash(i)::UBIGINT, i::INTEGER)) FROM range(1, 101) t(i)
+----
+BIGINT
+
+query I
+SELECT typeof(pac_clip_min(hash(i)::UBIGINT, i::INTEGER)) FROM range(1, 101) t(i)
+----
+FLOAT[]
+
+query I
+SELECT typeof(pac_noised_clip_min(hash(i)::UBIGINT, i::INTEGER)) FROM range(1, 101) t(i)
+----
+BIGINT
+
+query I
+SELECT typeof(pac_noised_clip_max(hash(i)::UBIGINT, (i*0.5)::FLOAT)) FROM range(1, 101) t(i)
+----
+FLOAT
+
+query I
+SELECT typeof(pac_noised_clip_min(hash(i)::UBIGINT, (i*0.5)::DOUBLE)) FROM range(1, 101) t(i)
+----
+DOUBLE
+
+# ============================================================================
+# MAX outlier clipping: 1000 normal rows (1-100), 1 outlier at 1000000
+# Without clipping the outlier should dominate (~999424)
+# With clipping the outlier level has 1 contributor → zeroed out, max → ~100
+# ============================================================================
+
+statement ok
+CREATE TABLE max_outlier AS
+SELECT i as id,
+  CASE WHEN i <= 1000 THEN (i % 100) + 1
+       ELSE 1000000
+  END as value
+FROM range(1, 1002) t(i)
+
+statement ok
+SET pac_clip_support = NULL
+
+query I
+SELECT pac_noised_clip_max(hash(id)::UBIGINT, value) FROM max_outlier
+----
+999424
+
+statement ok
+SET pac_clip_support = 5
+
+query I
+SELECT pac_noised_clip_max(hash(id)::UBIGINT, value) FROM max_outlier
+----
+100
+
+# ============================================================================
+# MIN outlier clipping: 1000 normal rows (10-60), 1 negative outlier at -999999
+# Without clipping: min ~ -1015808 (approximate -999999)
+# With clipping: negative outlier zeroed, min → ~10
+# ============================================================================
+
+statement ok
+CREATE TABLE min_outlier AS
+SELECT i as id,
+  CASE WHEN i <= 1000 THEN (i % 50) + 10
+       ELSE -999999
+  END as value
+FROM range(1, 1002) t(i)
+
+statement ok
+SET pac_clip_support = NULL
+
+query I
+SELECT pac_noised_clip_min(hash(id)::UBIGINT, value) FROM min_outlier
+----
+-1015808
+
+statement ok
+SET pac_clip_support = 5
+
+query I
+SELECT pac_noised_clip_min(hash(id)::UBIGINT, value) FROM min_outlier
+----
+10
+
+# ============================================================================
+# Same-level values should NOT be clipped
+# Level 0 covers [-128, 127], so 50 and 120 are in the same level
+# ============================================================================
+
+statement ok
+CREATE TABLE same_level AS
+SELECT i as id,
+  CASE WHEN i <= 1000 THEN 50
+       ELSE 120
+  END as value
+FROM range(1, 1002) t(i)
+
+statement ok
+SET pac_clip_support = NULL
+
+query I
+SELECT pac_noised_clip_max(hash(id)::UBIGINT, value) FROM same_level
+----
+120
+
+# With clipping: 120 is same level as 50, NOT clipped
+statement ok
+SET pac_clip_support = 5
+
+query I
+SELECT pac_noised_clip_max(hash(id)::UBIGINT, value) FROM same_level
+----
+120
+
+# ============================================================================
+# Cross-level outlier: value at level 3 (4096+) among level 0 values (1-100)
+# ============================================================================
+
+statement ok
+CREATE TABLE cross_level AS
+SELECT i as id,
+  CASE WHEN i <= 1000 THEN (i % 100) + 1
+       ELSE 5000
+  END as value
+FROM range(1, 1002) t(i)
+
+statement ok
+SET pac_clip_support = 5
+
+query I
+SELECT pac_noised_clip_max(hash(id)::UBIGINT, value) < 1000 FROM cross_level
+----
+true
+
+# ============================================================================
+# Grouped aggregation
+# ============================================================================
+
+statement ok
+SET pac_clip_support = NULL
+
+query I
+SELECT count(*) FROM (
+  SELECT id % 3 AS grp, pac_noised_clip_max(hash(id)::UBIGINT, value) AS m
+  FROM max_outlier GROUP BY grp
+) t WHERE m IS NOT NULL
+----
+3
+
+query I
+SELECT count(*) FROM (
+  SELECT id % 3 AS grp, pac_noised_clip_min(hash(id)::UBIGINT, value) AS m
+  FROM min_outlier GROUP BY grp
+) t WHERE m IS NOT NULL
+----
+3
+
+# ============================================================================
+# FLOAT max clipping
+# ============================================================================
+
+statement ok
+CREATE TABLE float_mm AS
+SELECT i as id,
+  CASE WHEN i <= 1000 THEN ((i % 100) * 0.5 + 0.5)::FLOAT
+       ELSE 50000.0::FLOAT
+  END as value
+FROM range(1, 1002) t(i)
+
+statement ok
+SET pac_clip_support = NULL
+
+query I
+SELECT pac_noised_clip_max(hash(id)::UBIGINT, value) > 10000.0 FROM float_mm
+----
+true
+
+statement ok
+SET pac_clip_support = 5
+
+query I
+SELECT pac_noised_clip_max(hash(id)::UBIGINT, value) < 200.0 FROM float_mm
+----
+true
+
+# ============================================================================
+# DOUBLE min clipping
+# ============================================================================
+
+statement ok
+CREATE TABLE double_mm AS
+SELECT i as id,
+  CASE WHEN i <= 1000 THEN ((i % 100) * 0.01 + 1.0)::DOUBLE
+       ELSE -99999.99::DOUBLE
+  END as value
+FROM range(1, 1002) t(i)
+
+statement ok
+SET pac_clip_support = NULL
+
+query I
+SELECT pac_noised_clip_min(hash(id)::UBIGINT, value) < -50000.0 FROM double_mm
+----
+true
+
+statement ok
+SET pac_clip_support = 5
+
+query I
+SELECT pac_noised_clip_min(hash(id)::UBIGINT, value) BETWEEN 0.0 AND 5.0 FROM double_mm
+----
+true
+
+# ============================================================================
+# NULL handling
+# ============================================================================
+
+statement ok
+SET pac_clip_support = NULL
+
+query I
+SELECT pac_noised_clip_max(hash(id)::UBIGINT, CASE WHEN id % 2 = 0 THEN value ELSE NULL END) IS NOT NULL
+FROM max_outlier
+----
+true
+
+# ============================================================================
+# Different integer types
+# ============================================================================
+
+query I
+SELECT pac_noised_clip_max(hash(i)::UBIGINT, i::SMALLINT) BETWEEN 50 AND 128 FROM range(1, 100) t(i)
+----
+true
+
+query I
+SELECT pac_noised_clip_max(hash(i)::UBIGINT, i::BIGINT) BETWEEN 50 AND 128 FROM range(1, 100) t(i)
+----
+true
+
+query I
+SELECT pac_noised_clip_min(hash(i)::UBIGINT, i::TINYINT) BETWEEN 1 AND 10 FROM range(1, 100) t(i)
+----
+true
+
+query I
+SELECT pac_noised_clip_max(hash(i)::UBIGINT, i::UTINYINT) BETWEEN 50 AND 255 FROM range(1, 100) t(i)
+----
+true
+
+query I
+SELECT pac_noised_clip_min(hash(i)::UBIGINT, (i + 10)::UINTEGER) BETWEEN 1 AND 20 FROM range(1, 100) t(i)
+----
+true

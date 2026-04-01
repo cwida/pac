@@ -1354,14 +1354,6 @@ void RewriteClipAggregates(OptimizerExtensionInput &input, unique_ptr<LogicalOpe
 			unique_ptr<Expression> lower_ref =
 			    make_uniq<BoundColumnRefExpression>(lower_type, ColumnBinding(lower_agg_index, i));
 
-			// pac_clip_sum has integer + DECIMAL overloads but no FLOAT/DOUBLE.
-			// Cast FLOAT/DOUBLE to BIGINT so binding succeeds.
-			if ((orig == "sum" || orig == "count") &&
-			    (lower_type.id() == LogicalTypeId::FLOAT || lower_type.id() == LogicalTypeId::DOUBLE)) {
-				lower_ref =
-				    BoundCastExpression::AddCastToType(input.context, std::move(lower_ref), LogicalType::BIGINT);
-			}
-
 			// count → sumcount (preserves BIGINT return type), others → clip variant
 			string clip_func;
 			if (orig == "count") {

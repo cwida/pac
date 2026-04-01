@@ -26,6 +26,22 @@ constexpr int PAC2_OVERFLOW_ELEMENTS = 33; // 32 SWAR + 1 exact_count
 constexpr int PAC2_LEVEL_SHIFT = 2;        // 2^2 = 4x per level (was 4 = 16x per level)
 constexpr uint64_t PAC2_SWAR_MASK_16 = 0x0001000100010001ULL;
 
+// Float/double → int64 scale factors (powers of 2 for exact FP arithmetic)
+constexpr int PAC2_FLOAT_SHIFT = 20;  // 2^20 ≈ 1M — float has ~7 decimal digits, preserves ~6
+constexpr int PAC2_DOUBLE_SHIFT = 27; // 2^27 ≈ 100M — double has ~15 decimal digits, preserves ~8
+constexpr double PAC2_FLOAT_SCALE = static_cast<double>(1 << PAC2_FLOAT_SHIFT);   // 1048576.0
+constexpr double PAC2_DOUBLE_SCALE = static_cast<double>(1 << PAC2_DOUBLE_SHIFT); // 134217728.0
+
+// Scale float/double to int64 with branchless clamping (shared by clip_sum and clip_min_max)
+template <typename FLOAT_TYPE, int SHIFT>
+static inline int64_t ScaleFloatToInt64(FLOAT_TYPE value) {
+	constexpr FLOAT_TYPE scale = static_cast<FLOAT_TYPE>(1 << SHIFT);
+	FLOAT_TYPE scaled = value * scale;
+	scaled = std::max(scaled, static_cast<FLOAT_TYPE>(INT64_MIN));
+	scaled = std::min(scaled, static_cast<FLOAT_TYPE>(INT64_MAX));
+	return static_cast<int64_t>(scaled);
+}
+
 // ============================================================================
 // Packed pointer + exact_count helpers
 // Normal level[16] stores: upper 16 bits = exact_count, lower 48 bits = overflow pointer

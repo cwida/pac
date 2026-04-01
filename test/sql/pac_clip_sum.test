@@ -328,6 +328,122 @@ SELECT pac_noised_clip_sum(hash(id)::UBIGINT, value) > -1000000000000 FROM neg_h
 true
 
 # ============================================================================
+# FLOAT support (fractional values preserved via 2^20 scaling)
+# ============================================================================
+
+statement ok
+SET pac_clip_support = NULL
+
+statement ok
+SET pac_mi = 0
+
+# Type checks
+query I
+SELECT typeof(pac_clip_sum(hash(i)::UBIGINT, (i * 0.5)::FLOAT)) FROM range(1, 101) t(i)
+----
+FLOAT[]
+
+query I
+SELECT typeof(pac_noised_clip_sum(hash(i)::UBIGINT, (i * 0.5)::FLOAT)) FROM range(1, 101) t(i)
+----
+FLOAT
+
+# Basic FLOAT sum: 4000 rows each 0.5 → true sum = 2000
+# pac is approximate, but should be in the right ballpark
+query I
+SELECT abs(pac_noised_clip_sum(hash(i)::UBIGINT, 0.5::FLOAT) - 2000.0) < 1000.0 FROM range(1, 4001) t(i)
+----
+true
+
+# FLOAT with clipping: outlier at 100000.0 among 1000 values of 1.5
+# True sum = 1000*1.5 + 100000 = 101500
+statement ok
+CREATE TABLE float_outlier AS
+SELECT i as id,
+  CASE WHEN i <= 1000 THEN 1.5::FLOAT
+       ELSE 100000.0::FLOAT
+  END as value
+FROM range(1, 1002) t(i)
+
+# Without clip: outlier included → ~198039
+query I
+SELECT pac_noised_clip_sum(hash(id)::UBIGINT, value)::INTEGER FROM float_outlier
+----
+198039
+
+# With clip: outlier removed → ~1431 (close to 1000*1.5=1500)
+statement ok
+SET pac_clip_support = 5
+
+query I
+SELECT pac_noised_clip_sum(hash(id)::UBIGINT, value)::INTEGER FROM float_outlier
+----
+1431
+
+# ============================================================================
+# DOUBLE support (fractional values preserved via 2^27 scaling)
+# ============================================================================
+
+statement ok
+SET pac_clip_support = NULL
+
+# Type checks
+query I
+SELECT typeof(pac_clip_sum(hash(i)::UBIGINT, (i * 0.001)::DOUBLE)) FROM range(1, 101) t(i)
+----
+FLOAT[]
+
+query I
+SELECT typeof(pac_noised_clip_sum(hash(i)::UBIGINT, (i * 0.001)::DOUBLE)) FROM range(1, 101) t(i)
+----
+DOUBLE
+
+# Basic DOUBLE sum: 4000 rows each 0.25 → true sum = 1000
+query I
+SELECT abs(pac_noised_clip_sum(hash(i)::UBIGINT, 0.25::DOUBLE) - 1000.0) < 500.0 FROM range(1, 4001) t(i)
+----
+true
+
+# DOUBLE with clipping: true sum = 1000*2.718 + 999999.99 = 1002717.99
+statement ok
+CREATE TABLE double_outlier AS
+SELECT i as id,
+  CASE WHEN i <= 1000 THEN 2.718::DOUBLE
+       ELSE 999999.99::DOUBLE
+  END as value
+FROM range(1, 1002) t(i)
+
+# Without clip: outlier included → ~1968584
+statement ok
+SET pac_clip_support = NULL
+
+query I
+SELECT pac_noised_clip_sum(hash(id)::UBIGINT, value)::INTEGER FROM double_outlier
+----
+1968584
+
+# With clip: outlier removed → ~2504 (close to 1000*2.718=2718)
+statement ok
+SET pac_clip_support = 5
+
+query I
+SELECT pac_noised_clip_sum(hash(id)::UBIGINT, value)::INTEGER FROM double_outlier
+----
+2504
+
+# Grouped float/double aggregation
+statement ok
+SET pac_clip_support = NULL
+
+query I
+SELECT count(*) FROM (
+  SELECT id % 3 AS grp, pac_noised_clip_sum(hash(id)::UBIGINT, value) AS s
+  FROM float_outlier GROUP BY grp
+) t WHERE s IS NOT NULL
+----
+3
+
+# ============================================================================
 # Over-clipping: pac_clip_support higher than group size → zero result
 # ============================================================================
 
