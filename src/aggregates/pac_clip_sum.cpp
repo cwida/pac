@@ -537,9 +537,17 @@ static void PacClipSumFinalize(Vector &states, AggregateInputData &input, Vector
 		}
 
 		CheckPacSampleDiversity(key_hash, buf, update_count, "pac_clip_sum", bind);
-		PAC_FLOAT result_val = PacNoisySampleFrom64Counters(buf, mi, correction, gen, ~key_hash, query_hash, pstate);
+		double noise_var = 0.0;
+		PAC_FLOAT result_val =
+		    PacNoisySampleFrom64Counters(buf, mi, correction, gen, ~key_hash, query_hash, pstate, &noise_var);
 		result_val *= PAC_FLOAT(2.0);                           // 2x compensation for ~50% sampling
 		result_val /= static_cast<PAC_FLOAT>(bind.float_scale); // undo float→int64 scaling (1.0 for integers)
+		// Utility NULLing: noise variance scales by 4x (2x compensation means 4x on variance)
+		double utility_threshold = bind.utility_threshold;
+		if (PacUtilityNull(static_cast<double>(result_val), noise_var * 4.0, utility_threshold, gen)) {
+			result_mask.SetInvalid(offset + i);
+			continue;
+		}
 		data[offset + i] = FromDouble<ACC_TYPE>(result_val);
 	}
 }

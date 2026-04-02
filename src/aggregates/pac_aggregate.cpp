@@ -129,6 +129,36 @@ bool PacNoiseInNull(uint64_t key_hash, double mi, double correction, std::mt1993
 	return pac_popcount64(~key_hash) > threshold;
 }
 
+// ============================================================================
+// Utility NULLing: probabilistically NULL low-SNR cells (post-processing)
+// ============================================================================
+bool PacUtilityNull(double noised_value, double noise_variance, double threshold, std::mt19937_64 &gen) {
+	if (std::isnan(threshold)) {
+		return false; // disabled (setting is NULL)
+	}
+	if (noise_variance <= 0.0 || !std::isfinite(noise_variance)) {
+		return false; // no noise was added, keep the value
+	}
+	double noise_std = std::sqrt(noise_variance);
+	double z = std::abs(noised_value) / noise_std;
+
+	// P(keep) = sigmoid(steepness * (z - threshold))
+	constexpr double steepness = 3.0;
+	double exponent = -steepness * (z - threshold);
+	// Clamp exponent to avoid overflow in exp()
+	if (exponent > 30.0) {
+		return true; // P(keep) ≈ 0
+	}
+	if (exponent < -30.0) {
+		return false; // P(keep) ≈ 1
+	}
+	double p_keep = 1.0 / (1.0 + std::exp(exponent));
+
+	// Draw uniform [0,1) and NULL if random > p_keep
+	std::uniform_real_distribution<double> dist(0.0, 1.0);
+	return dist(gen) >= p_keep;
+}
+
 // Finalize: compute noisy sample from the 64 counters (works on double array)
 // is_null: bitmask where bit i=1 means counter i should be excluded (compacted out)
 // mi: mutual information parameter for noise calculation
@@ -137,7 +167,7 @@ bool PacNoiseInNull(uint64_t key_hash, double mi, double correction, std::mt1993
 // Returns: correction*yJ + noise where yJ is a randomly selected counter
 PAC_FLOAT PacNoisySampleFrom64Counters(const PAC_FLOAT counters[64], double mi, double correction, std::mt19937_64 &gen,
                                        uint64_t is_null, uint64_t counter_selector,
-                                       const std::shared_ptr<PacPState> &pstate) {
+                                       const std::shared_ptr<PacPState> &pstate, double *out_noise_variance) {
 	D_ASSERT(~is_null != 0); // at least one bit must be valid
 
 	// The vals array will always have 64 elements. If a counter is NULL, we push 0.
@@ -154,6 +184,9 @@ PAC_FLOAT PacNoisySampleFrom64Counters(const PAC_FLOAT counters[64], double mi, 
 
 	// mi <= 0 means no noise - return counter[0] directly (no RNG consumption)
 	if (mi <= 0.0) {
+		if (out_noise_variance) {
+			*out_noise_variance = 0.0;
+		}
 		return vals[0];
 	}
 
@@ -179,6 +212,9 @@ PAC_FLOAT PacNoisySampleFrom64Counters(const PAC_FLOAT counters[64], double mi, 
 		double noise_var = w_var / (2.0 * mi);
 
 		if (noise_var <= 0.0 || !std::isfinite(noise_var)) {
+			if (out_noise_variance) {
+				*out_noise_variance = 0.0;
+			}
 			return yJ;
 		}
 
@@ -204,6 +240,9 @@ PAC_FLOAT PacNoisySampleFrom64Counters(const PAC_FLOAT counters[64], double mi, 
 			pstate->p[k] = std::exp(log_p[k] - log_sum);
 		}
 
+		if (out_noise_variance) {
+			*out_noise_variance = noise_var;
+		}
 		return static_cast<PAC_FLOAT>(noisy_result);
 	}
 
@@ -211,9 +250,15 @@ PAC_FLOAT PacNoisySampleFrom64Counters(const PAC_FLOAT counters[64], double mi, 
 	double delta = ComputeDeltaFromValues(vals, mi);
 
 	if (delta <= 0.0 || !std::isfinite(delta)) {
+		if (out_noise_variance) {
+			*out_noise_variance = 0.0;
+		}
 		return yJ;
 	}
 
+	if (out_noise_variance) {
+		*out_noise_variance = delta;
+	}
 	std::normal_distribution<double> normal_dist(0.0, std::sqrt(delta));
 	return static_cast<PAC_FLOAT>(static_cast<double>(yJ) + normal_dist(gen));
 }

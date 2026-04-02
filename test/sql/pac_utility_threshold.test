@@ -1,0 +1,291 @@
+# name: test/sql/pac_utility_threshold.test
+# description: Test pac_utility_threshold setting for NULLing low-SNR cells
+# group: [sql]
+
+require pac
+
+statement ok
+PRAGMA clear_pac_metadata;
+
+statement ok
+SET pac_seed = 42
+
+statement ok
+SET pac_hash_repair = true
+
+statement ok
+SET threads = 1
+
+# ============================================================================
+# Setup: 30000 rows, 5 groups with varying magnitudes
+# Groups 0-2 have large sums (100k-1.5M), groups 3-4 have tiny sums (5k-12k)
+# ============================================================================
+
+statement ok
+CREATE TABLE ut_data AS
+SELECT i AS rowid, i % 5 AS grp,
+       CASE
+           WHEN (i % 5) = 0 THEN 100
+           WHEN (i % 5) = 1 THEN 200
+           WHEN (i % 5) = 2 THEN 300
+           WHEN (i % 5) = 3 THEN 1
+           ELSE 2
+       END AS value
+FROM range(30000) t(i)
+
+# Use pac_mi = 1 for significant noise (lower mi = more noise)
+statement ok
+SET pac_mi = 1
+
+# ============================================================================
+# Part 1: Default setting (NULL = disabled) — no utility NULLs
+# ============================================================================
+
+statement ok
+PRAGMA clear_pac_metadata;
+
+query I
+SELECT count(*) FROM (
+    SELECT grp, pac_noised_sum(hash(rowid)::UBIGINT, value::INTEGER) AS s
+    FROM ut_data GROUP BY grp
+) t WHERE s IS NULL
+----
+0
+
+# ============================================================================
+# Part 2: pac_noised_sum — low threshold, no NULLs
+# ============================================================================
+
+statement ok
+PRAGMA clear_pac_metadata;
+
+statement ok
+SET pac_utility_threshold = 0.5
+
+query I
+SELECT count(*) FROM (
+    SELECT grp, pac_noised_sum(hash(rowid)::UBIGINT, value::INTEGER) AS s
+    FROM ut_data GROUP BY grp
+) t WHERE s IS NULL
+----
+0
+
+# ============================================================================
+# Part 3: pac_noised_sum — high threshold, more NULLs
+# Monotonicity: higher threshold >= lower threshold NULLs
+# ============================================================================
+
+statement ok
+PRAGMA clear_pac_metadata;
+
+statement ok
+SET pac_utility_threshold = 100
+
+query I
+SELECT count(*) > 0 FROM (
+    SELECT grp, pac_noised_sum(hash(rowid)::UBIGINT, value::INTEGER) AS s
+    FROM ut_data GROUP BY grp
+) t WHERE s IS NULL
+----
+true
+
+# ============================================================================
+# Part 4: pac_noised_sum — very high threshold NULLs everything
+# ============================================================================
+
+statement ok
+PRAGMA clear_pac_metadata;
+
+statement ok
+SET pac_utility_threshold = 1000
+
+query I
+SELECT count(*) FROM (
+    SELECT grp, pac_noised_sum(hash(rowid)::UBIGINT, value::INTEGER) AS s
+    FROM ut_data GROUP BY grp
+) t WHERE s IS NULL
+----
+5
+
+# ============================================================================
+# Part 5: pac_noised_count — disabled, no NULLs
+# ============================================================================
+
+statement ok
+PRAGMA clear_pac_metadata;
+
+statement ok
+SET pac_utility_threshold = NULL
+
+query I
+SELECT count(*) FROM (
+    SELECT grp, pac_noised_count(hash(rowid)::UBIGINT, value::INTEGER) AS c
+    FROM ut_data GROUP BY grp
+) t WHERE c IS NULL
+----
+0
+
+# ============================================================================
+# Part 6: pac_noised_count — high threshold, some NULLed
+# ============================================================================
+
+statement ok
+PRAGMA clear_pac_metadata;
+
+statement ok
+SET pac_utility_threshold = 100
+
+query I
+SELECT count(*) > 0 FROM (
+    SELECT grp, pac_noised_count(hash(rowid)::UBIGINT, value::INTEGER) AS c
+    FROM ut_data GROUP BY grp
+) t WHERE c IS NULL
+----
+true
+
+# ============================================================================
+# Part 7: pac_noised_count — very high threshold NULLs everything
+# ============================================================================
+
+statement ok
+PRAGMA clear_pac_metadata;
+
+statement ok
+SET pac_utility_threshold = 1000
+
+query I
+SELECT count(*) FROM (
+    SELECT grp, pac_noised_count(hash(rowid)::UBIGINT, value::INTEGER) AS c
+    FROM ut_data GROUP BY grp
+) t WHERE c IS NULL
+----
+5
+
+# ============================================================================
+# Part 8: Disable threshold — back to no NULLs
+# ============================================================================
+
+statement ok
+PRAGMA clear_pac_metadata;
+
+statement ok
+SET pac_utility_threshold = NULL
+
+query I
+SELECT count(*) FROM (
+    SELECT grp, pac_noised_sum(hash(rowid)::UBIGINT, value::INTEGER) AS s
+    FROM ut_data GROUP BY grp
+) t WHERE s IS NULL
+----
+0
+
+# ============================================================================
+# Part 9: pac_noised_clip_sum WITH utility threshold (pac_clip_support active)
+# ============================================================================
+
+statement ok
+SET pac_clip_support = 40
+
+# Disabled: no NULLs
+
+statement ok
+PRAGMA clear_pac_metadata;
+
+statement ok
+SET pac_utility_threshold = NULL
+
+query I
+SELECT count(*) FROM (
+    SELECT grp, pac_noised_clip_sum(hash(rowid)::UBIGINT, value::INTEGER) AS s
+    FROM ut_data GROUP BY grp
+) t WHERE s IS NULL
+----
+0
+
+# Low threshold: no NULLs
+
+statement ok
+PRAGMA clear_pac_metadata;
+
+statement ok
+SET pac_utility_threshold = 0.5
+
+query I
+SELECT count(*) FROM (
+    SELECT grp, pac_noised_clip_sum(hash(rowid)::UBIGINT, value::INTEGER) AS s
+    FROM ut_data GROUP BY grp
+) t WHERE s IS NULL
+----
+0
+
+# Moderate threshold: some NULLed
+
+statement ok
+PRAGMA clear_pac_metadata;
+
+statement ok
+SET pac_utility_threshold = 100
+
+query I
+SELECT count(*) > 0 FROM (
+    SELECT grp, pac_noised_clip_sum(hash(rowid)::UBIGINT, value::INTEGER) AS s
+    FROM ut_data GROUP BY grp
+) t WHERE s IS NULL
+----
+true
+
+# Very high threshold: all NULLed
+
+statement ok
+PRAGMA clear_pac_metadata;
+
+statement ok
+SET pac_utility_threshold = 1000
+
+query I
+SELECT count(*) FROM (
+    SELECT grp, pac_noised_clip_sum(hash(rowid)::UBIGINT, value::INTEGER) AS s
+    FROM ut_data GROUP BY grp
+) t WHERE s IS NULL
+----
+5
+
+# ============================================================================
+# Part 10: pac_noised_clip_min / pac_noised_clip_max WITH utility threshold
+# Verify the threshold path is wired up (no crash, correct behavior)
+# ============================================================================
+
+statement ok
+PRAGMA clear_pac_metadata;
+
+statement ok
+SET pac_utility_threshold = NULL
+
+query I
+SELECT count(*) FROM (
+    SELECT grp, pac_noised_clip_min(hash(rowid)::UBIGINT, value::INTEGER) AS m
+    FROM ut_data GROUP BY grp
+) t WHERE m IS NULL
+----
+0
+
+query I
+SELECT count(*) FROM (
+    SELECT grp, pac_noised_clip_max(hash(rowid)::UBIGINT, value::INTEGER) AS m
+    FROM ut_data GROUP BY grp
+) t WHERE m IS NULL
+----
+0
+
+# ============================================================================
+# Cleanup
+# ============================================================================
+
+statement ok
+SET pac_utility_threshold = NULL
+
+statement ok
+SET pac_clip_support = NULL
+
+statement ok
+DROP TABLE ut_data

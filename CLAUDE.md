@@ -97,6 +97,7 @@ ALTER TABLE orders ADD PAC_LINK (o_custkey) REFERENCES customer (c_custkey);
 SET pac_mi = 0;        -- disable noise for testing
 SET pac_seed = 42;     -- reproducible results
 SET pac_clip_support = 40;  -- enable clip rewrite with support threshold
+SET pac_utility_threshold = 4;  -- NULL low-SNR cells (default: NULL = disabled)
 ```
 
 ## Code style (clang-tidy)

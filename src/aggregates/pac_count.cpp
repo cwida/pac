@@ -173,8 +173,17 @@ void PacCountFinalize(Vector &states, AggregateInputData &input, Vector &result,
 		CheckPacSampleDiversity(key_hash, buf, s ? s->GetUpdateCount() : 0, "pac_noised_count",
 		                        input.bind_data->Cast<PacBindData>());
 		// Multiply by 2 to compensate for 50% sampling, then apply correction
-		data[offset + i] = static_cast<int64_t>(
-		    PacNoisySampleFrom64Counters(buf, mi, correction, gen, ~key_hash, query_hash, pstate) * 2.0);
+		double noise_var = 0.0;
+		double result_val = static_cast<double>(PacNoisySampleFrom64Counters(buf, mi, correction, gen, ~key_hash,
+		                                                                     query_hash, pstate, &noise_var)) *
+		                    2.0;
+		// Noise variance scales by 4x (2x on value means 4x on variance)
+		double utility_threshold = input.bind_data->Cast<PacBindData>().utility_threshold;
+		if (PacUtilityNull(result_val, noise_var * 4.0, utility_threshold, gen)) {
+			result_mask.SetInvalid(offset + i);
+			continue;
+		}
+		data[offset + i] = static_cast<int64_t>(result_val);
 	}
 }
 

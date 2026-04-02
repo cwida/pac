@@ -119,9 +119,11 @@ void RegisterPacHashFunction(ExtensionLoader &loader);
 // mi: mutual information parameter for noise calculation
 // correction: factor to multiply values by after compacting NULLs but before adding noise
 // pstate: optional shared p-tracking state for persistent secret composition (may be nullptr)
+// out_noise_variance: if non-null, receives the noise variance used (for utility NULLing)
 PAC_FLOAT PacNoisySampleFrom64Counters(const PAC_FLOAT counters[64], double mi, double correction, std::mt19937_64 &gen,
                                        uint64_t is_null = 0, uint64_t counter_selector = 0,
-                                       const std::shared_ptr<PacPState> &pstate = nullptr);
+                                       const std::shared_ptr<PacPState> &pstate = nullptr,
+                                       double *out_noise_variance = nullptr);
 
 // PacNoisedSelect: returns true with probability proportional to popcount(key_hash)/64
 // Uses rnd&63 as threshold, returns true if bitcount > threshold
@@ -135,6 +137,14 @@ static inline bool PacNoisedSelect(uint64_t key_hash, uint64_t rnd) {
 // Probabilistic: P(NULL) = popcount(~key_hash) / (64 * correction)
 // Deterministic: NULL when popcount(key_hash) * correction < 1
 bool PacNoiseInNull(uint64_t key_hash, double mi, double correction, std::mt19937_64 &gen);
+
+// PacUtilityNull: post-processing NULLing of low-SNR cells.
+// Returns true (NULL the cell) probabilistically based on z-score = |noised_value| / noise_std_dev.
+// P(NULL) = 1 - sigmoid(steepness * (z - threshold)) = 1 - 1/(1 + exp(-steepness*(z - threshold)))
+// Safe by data processing inequality: this is a function of the already-noised output + independent coins.
+// threshold: z-score center (e.g., 4.0 means ~20% expected relative error cutoff). NaN = disabled.
+// noise_variance: the PAC noise variance used for this cell (delta = sigma^2 / (2*mi))
+bool PacUtilityNull(double noised_value, double noise_variance, double threshold, std::mt19937_64 &gen);
 
 // Minimum total rows across all groups before the diversity check applies
 // With hash32_32 (hash_repair), single-PU groups always have exactly 32 zero bits
@@ -168,12 +178,13 @@ inline double GetPacMiFromSetting(ClientContext &ctx) {
 // query_hash is XOR'd with per-row key_hash inside pac_hash() (centralized) and used as
 // the counter selector for PacNoisySampleFrom64Counters in finalize functions.
 struct PacBindData : public FunctionData {
-	double mi;            // mutual information parameter from pac_mi setting (controls noise/NULL probability)
-	double correction;    // correction factor: multiplies sum/avg/count results, reduces NULL prob for min/max
-	uint64_t seed;        // RNG seed: pac_seed setting value, or query-id if not set
-	uint64_t query_hash;  // derived from seed: used inside pac_hash() for XOR and as counter selector
-	double scale_divisor; // for DECIMAL pac_avg: divide result by 10^scale (default 1.0)
-	bool hash_repair;     // if true, pac_hash() repairs hash to exactly 32 bits set
+	double mi;                // mutual information parameter from pac_mi setting (controls noise/NULL probability)
+	double correction;        // correction factor: multiplies sum/avg/count results, reduces NULL prob for min/max
+	uint64_t seed;            // RNG seed: pac_seed setting value, or query-id if not set
+	uint64_t query_hash;      // derived from seed: used inside pac_hash() for XOR and as counter selector
+	double scale_divisor;     // for DECIMAL pac_avg: divide result by 10^scale (default 1.0)
+	bool hash_repair;         // if true, pac_hash() repairs hash to exactly 32 bits set
+	double utility_threshold; // z-score threshold for utility NULLing (NaN = disabled, any value = enabled)
 
 	// Persistent secret p-tracking: shared across all aggregates in the same query (same query_hash).
 	// When active (mi > 0 and pac_ptracking enabled), noise calibration uses p-weighted variance
@@ -190,7 +201,13 @@ struct PacBindData : public FunctionData {
 	explicit PacBindData(ClientContext &ctx, double mi_val, double correction_val = 1.0, double scale_div = 1.0,
 	                     bool hash_repair_val = false)
 	    : mi(mi_val), correction(correction_val), scale_divisor(scale_div), hash_repair(hash_repair_val),
-	      total_update_count(0), suspicious_count(0), nonsuspicious_count(0) {
+	      utility_threshold(std::numeric_limits<double>::quiet_NaN()), total_update_count(0), suspicious_count(0),
+	      nonsuspicious_count(0) {
+		// Read utility threshold: if set (non-null), enables probabilistic NULLing of low-SNR cells
+		Value ut_val;
+		if (ctx.TryGetCurrentSetting("pac_utility_threshold", ut_val) && !ut_val.IsNull()) {
+			utility_threshold = ut_val.GetValue<double>();
+		}
 		Value pac_seed_val;
 		if (ctx.TryGetCurrentSetting("pac_seed", pac_seed_val) && !pac_seed_val.IsNull()) {
 			seed = uint64_t(pac_seed_val.GetValue<int64_t>());
@@ -225,7 +242,8 @@ struct PacBindData : public FunctionData {
 	bool Equals(const FunctionData &other) const override {
 		auto &o = other.Cast<PacBindData>();
 		return mi == o.mi && correction == o.correction && seed == o.seed && query_hash == o.query_hash &&
-		       scale_divisor == o.scale_divisor && hash_repair == o.hash_repair;
+		       scale_divisor == o.scale_divisor && hash_repair == o.hash_repair &&
+		       utility_threshold == o.utility_threshold;
 	}
 };
 

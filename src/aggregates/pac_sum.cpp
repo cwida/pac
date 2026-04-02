@@ -440,9 +440,17 @@ void PacSumFinalize(Vector &states, AggregateInputData &input, Vector &result, i
 		uint64_t update_count = pos->update_count;
 #endif
 		CheckPacSampleDiversity(key_hash, buf, update_count, "pac_noised_sum", input.bind_data->Cast<PacBindData>());
-		PAC_FLOAT result_val = PacNoisySampleFrom64Counters(buf, mi, correction, gen, ~key_hash, query_hash, pstate);
+		double noise_var = 0.0;
+		PAC_FLOAT result_val =
+		    PacNoisySampleFrom64Counters(buf, mi, correction, gen, ~key_hash, query_hash, pstate, &noise_var);
 		// pac_sum needs 2x compensation: doubles the sum to compensate for ~50% of values contributing to each counter
 		result_val *= PAC_FLOAT(2.0);
+		// Noise variance also scales by 4x (2x on the value means 4x on variance)
+		double utility_threshold = input.bind_data->Cast<PacBindData>().utility_threshold;
+		if (PacUtilityNull(static_cast<double>(result_val), noise_var * 4.0, utility_threshold, gen)) {
+			result_mask.SetInvalid(offset + i);
+			continue;
+		}
 #if PAC_DEBUG
 		Printer::Print("pac_sum finalize: result_val=" + std::to_string(result_val));
 #endif

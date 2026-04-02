@@ -122,8 +122,15 @@ static void PacMinMaxFinalize(Vector &states, AggregateInputData &input, Vector 
 		CheckPacSampleDiversity(key_hash, buf, s ? s->update_count : 0, IS_MAX ? "pac_noised_max" : "pac_noised_min",
 		                        input.bind_data->Cast<PacBindData>());
 		// Pass mi for noise, 1.0 as correction (no value scaling for min/max)
-		data[offset + i] =
-		    FromDouble<T>(PacNoisySampleFrom64Counters(buf, mi, 1.0, gen, ~key_hash, query_hash, pstate));
+		double noise_var = 0.0;
+		PAC_FLOAT result_val =
+		    PacNoisySampleFrom64Counters(buf, mi, 1.0, gen, ~key_hash, query_hash, pstate, &noise_var);
+		double utility_threshold = input.bind_data->Cast<PacBindData>().utility_threshold;
+		if (PacUtilityNull(static_cast<double>(result_val), noise_var, utility_threshold, gen)) {
+			result_mask.SetInvalid(offset + i);
+			continue;
+		}
+		data[offset + i] = FromDouble<T>(result_val);
 	}
 }
 
