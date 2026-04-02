@@ -369,6 +369,79 @@ static void PacClipSumScatterUpdateUHugeInt(Vector inputs[], AggregateInputData 
 }
 
 // ============================================================================
+// Float/Double update: scale to int64, route through signed path
+// ============================================================================
+template <typename FLOAT_TYPE, int SHIFT>
+static void PacClipSumUpdateFloat(Vector inputs[], AggregateInputData &aggr, idx_t, data_ptr_t state_p, idx_t count) {
+	auto &state = *reinterpret_cast<PacClipSumStateWrapper *>(state_p);
+	UnifiedVectorFormat hash_data, value_data;
+	inputs[0].ToUnifiedFormat(count, hash_data);
+	inputs[1].ToUnifiedFormat(count, value_data);
+	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
+	auto values = UnifiedVectorFormat::GetData<FLOAT_TYPE>(value_data);
+
+	if (hash_data.validity.AllValid() && value_data.validity.AllValid()) {
+		for (idx_t i = 0; i < count; i++) {
+			auto h_idx = hash_data.sel->get_index(i);
+			auto v_idx = value_data.sel->get_index(i);
+			PacClipSumUpdateOne<true>(state, hashes[h_idx], ScaleFloatToInt64<FLOAT_TYPE, SHIFT>(values[v_idx]),
+			                          aggr.allocator);
+		}
+	} else {
+		for (idx_t i = 0; i < count; i++) {
+			auto h_idx = hash_data.sel->get_index(i);
+			auto v_idx = value_data.sel->get_index(i);
+			if (!hash_data.validity.RowIsValid(h_idx) || !value_data.validity.RowIsValid(v_idx)) {
+				continue;
+			}
+			PacClipSumUpdateOne<true>(state, hashes[h_idx], ScaleFloatToInt64<FLOAT_TYPE, SHIFT>(values[v_idx]),
+			                          aggr.allocator);
+		}
+	}
+}
+
+template <typename FLOAT_TYPE, int SHIFT>
+static void PacClipSumScatterUpdateFloat(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states,
+                                         idx_t count) {
+	UnifiedVectorFormat hash_data, value_data, sdata;
+	inputs[0].ToUnifiedFormat(count, hash_data);
+	inputs[1].ToUnifiedFormat(count, value_data);
+	states.ToUnifiedFormat(count, sdata);
+	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
+	auto values = UnifiedVectorFormat::GetData<FLOAT_TYPE>(value_data);
+	auto state_ptrs = UnifiedVectorFormat::GetData<PacClipSumStateWrapper *>(sdata);
+
+	for (idx_t i = 0; i < count; i++) {
+		auto h_idx = hash_data.sel->get_index(i);
+		auto v_idx = value_data.sel->get_index(i);
+		auto state = state_ptrs[sdata.sel->get_index(i)];
+		if (!hash_data.validity.RowIsValid(h_idx) || !value_data.validity.RowIsValid(v_idx)) {
+			continue;
+		}
+		PacClipSumUpdateOne<true>(*state, hashes[h_idx], ScaleFloatToInt64<FLOAT_TYPE, SHIFT>(values[v_idx]),
+		                          aggr.allocator);
+	}
+}
+
+// Instantiate float/double update functions
+static void PacClipSumUpdateSingleFloat(Vector inputs[], AggregateInputData &aggr, idx_t n, data_ptr_t state_p,
+                                        idx_t count) {
+	PacClipSumUpdateFloat<float, CLIP_FLOAT_SHIFT>(inputs, aggr, n, state_p, count);
+}
+static void PacClipSumScatterUpdateSingleFloat(Vector inputs[], AggregateInputData &aggr, idx_t n, Vector &states,
+                                               idx_t count) {
+	PacClipSumScatterUpdateFloat<float, CLIP_FLOAT_SHIFT>(inputs, aggr, n, states, count);
+}
+static void PacClipSumUpdateSingleDouble(Vector inputs[], AggregateInputData &aggr, idx_t n, data_ptr_t state_p,
+                                         idx_t count) {
+	PacClipSumUpdateFloat<double, CLIP_DOUBLE_SHIFT>(inputs, aggr, n, state_p, count);
+}
+static void PacClipSumScatterUpdateSingleDouble(Vector inputs[], AggregateInputData &aggr, idx_t n, Vector &states,
+                                                idx_t count) {
+	PacClipSumScatterUpdateFloat<double, CLIP_DOUBLE_SHIFT>(inputs, aggr, n, states, count);
+}
+
+// ============================================================================
 // Combine
 // ============================================================================
 AUTOVECTORIZE static void PacClipSumCombineInt(Vector &src, Vector &dst, idx_t count, ArenaAllocator &allocator) {
@@ -403,31 +476,7 @@ static void PacClipSumCombine(Vector &src, Vector &dst, AggregateInputData &aggr
 	PacClipSumCombineInt(src, dst, count, aggr.allocator);
 }
 
-// ============================================================================
-// Bind data with clip_support threshold
-// ============================================================================
-struct PacClipSumBindData : public PacBindData {
-	int clip_support_threshold; // levels with fewer estimated distinct contributors are zeroed out
-
-	PacClipSumBindData(ClientContext &ctx, double mi_val, double correction_val, int clip_support)
-	    : PacBindData(ctx, mi_val, correction_val, 1.0), clip_support_threshold(clip_support) {
-	}
-
-	unique_ptr<FunctionData> Copy() const override {
-		auto copy = make_uniq<PacClipSumBindData>(*this);
-		copy->total_update_count = 0;
-		copy->suspicious_count = 0;
-		copy->nonsuspicious_count = 0;
-		return copy;
-	}
-	bool Equals(const FunctionData &other) const override {
-		if (!PacBindData::Equals(other)) {
-			return false;
-		}
-		auto *o = dynamic_cast<const PacClipSumBindData *>(&other);
-		return o && clip_support_threshold == o->clip_support_threshold;
-	}
-};
+// PacClipBindData is defined in pac_clip_aggr.hpp
 
 // ============================================================================
 // Finalize
@@ -437,12 +486,13 @@ static void PacClipSumFinalize(Vector &states, AggregateInputData &input, Vector
 	auto state_ptrs = FlatVector::GetData<PacClipSumStateWrapper *>(states);
 	auto data = FlatVector::GetData<ACC_TYPE>(result);
 	auto &result_mask = FlatVector::Validity(result);
-	auto &bind = static_cast<PacClipSumBindData &>(*input.bind_data);
+	auto &bind = static_cast<PacClipBindData &>(*input.bind_data);
 	double mi = bind.mi;
 	double correction = bind.correction;
 	uint64_t query_hash = bind.query_hash;
 	auto pstate = bind.pstate;
 	int clip_support = bind.clip_support_threshold;
+	bool clip_scale = bind.clip_scale;
 
 	for (idx_t i = 0; i < count; i++) {
 		PacClipSumFlushBuffer<SIGNED>(*state_ptrs[i], *state_ptrs[i], input.allocator);
@@ -461,14 +511,14 @@ static void PacClipSumFinalize(Vector &states, AggregateInputData &input, Vector
 		}
 
 		// Non-mutating: just read totals with clip_support filtering
-		pos->GetTotals(buf, clip_support);
+		pos->GetTotals(buf, clip_support, clip_scale);
 		uint64_t update_count = pos->update_count;
 
 		// Subtract neg state
 		auto *neg = state_ptrs[i]->GetNegState();
 		if (neg) {
 			PAC_FLOAT neg_buf[64] = {0};
-			neg->GetTotals(neg_buf, clip_support);
+			neg->GetTotals(neg_buf, clip_support, clip_scale);
 			key_hash |= neg->key_hash;
 			for (int j = 0; j < 64; j++) {
 				buf[j] -= neg_buf[j];
@@ -478,7 +528,8 @@ static void PacClipSumFinalize(Vector &states, AggregateInputData &input, Vector
 
 		CheckPacSampleDiversity(key_hash, buf, update_count, "pac_clip_sum", bind);
 		PAC_FLOAT result_val = PacNoisySampleFrom64Counters(buf, mi, correction, gen, ~key_hash, query_hash, pstate);
-		result_val *= PAC_FLOAT(2.0); // 2x compensation for ~50% sampling
+		result_val *= PAC_FLOAT(2.0);                           // 2x compensation for ~50% sampling
+		result_val /= static_cast<PAC_FLOAT>(bind.float_scale); // undo float→int64 scaling (1.0 for integers)
 		data[offset + i] = FromDouble<ACC_TYPE>(result_val);
 	}
 }
@@ -497,6 +548,15 @@ static void PacClipSumNoisedFinalizeBigInt(Vector &states, AggregateInputData &i
                                            idx_t offset) {
 	PacClipSumFinalize<int64_t, true>(states, input, result, count, offset);
 }
+// Float/double output variants
+static void PacClipSumNoisedFinalizeFloat(Vector &states, AggregateInputData &input, Vector &result, idx_t count,
+                                          idx_t offset) {
+	PacClipSumFinalize<float, true>(states, input, result, count, offset);
+}
+static void PacClipSumNoisedFinalizeDouble(Vector &states, AggregateInputData &input, Vector &result, idx_t count,
+                                           idx_t offset) {
+	PacClipSumFinalize<double, true>(states, input, result, count, offset);
+}
 
 // ============================================================================
 // Counters finalize (LIST<FLOAT> output for pac_clip_sum)
@@ -505,9 +565,11 @@ template <bool SIGNED>
 static void PacClipSumFinalizeCounters(Vector &states, AggregateInputData &input, Vector &result, idx_t count,
                                        idx_t offset) {
 	auto state_ptrs = FlatVector::GetData<PacClipSumStateWrapper *>(states);
-	auto &bind = static_cast<PacClipSumBindData &>(*input.bind_data);
+	auto &bind = static_cast<PacClipBindData &>(*input.bind_data);
 	int clip_support = bind.clip_support_threshold;
 	double correction = bind.correction;
+	double float_scale = bind.float_scale;
+	bool clip_scale = bind.clip_scale;
 
 	// Result is LIST<FLOAT>
 	auto list_entries = FlatVector::GetData<list_entry_t>(result);
@@ -533,12 +595,12 @@ static void PacClipSumFinalizeCounters(Vector &states, AggregateInputData &input
 		if (pos) {
 			key_hash = pos->key_hash;
 			update_count = pos->update_count;
-			pos->GetTotals(buf, clip_support);
+			pos->GetTotals(buf, clip_support, clip_scale);
 
 			auto *neg = state_ptrs[i]->GetNegState();
 			if (neg) {
 				PAC_FLOAT neg_buf[64] = {0};
-				neg->GetTotals(neg_buf, clip_support);
+				neg->GetTotals(neg_buf, clip_support, clip_scale);
 				key_hash |= neg->key_hash;
 				for (int j = 0; j < 64; j++) {
 					buf[j] -= neg_buf[j];
@@ -552,7 +614,7 @@ static void PacClipSumFinalizeCounters(Vector &states, AggregateInputData &input
 		idx_t base = i * 64;
 		for (int j = 0; j < 64; j++) {
 			if ((key_hash >> j) & 1ULL) {
-				child_data[base + j] = static_cast<PAC_FLOAT>(buf[j] * 2.0 * correction);
+				child_data[base + j] = static_cast<PAC_FLOAT>(buf[j] * 2.0 * correction / float_scale);
 			} else {
 				child_data[base + j] = 0.0;
 			}
@@ -580,28 +642,7 @@ static void PacClipSumInitialize(const AggregateFunction &, data_ptr_t state_p) 
 	memset(state_p, 0, sizeof(PacClipSumStateWrapper));
 }
 
-static unique_ptr<FunctionData> PacClipSumBind(ClientContext &ctx, AggregateFunction &,
-                                               vector<unique_ptr<Expression>> &args) {
-	double mi = GetPacMiFromSetting(ctx);
-	double correction = 1.0;
-	if (2 < args.size()) {
-		if (!args[2]->IsFoldable()) {
-			throw InvalidInputException("pac_clip_sum: correction parameter must be a constant");
-		}
-		auto val = ExpressionExecutor::EvaluateScalar(ctx, *args[2]);
-		correction = val.GetValue<double>();
-		if (correction < 0.0) {
-			throw InvalidInputException("pac_clip_sum: correction must be >= 0");
-		}
-	}
-	// Read pac_clip_support threshold
-	int clip_support = 0;
-	Value dc_val;
-	if (ctx.TryGetCurrentSetting("pac_clip_support", dc_val) && !dc_val.IsNull()) {
-		clip_support = static_cast<int>(dc_val.GetValue<int64_t>());
-	}
-	return make_uniq<PacClipSumBindData>(ctx, mi, correction, clip_support);
-}
+// PacClipBind, PacClipBindFloat, PacClipBindDouble are defined in pac_clip_aggr.hpp
 
 // ============================================================================
 // DECIMAL support: dispatch by physical type, same pattern as pac_noised_sum
@@ -668,7 +709,7 @@ static unique_ptr<FunctionData> BindDecimalPacNoisedClipSum(ClientContext &ctx, 
 	function.name = "pac_noised_clip_sum";
 	function.arguments[1] = decimal_type;
 	function.return_type = LogicalType::DECIMAL(Decimal::MAX_WIDTH_DECIMAL, DecimalType::GetScale(decimal_type));
-	return PacClipSumBind(ctx, function, args);
+	return PacClipBind(ctx, function, args);
 }
 
 static unique_ptr<FunctionData> BindDecimalPacClipSum(ClientContext &ctx, AggregateFunction &function,
@@ -678,7 +719,7 @@ static unique_ptr<FunctionData> BindDecimalPacClipSum(ClientContext &ctx, Aggreg
 	function.name = "pac_clip_sum";
 	function.arguments[1] = decimal_type;
 	// counters always return LIST<FLOAT>, no DECIMAL return type needed
-	return PacClipSumBind(ctx, function, args);
+	return PacClipBind(ctx, function, args);
 }
 
 // ============================================================================
@@ -690,10 +731,10 @@ static void AddClipSumCountersFcn(AggregateFunctionSet &set, const string &name,
 	auto list_type = LogicalType::LIST(PacFloatLogicalType());
 	set.AddFunction(AggregateFunction(name, {LogicalType::UBIGINT, value_type}, list_type, PacClipSumStateSize,
 	                                  PacClipSumInitialize, scatter, PacClipSumCombine, finalize,
-	                                  FunctionNullHandling::DEFAULT_NULL_HANDLING, update, PacClipSumBind));
+	                                  FunctionNullHandling::DEFAULT_NULL_HANDLING, update, PacClipBind));
 	set.AddFunction(AggregateFunction(name, {LogicalType::UBIGINT, value_type, LogicalType::DOUBLE}, list_type,
 	                                  PacClipSumStateSize, PacClipSumInitialize, scatter, PacClipSumCombine, finalize,
-	                                  FunctionNullHandling::DEFAULT_NULL_HANDLING, update, PacClipSumBind));
+	                                  FunctionNullHandling::DEFAULT_NULL_HANDLING, update, PacClipBind));
 }
 
 static void AddNoisedClipSumFcn(AggregateFunctionSet &set, const string &name, const LogicalType &value_type,
@@ -701,10 +742,10 @@ static void AddNoisedClipSumFcn(AggregateFunctionSet &set, const string &name, c
                                 aggregate_finalize_t finalize, aggregate_simple_update_t update) {
 	set.AddFunction(AggregateFunction(name, {LogicalType::UBIGINT, value_type}, result_type, PacClipSumStateSize,
 	                                  PacClipSumInitialize, scatter, PacClipSumCombine, finalize,
-	                                  FunctionNullHandling::DEFAULT_NULL_HANDLING, update, PacClipSumBind));
+	                                  FunctionNullHandling::DEFAULT_NULL_HANDLING, update, PacClipBind));
 	set.AddFunction(AggregateFunction(name, {LogicalType::UBIGINT, value_type, LogicalType::DOUBLE}, result_type,
 	                                  PacClipSumStateSize, PacClipSumInitialize, scatter, PacClipSumCombine, finalize,
-	                                  FunctionNullHandling::DEFAULT_NULL_HANDLING, update, PacClipSumBind));
+	                                  FunctionNullHandling::DEFAULT_NULL_HANDLING, update, PacClipBind));
 }
 
 // Helper to register all type overloads for a clip sum function set
@@ -776,6 +817,25 @@ void RegisterPacClipSumFunctions(ExtensionLoader &loader) {
 	                                      list_type, nullptr, nullptr, nullptr, nullptr, nullptr,
 	                                      FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr, BindDecimalPacClipSum));
 
+	// FLOAT/DOUBLE overloads (scale to int64 internally)
+	fcn_set.AddFunction(AggregateFunction(
+	    "pac_clip_sum", {LogicalType::UBIGINT, LogicalType::FLOAT}, list_type, PacClipSumStateSize,
+	    PacClipSumInitialize, PacClipSumScatterUpdateSingleFloat, PacClipSumCombine, PacClipSumFinalizeCountersSigned,
+	    FunctionNullHandling::DEFAULT_NULL_HANDLING, PacClipSumUpdateSingleFloat, PacClipBindFloat));
+	fcn_set.AddFunction(AggregateFunction(
+	    "pac_clip_sum", {LogicalType::UBIGINT, LogicalType::FLOAT, LogicalType::DOUBLE}, list_type, PacClipSumStateSize,
+	    PacClipSumInitialize, PacClipSumScatterUpdateSingleFloat, PacClipSumCombine, PacClipSumFinalizeCountersSigned,
+	    FunctionNullHandling::DEFAULT_NULL_HANDLING, PacClipSumUpdateSingleFloat, PacClipBindFloat));
+	fcn_set.AddFunction(AggregateFunction(
+	    "pac_clip_sum", {LogicalType::UBIGINT, LogicalType::DOUBLE}, list_type, PacClipSumStateSize,
+	    PacClipSumInitialize, PacClipSumScatterUpdateSingleDouble, PacClipSumCombine, PacClipSumFinalizeCountersSigned,
+	    FunctionNullHandling::DEFAULT_NULL_HANDLING, PacClipSumUpdateSingleDouble, PacClipBindDouble));
+	fcn_set.AddFunction(AggregateFunction(
+	    "pac_clip_sum", {LogicalType::UBIGINT, LogicalType::DOUBLE, LogicalType::DOUBLE}, list_type,
+	    PacClipSumStateSize, PacClipSumInitialize, PacClipSumScatterUpdateSingleDouble, PacClipSumCombine,
+	    PacClipSumFinalizeCountersSigned, FunctionNullHandling::DEFAULT_NULL_HANDLING, PacClipSumUpdateSingleDouble,
+	    PacClipBindDouble));
+
 	// Add list aggregate overload (LIST<FLOAT> → LIST<FLOAT>) for categorical/subquery
 	AddPacListAggregateOverload(fcn_set, "clip_sum");
 
@@ -802,6 +862,26 @@ void RegisterPacNoisedClipSumFunctions(ExtensionLoader &loader) {
 	fcn_set.AddFunction(AggregateFunction(
 	    {LogicalType::UBIGINT, LogicalTypeId::DECIMAL, LogicalType::DOUBLE}, LogicalTypeId::DECIMAL, nullptr, nullptr,
 	    nullptr, nullptr, nullptr, FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr, BindDecimalPacNoisedClipSum));
+
+	// FLOAT/DOUBLE overloads (return FLOAT/DOUBLE respectively)
+	fcn_set.AddFunction(AggregateFunction(
+	    "pac_noised_clip_sum", {LogicalType::UBIGINT, LogicalType::FLOAT}, LogicalType::FLOAT, PacClipSumStateSize,
+	    PacClipSumInitialize, PacClipSumScatterUpdateSingleFloat, PacClipSumCombine, PacClipSumNoisedFinalizeFloat,
+	    FunctionNullHandling::DEFAULT_NULL_HANDLING, PacClipSumUpdateSingleFloat, PacClipBindFloat));
+	fcn_set.AddFunction(
+	    AggregateFunction("pac_noised_clip_sum", {LogicalType::UBIGINT, LogicalType::FLOAT, LogicalType::DOUBLE},
+	                      LogicalType::FLOAT, PacClipSumStateSize, PacClipSumInitialize,
+	                      PacClipSumScatterUpdateSingleFloat, PacClipSumCombine, PacClipSumNoisedFinalizeFloat,
+	                      FunctionNullHandling::DEFAULT_NULL_HANDLING, PacClipSumUpdateSingleFloat, PacClipBindFloat));
+	fcn_set.AddFunction(AggregateFunction(
+	    "pac_noised_clip_sum", {LogicalType::UBIGINT, LogicalType::DOUBLE}, LogicalType::DOUBLE, PacClipSumStateSize,
+	    PacClipSumInitialize, PacClipSumScatterUpdateSingleDouble, PacClipSumCombine, PacClipSumNoisedFinalizeDouble,
+	    FunctionNullHandling::DEFAULT_NULL_HANDLING, PacClipSumUpdateSingleDouble, PacClipBindDouble));
+	fcn_set.AddFunction(AggregateFunction(
+	    "pac_noised_clip_sum", {LogicalType::UBIGINT, LogicalType::DOUBLE, LogicalType::DOUBLE}, LogicalType::DOUBLE,
+	    PacClipSumStateSize, PacClipSumInitialize, PacClipSumScatterUpdateSingleDouble, PacClipSumCombine,
+	    PacClipSumNoisedFinalizeDouble, FunctionNullHandling::DEFAULT_NULL_HANDLING, PacClipSumUpdateSingleDouble,
+	    PacClipBindDouble));
 
 	CreateAggregateFunctionInfo info(fcn_set);
 	FunctionDescription desc;

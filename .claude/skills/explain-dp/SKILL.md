@@ -43,13 +43,40 @@ Reference: "Differentially Private SQL with Bounded User Contribution" (Google).
 
 ### How PAC differs from DP
 
-- PAC bounds **mutual information** (pac_mi), not ε-divergence
-- PAC does NOT compute sensitivity — noise is calibrated differently
-- PAC uses 64 parallel counters + bitslice encoding for efficient aggregation
-- pac_clip_sum uses **support-based magnitude clipping** instead of hard [L,U] bounds
+| | DP | PAC |
+|---|---|---|
+| **Guarantee type** | Input-independent (worst-case) | Instance-dependent (distribution D) |
+| **Noise calibration** | Sensitivity s → noise ∝ s/ε | Variance σ² → noise ∝ σ²/(2β) |
+| **White-boxing** | Required (analyze algorithm) | Not needed (black-box simulation) |
+| **Composition** | k queries → k·ε (basic) | k queries → Σ MIᵢ (linear, Theorem 2) |
+| **Privacy metric** | ε (log-likelihood ratio) | MI (mutual information, in nats) |
+| **Conversion** | MI=1/128 ≈ ε=0.25 for prior=50% | See Table 3.2 in thesis |
+| **Stable algorithms** | Same noise regardless | Less noise automatically |
+| **Outlier impact** | Sensitivity explodes | Variance explodes (same practical problem) |
+
+Key insight: PAC guarantees are **loose** — the theoretical bound on MIA success
+rate is conservative. Empirical attacks achieve lower success than the bound
+predicts. This means the bounds are hard to violate.
 
 ### Input clipping (Winsorization)
 
 Clip individual values to [μ-tσ, μ+tσ] before aggregation. Reduces sensitivity.
 Well-established in DP literature. Limitations: doesn't catch users with many
 small values (need per-user contribution clipping instead).
+
+### Privacy-conscious design
+
+Rather than post-hoc privatization (build algorithm, then add noise), PAC enables
+**privacy-conscious design**: optimize algorithm parameters jointly with
+the privacy budget.
+
+Key result: For a privatized estimator with budget B:
+    MSE = Bias² + (1/(2B) + 1) · Var + error
+
+This means privatization amplifies the variance by 1/(2B). At tight budgets
+(small B), the optimal algorithm shifts toward lower-variance (higher-bias)
+models. E.g., stronger regularization in ridge regression.
+
+For databases: this suggests that queries producing high-variance outputs (due to
+outliers, small groups, etc.) are inherently harder to privatize. Clipping reduces
+variance and thus the noise needed, improving the privacy-utility tradeoff.

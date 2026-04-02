@@ -6,7 +6,7 @@
 #define PAC_CLIP_SUM_HPP
 
 #include "duckdb.hpp"
-#include "pac_aggregate.hpp"
+#include "pac_clip_aggr.hpp"
 #include <cmath>
 
 namespace duckdb {
@@ -16,14 +16,12 @@ void RegisterPacNoisedClipSumFunctions(ExtensionLoader &loader);
 void RegisterPacNoisedClipSumCountFunctions(ExtensionLoader &loader);
 
 // ============================================================================
-// Constants
+// Sum-specific constants (shared constants in pac_clip_aggr.hpp)
 // ============================================================================
-constexpr int PAC2_NUM_LEVELS = 62;        // 62 levels × 2-bit bands covers full 128-bit (int64 uses ≤30)
 constexpr int PAC2_NORMAL_SWAR = 16;       // 16 x uint64_t = 64 x uint16_t SWAR counters
 constexpr int PAC2_NORMAL_ELEMENTS = 18;   // 16 SWAR + 1 packed ptr/ec + 1 bitmap
 constexpr int PAC2_OVERFLOW_SWAR = 32;     // 32 x uint64_t = 64 x uint32_t SWAR counters
 constexpr int PAC2_OVERFLOW_ELEMENTS = 33; // 32 SWAR + 1 exact_count
-constexpr int PAC2_LEVEL_SHIFT = 2;        // 2^2 = 4x per level (was 4 = 16x per level)
 constexpr uint64_t PAC2_SWAR_MASK_16 = 0x0001000100010001ULL;
 
 // ============================================================================
@@ -69,7 +67,7 @@ struct PacClipSumIntState {
 	// Inline optimization: last 18 slots (indices 44..61) = 144 bytes = one normal level.
 	// Levels 0-43 can use inline storage without overlapping their own pointer slot.
 	union {
-		uint64_t *levels[PAC2_NUM_LEVELS]; // 496 bytes
+		uint64_t *levels[CLIP_NUM_LEVELS]; // 496 bytes
 		struct {
 			uint64_t *_ptrs[44];                         // levels 0-43 pointers (352 bytes)
 			uint64_t inline_level[PAC2_NORMAL_ELEMENTS]; // 144 bytes for one inline level
@@ -84,7 +82,7 @@ struct PacClipSumIntState {
 			return 0;
 		}
 		int bit_pos = 63 - pac_clzll(abs_val);
-		return std::min((bit_pos - 4) >> 1, PAC2_NUM_LEVELS - 1);
+		return std::min((bit_pos - 4) >> 1, CLIP_NUM_LEVELS - 1);
 	}
 
 	// For 128-bit (hugeint) values — clamps to max level for very large values
@@ -93,7 +91,7 @@ struct PacClipSumIntState {
 			return GetLevel(lower);
 		}
 		int bit_pos = 127 - pac_clzll(upper);
-		return std::min((bit_pos - 4) >> 1, PAC2_NUM_LEVELS - 1);
+		return std::min((bit_pos - 4) >> 1, CLIP_NUM_LEVELS - 1);
 	}
 
 	// ========================================================================
@@ -182,72 +180,33 @@ struct PacClipSumIntState {
 	}
 
 	// ========================================================================
-	// Estimate distinct count from 64-bit bitmap using birthday-paradox formula
-	// ========================================================================
-	static inline int EstimateDistinct(uint64_t bitmap) {
-		int k = pac_popcount64(bitmap);
-		if (k >= 64) {
-			return 256; // saturated — could be any large number
-		}
-		if (k == 0) {
-			return 0;
-		}
-		// n ≈ -64 * ln(1 - k/64)
-		return static_cast<int>(-64.0 * std::log(1.0 - k / 64.0));
-	}
-
-	// ========================================================================
 	// GetTotals: non-mutating finalization — sums all levels
-	// clip_support_threshold: soft clamping of under-supported levels (0 = no clipping)
-	//
-	// Levels with fewer estimated distinct contributors than the threshold are
-	// attenuated rather than zeroed:
-	//   - Prefix (below first supported level): scaled UP by 16^distance to
-	//     clamp small under-supported values toward the supported range.
-	//   - Suffix (above last supported level): scaled DOWN by 16^distance to
-	//     attenuate outlier levels toward the supported range.
-	//   - Interior unsupported levels (between first and last supported): full
-	//     contribution, no attenuation.
+	// clip_support_threshold: levels with fewer estimated distinct PUs are clipped
+	// clip_scale: false=omit unsupported prefix/suffix, true=scale to nearest supported
+	// Interior unsupported levels (between first and last supported) always contribute.
 	// ========================================================================
-	void GetTotals(PAC_FLOAT *dst, int clip_support_threshold = 0) const {
+	void GetTotals(PAC_FLOAT *dst, int clip_support_threshold = 0, bool clip_scale = false) const {
 		memset(dst, 0, 64 * sizeof(PAC_FLOAT));
 
 		// Pass 1: find first and last supported levels
-		int first_supported = -1;
-		int last_supported = -1;
+		int first_supported = -1, last_supported = -1;
 		if (clip_support_threshold > 0) {
-			for (int k = 0; k <= max_level_used; k++) {
-				if (levels[k] && EstimateDistinct(levels[k][17]) >= clip_support_threshold) {
-					if (first_supported < 0) {
-						first_supported = k;
-					}
-					last_supported = k;
-				}
-			}
+			ClipFindSupportedRange(levels, max_level_used, 17, clip_support_threshold, first_supported, last_supported);
 		}
 
-		// Pass 2: accumulate contributions with soft clamping
+		// Pass 2: accumulate contributions
 		for (int k = 0; k <= max_level_used; k++) {
 			if (!levels[k]) {
 				continue;
 			}
 
-			// Determine effective scale: clamp under-supported prefix/suffix levels
-			int effective_level = k;
-			if (clip_support_threshold > 0 && first_supported >= 0) {
-				if (k < first_supported) {
-					// Prefix: clamp scale up to first supported level
-					effective_level = first_supported;
-				} else if (k > last_supported) {
-					// Suffix: hard zero — unsupported outlier levels contribute nothing
-					continue;
-				}
-			} else if (clip_support_threshold > 0 && first_supported < 0) {
-				// No supported levels at all — zero everything
+			int eff =
+			    (clip_support_threshold > 0) ? ClipEffectiveLevel(k, first_supported, last_supported, clip_scale) : k;
+			if (eff < 0) {
 				continue;
 			}
 
-			PAC_FLOAT scale = std::exp2(static_cast<PAC_FLOAT>(PAC2_LEVEL_SHIFT * effective_level));
+			PAC_FLOAT scale = std::exp2(static_cast<PAC_FLOAT>(CLIP_LEVEL_SHIFT * eff));
 
 			// Add normal 16-bit SWAR contribution
 			auto *counters = reinterpret_cast<const uint16_t *>(levels[k]);

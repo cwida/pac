@@ -20,6 +20,7 @@
 #include "aggregates/pac_sum.hpp"
 #include "aggregates/pac_clip_sum.hpp"
 #include "aggregates/pac_min_max.hpp"
+#include "aggregates/pac_clip_min_max.hpp"
 #include "categorical/pac_categorical.hpp"
 #include "parser/pac_parser.hpp"
 #include "diff/pac_utility_diff.hpp"
