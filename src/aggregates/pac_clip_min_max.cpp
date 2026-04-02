@@ -305,7 +305,6 @@ static void PacClipMinMaxCombineInt(Vector &src, Vector &dst, idx_t count, Arena
 			auto *d = dst_wrapper[i]->EnsureState(allocator);
 			d->CombineFrom(s, allocator);
 		}
-
 		// Combine neg states
 		auto *s_neg = src_wrapper[i]->GetNegState();
 		if (s_neg) {
@@ -361,13 +360,11 @@ static void PacClipMinMaxFinalize(Vector &states, AggregateInputData &input, Vec
 			result_mask.SetInvalid(offset + i);
 			continue;
 		}
-
 		uint64_t update_count = 0;
 		if (pos) {
 			pos->GetTotals(buf, clip_support, clip_scale);
 			update_count = pos->update_count;
 		}
-
 		// Merge neg state: negate absolute extremes back to negative values
 		if (neg) {
 			PAC_FLOAT neg_buf[64] = {0};
@@ -385,7 +382,6 @@ static void PacClipMinMaxFinalize(Vector &states, AggregateInputData &input, Vec
 			}
 			update_count += neg->update_count;
 		}
-
 		CheckPacSampleDiversity(key_hash, buf, update_count, IS_MAX ? "pac_noised_clip_max" : "pac_noised_clip_min",
 		                        bind);
 		PAC_FLOAT result_val = PacNoisySampleFrom64Counters(buf, mi, correction, gen, ~key_hash, query_hash, pstate);
@@ -472,7 +468,6 @@ static void PacClipMinMaxFinalizeCounters(Vector &states, AggregateInputData &in
 			}
 			update_count += neg->update_count;
 		}
-
 		CheckPacSampleDiversity(key_hash, buf, update_count, IS_MAX ? "pac_clip_max" : "pac_clip_min", bind);
 
 		idx_t base = i * 64;

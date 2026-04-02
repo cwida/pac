@@ -210,6 +210,21 @@ struct PacClipSumIntState {
 
 			PAC_FLOAT scale = std::exp2(static_cast<PAC_FLOAT>(CLIP_LEVEL_SHIFT * eff));
 
+			// Adjust scale by avg shifted value per PU when rescaling outlier levels
+			if (clip_scale && eff != k) {
+				int num_pus = ClipEstimateDistinct(levels[k][17]);
+				if (num_pus > 0) {
+					// Full exact count: overflow contributes top bits
+					uint32_t ec = Pac2GetExactCount(levels[k][16]);
+					uint64_t *overflow = Pac2GetOverflowPtr(levels[k][16]);
+					if (overflow) {
+						ec += (*reinterpret_cast<uint32_t *>(&overflow[32])) << 12;
+					}
+					PAC_FLOAT adjustment = static_cast<PAC_FLOAT>(ec) / static_cast<PAC_FLOAT>(num_pus);
+					scale *= adjustment;
+				}
+			}
+
 			// Add normal 16-bit SWAR contribution
 			auto *counters = reinterpret_cast<const uint16_t *>(levels[k]);
 			for (int j = 0; j < 64; j++) {

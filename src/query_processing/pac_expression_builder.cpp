@@ -1128,50 +1128,27 @@ void ModifyAggregatesWithPacFunctions(OptimizerExtensionInput &input, LogicalAgg
 // with optional lower aggregate insertion for per-PU pre-aggregation
 // ============================================================================
 
-// Map pac function names to their clip variants
+// Map pac function names to their clip variants by inserting "_clip" before the last "_"
+// e.g. pac_noised_sum → pac_noised_clip_sum, pac_sum → pac_clip_sum
 static string GetClipVariant(const string &name) {
-	if (name == "pac_noised_sum") {
-		return "pac_noised_clip_sum";
+	auto pos = name.rfind('_');
+	if (pos == string::npos || name.find("pac_") != 0) {
+		return ""; // not a pac aggregate
 	}
-	if (name == "pac_noised_count") {
-		return "pac_noised_clip_count";
-	}
-	if (name == "pac_noised_min") {
-		return "pac_noised_clip_min";
-	}
-	if (name == "pac_noised_max") {
-		return "pac_noised_clip_max";
-	}
-	if (name == "pac_sum") {
-		return "pac_clip_sum";
-	}
-	if (name == "pac_count") {
-		return "pac_clip_count";
-	}
-	if (name == "pac_min") {
-		return "pac_clip_min";
-	}
-	if (name == "pac_max") {
-		return "pac_clip_max";
-	}
-	return ""; // not a pac aggregate
+	return name.substr(0, pos) + "_clip" + name.substr(pos);
 }
 
-// Map pac function names to their original DuckDB aggregate
+// Map pac function names to their original DuckDB aggregate by extracting the suffix after the last "_"
+// e.g. pac_noised_sum → sum, pac_count → count
 static string GetOriginalAggregate(const string &name) {
-	if (name == "pac_noised_sum" || name == "pac_sum") {
-		return "sum";
+	if (name.find("pac_") != 0) {
+		return "";
 	}
-	if (name == "pac_noised_count" || name == "pac_count") {
-		return "count";
+	auto pos = name.rfind('_');
+	if (pos == string::npos) {
+		return "";
 	}
-	if (name == "pac_noised_min" || name == "pac_min") {
-		return "min";
-	}
-	if (name == "pac_noised_max" || name == "pac_max") {
-		return "max";
-	}
-	return "";
+	return name.substr(pos + 1);
 }
 
 // Is this a noised (scalar) variant? If so, top aggregate uses pac_noised_clip_*
@@ -1222,7 +1199,6 @@ void RewriteClipAggregates(OptimizerExtensionInput &input, unique_ptr<LogicalOpe
 		if (!IsPacAggregate(agg)) {
 			continue;
 		}
-
 		// Check Q13 exception: does the child aggregate already group by PU key?
 		bool child_groups_by_pu = false;
 		for (auto &child : agg->children) {
@@ -1232,7 +1208,6 @@ void RewriteClipAggregates(OptimizerExtensionInput &input, unique_ptr<LogicalOpe
 				break;
 			}
 		}
-
 		if (child_groups_by_pu) {
 			// Q13 exception: just rename pac_noised_* → pac_noised_clip_* in place
 			for (idx_t i = 0; i < agg->expressions.size(); i++) {
@@ -1275,10 +1250,8 @@ void RewriteClipAggregates(OptimizerExtensionInput &input, unique_ptr<LogicalOpe
 		if (!pu_hash_expr) {
 			continue; // shouldn't happen
 		}
-
-		idx_t num_original_groups = agg->groups.size();
-
 		// Build lower aggregate expressions (plain DuckDB aggregates)
+		idx_t num_original_groups = agg->groups.size();
 		vector<unique_ptr<Expression>> lower_expressions;
 		for (idx_t i = 0; i < agg->expressions.size(); i++) {
 			auto &aggr = agg->expressions[i]->Cast<BoundAggregateExpression>();
@@ -1337,7 +1310,6 @@ void RewriteClipAggregates(OptimizerExtensionInput &input, unique_ptr<LogicalOpe
 			auto gtype = agg->groups[i]->return_type;
 			agg->groups[i] = make_uniq<BoundColumnRefExpression>(gtype, ColumnBinding(lower_group_index, i));
 		}
-
 		// PU hash ref from lower's group output
 		auto pu_hash_ref = make_uniq<BoundColumnRefExpression>(pu_hash_expr->return_type,
 		                                                       ColumnBinding(lower_group_index, num_original_groups));
@@ -1361,7 +1333,6 @@ void RewriteClipAggregates(OptimizerExtensionInput &input, unique_ptr<LogicalOpe
 				lower_ref =
 				    BoundCastExpression::AddCastToType(input.context, std::move(lower_ref), LogicalType::BIGINT);
 			}
-
 			// count → sumcount (preserves BIGINT return type), others → clip variant
 			string clip_func;
 			if (orig == "count") {
@@ -1369,11 +1340,9 @@ void RewriteClipAggregates(OptimizerExtensionInput &input, unique_ptr<LogicalOpe
 			} else {
 				clip_func = GetClipVariant(pac_name);
 			}
-
 			agg->expressions[i] =
 			    BindPacAggregate(input, clip_func, pu_hash_ref->Copy(), std::move(lower_ref), nullptr);
 		}
-
 		// Set lower as top's child
 		agg->children[0] = std::move(lower_agg);
 		agg->ResolveOperatorTypes();
