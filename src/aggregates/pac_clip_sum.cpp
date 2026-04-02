@@ -226,25 +226,27 @@ static void PacClipSumScatterUpdate(Vector inputs[], Vector &states, idx_t count
 // ============================================================================
 // X-macro: generate Update/ScatterUpdate for integer types
 // ============================================================================
-#define CLIP_SUM_INT_TYPES_SIGNED                                                                                          \
+#define CLIP_SUM_INT_TYPES_SIGNED                                                                                      \
 	X(TinyInt, int64_t, int8_t, true)                                                                                  \
 	X(SmallInt, int64_t, int16_t, true)                                                                                \
 	X(Integer, int64_t, int32_t, true)                                                                                 \
 	X(BigInt, int64_t, int64_t, true)
 
-#define CLIP_SUM_INT_TYPES_UNSIGNED                                                                                        \
+#define CLIP_SUM_INT_TYPES_UNSIGNED                                                                                    \
 	X(UTinyInt, uint64_t, uint8_t, false)                                                                              \
 	X(USmallInt, uint64_t, uint16_t, false)                                                                            \
 	X(UInteger, uint64_t, uint32_t, false)                                                                             \
 	X(UBigInt, uint64_t, uint64_t, false)
 
-#define X(NAME, VALUE_T, INPUT_T, SIGNED)                                                                                  \
-	static void PacClipSumUpdate##NAME(Vector input[], AggregateInputData &agg, idx_t, data_ptr_t state_p, idx_t cnt) {\
-		auto &state = *reinterpret_cast<PacClipSumStateWrapper<> *>(state_p);                                      \
-		PacClipSumUpdate<CLIP_NUM_LEVELS_64, SIGNED, VALUE_T, INPUT_T>(input, state, cnt, agg.allocator);          \
+#define X(NAME, VALUE_T, INPUT_T, SIGNED)                                                                              \
+	static void PacClipSumUpdate##NAME(Vector input[], AggregateInputData &agg, idx_t, data_ptr_t state_p,             \
+	                                   idx_t cnt) {                                                                    \
+		auto &state = *reinterpret_cast<PacClipSumStateWrapper<> *>(state_p);                                          \
+		PacClipSumUpdate<CLIP_NUM_LEVELS_64, SIGNED, VALUE_T, INPUT_T>(input, state, cnt, agg.allocator);              \
 	}                                                                                                                  \
-	static void PacClipSumScatterUpdate##NAME(Vector input[], AggregateInputData &agg, idx_t, Vector &sts, idx_t cnt) {\
-		PacClipSumScatterUpdate<CLIP_NUM_LEVELS_64, SIGNED, VALUE_T, INPUT_T>(input, sts, cnt, agg.allocator);     \
+	static void PacClipSumScatterUpdate##NAME(Vector input[], AggregateInputData &agg, idx_t, Vector &sts,             \
+	                                          idx_t cnt) {                                                             \
+		PacClipSumScatterUpdate<CLIP_NUM_LEVELS_64, SIGNED, VALUE_T, INPUT_T>(input, sts, cnt, agg.allocator);         \
 	}
 CLIP_SUM_INT_TYPES_SIGNED
 CLIP_SUM_INT_TYPES_UNSIGNED
