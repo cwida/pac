@@ -202,13 +202,14 @@ static void LoadInternal(ExtensionLoader &loader) {
 	    "pac_diffcols", "Measure utility: specify number of key columns and optional output path (e.g. '2:out.csv')",
 	    LogicalType::VARCHAR);
 	// Utility threshold: probabilistically NULL cells where |noised_value| / noise_std_dev < threshold.
-	// Default z-score of 4 corresponds to ~20% expected relative error for values far from zero.
+	// Z-score threshold for utility NULLing: NULLs cells whose signal-to-noise ratio is below threshold.
 	// Uses a sigmoid P(keep) = 1/(1+exp(-3*(z - threshold))) for smooth probabilistic NULLing.
 	// This is safe post-processing of the already-noised output (data processing inequality).
+	// Default: NULL (disabled). Set to e.g. 4.0 to enable (~20% expected relative error cutoff).
 	db.config.AddExtensionOption("pac_utility_threshold",
 	                             "Z-score threshold for utility NULLing: NULL cells with |value|/noise_std < threshold "
-	                             "(default: 4, set to NULL to disable)",
-	                             LogicalType::DOUBLE, Value::DOUBLE(4.0));
+	                             "(default: NULL = disabled, set to e.g. 4 to enable)",
+	                             LogicalType::DOUBLE, Value(LogicalType::DOUBLE));
 
 	// ---- Internal settings ----
 	// Enforce protected column access restrictions (prevents direct projection of protected columns)

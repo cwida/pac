@@ -384,8 +384,16 @@ static void PacClipMinMaxFinalize(Vector &states, AggregateInputData &input, Vec
 		}
 		CheckPacSampleDiversity(key_hash, buf, update_count, IS_MAX ? "pac_noised_clip_max" : "pac_noised_clip_min",
 		                        bind);
-		PAC_FLOAT result_val = PacNoisySampleFrom64Counters(buf, mi, correction, gen, ~key_hash, query_hash, pstate);
+		double noise_var = 0.0;
+		PAC_FLOAT result_val =
+		    PacNoisySampleFrom64Counters(buf, mi, correction, gen, ~key_hash, query_hash, pstate, &noise_var);
 		result_val /= static_cast<PAC_FLOAT>(bind.float_scale);
+		// Utility NULLing: no variance scaling for min/max (no 2x compensation)
+		double utility_threshold = bind.utility_threshold;
+		if (PacUtilityNull(static_cast<double>(result_val), noise_var, utility_threshold, gen)) {
+			result_mask.SetInvalid(offset + i);
+			continue;
+		}
 		data[offset + i] = FromDouble<ACC_TYPE>(result_val);
 	}
 }
