@@ -41,11 +41,12 @@ ALTER TABLE orders ADD PROTECTED (o_comment);
 ALTER TABLE lineitem ADD PROTECTED (l_comment);
 
 -- protected columns cannot be returned
-SELECT c_name FROM employees;
+SELECT c_name FROM customer;
 -- Error: protected column 'customer.c_name' can only be accessed inside
 -- aggregate functions (e.g., SUM, COUNT, AVG, MIN, MAX)
 
---The noised result is close to the real answer but perturbed — an attacker cannot determine whether any specific employee is in the database. 
+--The noised result is close to the real answer but perturbed — an attacker cannot determine whether
+--any specific customer (who might have made many purchases) is in the database. 
 SELECT l_returnflag, l_linestatus, SUM(l_extendedprice) FROM lineitem GROUP BY ALL;
 ┌──────────────┬──────────────┬──────────────────────┐
 │ l_returnflag │ l_linestatus │ sum(l_extendedprice) │
@@ -59,7 +60,7 @@ SELECT l_returnflag, l_linestatus, SUM(l_extendedprice) FROM lineitem GROUP BY A
 
 -- PAC rewrites the query plan automatically
 -- Note that: (1) the GROUP_BY uses a pac_noised_sum(#2, #3), not a standard sum()
---            (2) while the query only mentions lineitem, pac joins with orders to get c_cuskey (the PU key)
+--            (2) while the query only mentions lineitem, pac joins with orders to get _custkey (the PU key)
 EXPLAIN SELECT l_returnflag, l_linestatus, SUM(l_extendedprice) FROM lineitem GROUP BY ALL;
 ┌───────────────────────────┐
 │   PERFECT_HASH_GROUP_BY   │
@@ -94,7 +95,8 @@ EXPLAIN SELECT l_returnflag, l_linestatus, SUM(l_extendedprice) FROM lineitem GR
                              │      ~1,500,000 rows      │
                              └───────────────────────────┘
 
--- every time the result is noised a bit differently (the database is resampled)
+-- every time the result is noised a bit differently (the database is resampled -- though this is "virtual"
+-- "on-the-fly", because it is one  by perturbing the hash function that feeds into the stochastic aggregates)
 SELECT l_returnflag, l_linestatus, SUM(l_extendedprice) FROM lineitem GROUP BY ALL;
 ┌──────────────┬──────────────┬──────────────────────┐
 │ l_returnflag │ l_linestatus │ sum(l_extendedprice) │
