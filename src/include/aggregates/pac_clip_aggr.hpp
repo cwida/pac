@@ -15,8 +15,9 @@ namespace duckdb {
 // ============================================================================
 // Shared clip aggregate constants
 // ============================================================================
-constexpr int CLIP_NUM_LEVELS = 62; // 62 levels × 2-bit bands covers full 128-bit
-constexpr int CLIP_LEVEL_SHIFT = 2; // 2^2 = 4x per level
+constexpr int CLIP_NUM_LEVELS = 62;    // 62 levels × 2-bit bands covers full 128-bit
+constexpr int CLIP_NUM_LEVELS_64 = 30; // 30 levels covers 64-bit (max_level = 29)
+constexpr int CLIP_LEVEL_SHIFT = 2;    // 2^2 = 4x per level
 
 // Float/double → int64 scale factors (powers of 2 for exact FP arithmetic)
 constexpr int CLIP_FLOAT_SHIFT = 20;                                              // 2^20 ≈ 1M

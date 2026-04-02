@@ -1,6 +1,6 @@
 //
 // pac_clip_min_max: Approximate min/max with per-level uint8_t extremes + distinct bitmaps
-// Two-sided (unsigned pos/neg), 62 levels covering 128-bit
+// Two-sided (unsigned pos/neg), NUM_LEVELS sized for input type width
 //
 #ifndef PAC_CLIP_MIN_MAX_HPP
 #define PAC_CLIP_MIN_MAX_HPP
@@ -19,44 +19,44 @@ void RegisterPacNoisedClipMaxFunctions(ExtensionLoader &loader);
 // ============================================================================
 // Min/max-specific constants (shared constants in pac_clip_aggr.hpp)
 // ============================================================================
-constexpr int PCMM_SWAR = 8;              // 8 × uint64_t = 64 × uint8_t extremes (SWAR packed)
-constexpr int PCMM_ELEMENTS = 9;          // 8 SWAR + 1 bitmap
-constexpr int PCMM_INLINE_THRESHOLD = 53; // levels 0-52 can use inline (53 pointers + 9 inline = 62)
+constexpr int PCMM_SWAR = 8;     // 8 × uint64_t = 64 × uint8_t extremes (SWAR packed)
+constexpr int PCMM_ELEMENTS = 9; // 8 SWAR + 1 bitmap
 
 // ============================================================================
 // PacClipMinMaxIntState: core state with uint8_t extremes per level
 // Unsigned: stores absolute values only. Caller routes negatives to a
 // separate state with !IS_MAX (two-sided approach, same as clip_sum).
+// NUM_LEVELS: 30 for ≤64-bit types, 62 for 128-bit types
 // ============================================================================
-template <bool IS_MAX>
+template <bool IS_MAX, int NUM_LEVELS = CLIP_NUM_LEVELS_64>
 struct PacClipMinMaxIntState {
+	static constexpr int INLINE_THRESHOLD = NUM_LEVELS - PCMM_ELEMENTS;
+
 	uint64_t key_hash;
 	uint64_t update_count;
-	int8_t max_level_used;                 // -1 if none
-	int8_t inline_level_idx;               // which level uses inline, -1 if none
-	uint8_t level_bounds[CLIP_NUM_LEVELS]; // BOUNDOPT: worst-of-64 per level for early skip
+	int8_t max_level_used;            // -1 if none
+	int8_t inline_level_idx;          // which level uses inline, -1 if none
+	uint8_t level_bounds[NUM_LEVELS]; // BOUNDOPT: worst-of-64 per level for early skip
 
-	// 62 level pointers = 496 bytes.
-	// Inline optimization: last PCMM_ELEMENTS slots = 72 bytes = one level.
+	// Level pointers with inline optimization: last PCMM_ELEMENTS slots
+	// overlap with one inline level buffer, saving one arena allocation.
 	union {
-		uint64_t *levels[CLIP_NUM_LEVELS]; // 496 bytes
+		uint64_t *levels[NUM_LEVELS];
 		struct {
-			uint64_t *_ptrs[PCMM_INLINE_THRESHOLD]; // levels 0-52 pointers (424 bytes)
-			uint64_t inline_level[PCMM_ELEMENTS];   // 72 bytes for one inline level
+			uint64_t *_ptrs[INLINE_THRESHOLD];
+			uint64_t inline_level[PCMM_ELEMENTS];
 		};
 	};
 
 	// ========================================================================
 	// GetLevel: route value to lowest level where shifted value fits in uint8_t [0,255]
-	// Threshold 256: abs_val < 256 → level 0
-	// Same as clip_sum (8-bit unsigned range)
 	// ========================================================================
 	static inline int GetLevel(uint64_t abs_val) {
 		if (abs_val < 256) {
 			return 0;
 		}
 		int bit_pos = 63 - pac_clzll(abs_val);
-		return std::min((bit_pos - 4) >> 1, CLIP_NUM_LEVELS - 1);
+		return std::min((bit_pos - 4) >> 1, NUM_LEVELS - 1);
 	}
 
 	static inline int GetLevel128(uint64_t upper, uint64_t lower) {
@@ -64,14 +64,14 @@ struct PacClipMinMaxIntState {
 			return GetLevel(lower);
 		}
 		int bit_pos = 127 - pac_clzll(upper);
-		return std::min((bit_pos - 4) >> 1, CLIP_NUM_LEVELS - 1);
+		return std::min((bit_pos - 4) >> 1, NUM_LEVELS - 1);
 	}
 
 	// ========================================================================
 	// Level allocation
 	// ========================================================================
 	inline void AllocateLevel(ArenaAllocator &allocator, int k) {
-		if (k >= PCMM_INLINE_THRESHOLD && inline_level_idx >= 0) {
+		if (k >= INLINE_THRESHOLD && inline_level_idx >= 0) {
 			// Evict inline level to arena
 			auto *ext = reinterpret_cast<uint64_t *>(allocator.Allocate(PCMM_ELEMENTS * sizeof(uint64_t)));
 			memcpy(ext, inline_level, PCMM_ELEMENTS * sizeof(uint64_t));
@@ -80,7 +80,7 @@ struct PacClipMinMaxIntState {
 			memset(inline_level, 0, PCMM_ELEMENTS * sizeof(uint64_t));
 		}
 		uint64_t *buf;
-		if (k < PCMM_INLINE_THRESHOLD && inline_level_idx < 0) {
+		if (k < INLINE_THRESHOLD && inline_level_idx < 0) {
 			buf = inline_level;
 			inline_level_idx = static_cast<int8_t>(k);
 		} else {
@@ -232,11 +232,12 @@ struct PacClipMinMaxIntState {
 // ============================================================================
 // PacClipMinMaxStateWrapper: buffering wrapper with two-sided pos/neg
 // neg_state uses !IS_MAX (opposite direction on absolute values)
+// NUM_LEVELS: 30 for ≤64-bit types, 62 for 128-bit types
 // ============================================================================
-template <bool IS_MAX>
+template <bool IS_MAX, int NUM_LEVELS = CLIP_NUM_LEVELS_64>
 struct PacClipMinMaxStateWrapper {
-	using State = PacClipMinMaxIntState<IS_MAX>;
-	using NegState = PacClipMinMaxIntState<!IS_MAX>;
+	using State = PacClipMinMaxIntState<IS_MAX, NUM_LEVELS>;
+	using NegState = PacClipMinMaxIntState<!IS_MAX, NUM_LEVELS>;
 	static constexpr int BUF_SIZE = 2;
 	static constexpr uint64_t BUF_MASK = 3ULL;
 
@@ -278,7 +279,12 @@ struct PacClipMinMaxStateWrapper {
 		return neg_state;
 	}
 
+	// For unsigned types, neg_state is never used — report smaller size
+	template <bool SIGNED>
 	static idx_t StateSize() {
+		if (!SIGNED) {
+			return sizeof(PacClipMinMaxStateWrapper) - sizeof(NegState *);
+		}
 		return sizeof(PacClipMinMaxStateWrapper);
 	}
 };

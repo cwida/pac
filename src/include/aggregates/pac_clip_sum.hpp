@@ -18,11 +18,11 @@ void RegisterPacNoisedClipSumCountFunctions(ExtensionLoader &loader);
 // ============================================================================
 // Sum-specific constants (shared constants in pac_clip_aggr.hpp)
 // ============================================================================
-constexpr int PAC2_NORMAL_SWAR = 16;       // 16 x uint64_t = 64 x uint16_t SWAR counters
-constexpr int PAC2_NORMAL_ELEMENTS = 18;   // 16 SWAR + 1 packed ptr/ec + 1 bitmap
-constexpr int PAC2_OVERFLOW_SWAR = 32;     // 32 x uint64_t = 64 x uint32_t SWAR counters
-constexpr int PAC2_OVERFLOW_ELEMENTS = 33; // 32 SWAR + 1 exact_count
-constexpr uint64_t PAC2_SWAR_MASK_16 = 0x0001000100010001ULL;
+constexpr int CLIP_NORMAL_SWAR = 16;       // 16 x uint64_t = 64 x uint16_t SWAR counters
+constexpr int CLIP_NORMAL_ELEMENTS = 18;   // 16 SWAR + 1 packed ptr/ec + 1 bitmap
+constexpr int CLIP_OVERFLOW_SWAR = 32;     // 32 x uint64_t = 64 x uint32_t SWAR counters
+constexpr int CLIP_OVERFLOW_ELEMENTS = 33; // 32 SWAR + 1 exact_count
+constexpr uint64_t CLIP_SWAR_MASK_16 = 0x0001000100010001ULL;
 
 // ============================================================================
 // Packed pointer + exact_count helpers
@@ -46,9 +46,9 @@ static inline void Pac2SetOverflowPtr(uint64_t &packed, uint64_t *ptr) {
 // ============================================================================
 AUTOVECTORIZE static inline void Pac2AddToTotalsSWAR16(uint64_t *PAC_RESTRICT total, uint64_t value,
                                                        uint64_t key_hash) {
-	uint64_t val_packed = static_cast<uint16_t>(value) * PAC2_SWAR_MASK_16;
+	uint64_t val_packed = static_cast<uint16_t>(value) * CLIP_SWAR_MASK_16;
 	for (int i = 0; i < 16; i++) {
-		uint64_t bits = (key_hash >> i) & PAC2_SWAR_MASK_16;
+		uint64_t bits = (key_hash >> i) & CLIP_SWAR_MASK_16;
 		uint64_t expanded = (bits << 16) - bits;
 		total[i] += val_packed & expanded;
 	}
@@ -56,21 +56,24 @@ AUTOVECTORIZE static inline void Pac2AddToTotalsSWAR16(uint64_t *PAC_RESTRICT to
 
 // ============================================================================
 // PacClipSumIntState — core state for one unsigned accumulator
+// NUM_LEVELS: 30 for ≤64-bit types, 62 for 128-bit types
 // ============================================================================
+template <int NUM_LEVELS = CLIP_NUM_LEVELS_64>
 struct PacClipSumIntState {
+	static constexpr int INLINE_THRESHOLD = NUM_LEVELS - CLIP_NORMAL_ELEMENTS;
+
 	uint64_t key_hash;
 	uint64_t update_count;
 	int8_t max_level_used;   // -1 if none
 	int8_t inline_level_idx; // which level uses inline, -1 if none
 
-	// 62 level pointers = 496 bytes.
-	// Inline optimization: last 18 slots (indices 44..61) = 144 bytes = one normal level.
-	// Levels 0-43 can use inline storage without overlapping their own pointer slot.
+	// Level pointers with inline optimization: last CLIP_NORMAL_ELEMENTS slots
+	// overlap with one inline level buffer, saving one arena allocation.
 	union {
-		uint64_t *levels[CLIP_NUM_LEVELS]; // 496 bytes
+		uint64_t *levels[NUM_LEVELS];
 		struct {
-			uint64_t *_ptrs[44];                         // levels 0-43 pointers (352 bytes)
-			uint64_t inline_level[PAC2_NORMAL_ELEMENTS]; // 144 bytes for one inline level
+			uint64_t *_ptrs[INLINE_THRESHOLD];
+			uint64_t inline_level[CLIP_NORMAL_ELEMENTS];
 		};
 	};
 
@@ -82,7 +85,7 @@ struct PacClipSumIntState {
 			return 0;
 		}
 		int bit_pos = 63 - pac_clzll(abs_val);
-		return std::min((bit_pos - 4) >> 1, CLIP_NUM_LEVELS - 1);
+		return std::min((bit_pos - 4) >> 1, NUM_LEVELS - 1);
 	}
 
 	// For 128-bit (hugeint) values — clamps to max level for very large values
@@ -91,30 +94,29 @@ struct PacClipSumIntState {
 			return GetLevel(lower);
 		}
 		int bit_pos = 127 - pac_clzll(upper);
-		return std::min((bit_pos - 4) >> 1, CLIP_NUM_LEVELS - 1);
+		return std::min((bit_pos - 4) >> 1, NUM_LEVELS - 1);
 	}
 
 	// ========================================================================
 	// Level allocation
 	// ========================================================================
 	inline void AllocateLevel(ArenaAllocator &allocator, int k) {
-		if (k >= 44 && inline_level_idx >= 0) {
+		if (k >= INLINE_THRESHOLD && inline_level_idx >= 0) {
 			// Evict inline level to arena
-			auto *ext = reinterpret_cast<uint64_t *>(allocator.Allocate(PAC2_NORMAL_ELEMENTS * sizeof(uint64_t)));
-			memcpy(ext, inline_level, PAC2_NORMAL_ELEMENTS * sizeof(uint64_t));
+			auto *ext = reinterpret_cast<uint64_t *>(allocator.Allocate(CLIP_NORMAL_ELEMENTS * sizeof(uint64_t)));
+			memcpy(ext, inline_level, CLIP_NORMAL_ELEMENTS * sizeof(uint64_t));
 			levels[inline_level_idx] = ext;
 			inline_level_idx = -1;
-			// Clear inline area so levels[44..61] read as nullptr
-			memset(inline_level, 0, PAC2_NORMAL_ELEMENTS * sizeof(uint64_t));
+			memset(inline_level, 0, CLIP_NORMAL_ELEMENTS * sizeof(uint64_t));
 		}
-		if (k < 44 && inline_level_idx < 0) {
+		if (k < INLINE_THRESHOLD && inline_level_idx < 0) {
 			// Use inline storage
 			levels[k] = inline_level;
-			memset(inline_level, 0, PAC2_NORMAL_ELEMENTS * sizeof(uint64_t));
+			memset(inline_level, 0, CLIP_NORMAL_ELEMENTS * sizeof(uint64_t));
 			inline_level_idx = static_cast<int8_t>(k);
 		} else {
-			auto *buf = reinterpret_cast<uint64_t *>(allocator.Allocate(PAC2_NORMAL_ELEMENTS * sizeof(uint64_t)));
-			memset(buf, 0, PAC2_NORMAL_ELEMENTS * sizeof(uint64_t));
+			auto *buf = reinterpret_cast<uint64_t *>(allocator.Allocate(CLIP_NORMAL_ELEMENTS * sizeof(uint64_t)));
+			memset(buf, 0, CLIP_NORMAL_ELEMENTS * sizeof(uint64_t));
 			levels[k] = buf;
 		}
 	}
@@ -136,8 +138,8 @@ struct PacClipSumIntState {
 		// 1. Ensure overflow level allocated
 		uint64_t *overflow = Pac2GetOverflowPtr(normal_buf[16]);
 		if (!overflow) {
-			overflow = reinterpret_cast<uint64_t *>(allocator.Allocate(PAC2_OVERFLOW_ELEMENTS * sizeof(uint64_t)));
-			memset(overflow, 0, PAC2_OVERFLOW_ELEMENTS * sizeof(uint64_t));
+			overflow = reinterpret_cast<uint64_t *>(allocator.Allocate(CLIP_OVERFLOW_ELEMENTS * sizeof(uint64_t)));
+			memset(overflow, 0, CLIP_OVERFLOW_ELEMENTS * sizeof(uint64_t));
 			Pac2SetOverflowPtr(normal_buf[16], overflow);
 		}
 
@@ -253,14 +255,14 @@ struct PacClipSumIntState {
 					src->levels[k] = nullptr;
 				} else {
 					// src is using inline — copy instead
-					memcpy(levels[k], src->levels[k], PAC2_NORMAL_ELEMENTS * sizeof(uint64_t));
+					memcpy(levels[k], src->levels[k], CLIP_NORMAL_ELEMENTS * sizeof(uint64_t));
 				}
 				continue;
 			}
 
 			// Both have this level: merge
 			// Add SWAR counters
-			for (int i = 0; i < PAC2_NORMAL_SWAR; i++) {
+			for (int i = 0; i < CLIP_NORMAL_SWAR; i++) {
 				levels[k][i] += src->levels[k][i];
 			}
 			// OR bitmaps
@@ -285,7 +287,7 @@ struct PacClipSumIntState {
 				Pac2SetOverflowPtr(src->levels[k][16], nullptr);
 			} else if (src_overflow && dst_overflow) {
 				// Merge overflow SWAR counters
-				for (int i = 0; i < PAC2_OVERFLOW_SWAR; i++) {
+				for (int i = 0; i < CLIP_OVERFLOW_SWAR; i++) {
 					dst_overflow[i] += src_overflow[i];
 				}
 				// Merge overflow exact_counts
@@ -297,19 +299,21 @@ struct PacClipSumIntState {
 	}
 
 	// Interface methods
-	PacClipSumIntState *GetState() {
+	PacClipSumIntState<NUM_LEVELS> *GetState() {
 		return this;
 	}
-	PacClipSumIntState *EnsureState(ArenaAllocator &) {
+	PacClipSumIntState<NUM_LEVELS> *EnsureState(ArenaAllocator &) {
 		return this;
 	}
 };
 
 // ============================================================================
 // PacClipSumStateWrapper: buffering wrapper with two-sided pos/neg
+// NUM_LEVELS: 30 for ≤64-bit types, 62 for 128-bit types
 // ============================================================================
+template <int NUM_LEVELS = CLIP_NUM_LEVELS_64>
 struct PacClipSumStateWrapper {
-	using State = PacClipSumIntState;
+	using State = PacClipSumIntState<NUM_LEVELS>;
 	using Value = uint64_t;
 	static constexpr int BUF_SIZE = 2;
 	static constexpr uint64_t BUF_MASK = 3ULL;
@@ -318,19 +322,19 @@ struct PacClipSumStateWrapper {
 	uint64_t hash_buf[BUF_SIZE];
 	union {
 		uint64_t n_buffered; // lower 2 bits: count, upper bits: state pointer
-		PacClipSumIntState *state;
+		State *state;
 	};
-	PacClipSumIntState *neg_state; // separate state for negatives (stores absolute values)
+	State *neg_state; // separate state for negatives (stores absolute values)
 
-	PacClipSumIntState *GetState() const {
-		return reinterpret_cast<PacClipSumIntState *>(reinterpret_cast<uintptr_t>(state) & ~7ULL);
+	State *GetState() const {
+		return reinterpret_cast<State *>(reinterpret_cast<uintptr_t>(state) & ~7ULL);
 	}
 
-	PacClipSumIntState *EnsureState(ArenaAllocator &a) {
-		PacClipSumIntState *s = GetState();
+	State *EnsureState(ArenaAllocator &a) {
+		State *s = GetState();
 		if (!s) {
-			s = reinterpret_cast<PacClipSumIntState *>(a.Allocate(sizeof(PacClipSumIntState)));
-			memset(s, 0, sizeof(PacClipSumIntState));
+			s = reinterpret_cast<State *>(a.Allocate(sizeof(State)));
+			memset(s, 0, sizeof(State));
 			s->max_level_used = -1;
 			s->inline_level_idx = -1;
 			state = s;
@@ -338,21 +342,26 @@ struct PacClipSumStateWrapper {
 		return s;
 	}
 
-	PacClipSumIntState *GetNegState() const {
+	State *GetNegState() const {
 		return neg_state;
 	}
 
-	PacClipSumIntState *EnsureNegState(ArenaAllocator &a) {
+	State *EnsureNegState(ArenaAllocator &a) {
 		if (!neg_state) {
-			neg_state = reinterpret_cast<PacClipSumIntState *>(a.Allocate(sizeof(PacClipSumIntState)));
-			memset(neg_state, 0, sizeof(PacClipSumIntState));
+			neg_state = reinterpret_cast<State *>(a.Allocate(sizeof(State)));
+			memset(neg_state, 0, sizeof(State));
 			neg_state->max_level_used = -1;
 			neg_state->inline_level_idx = -1;
 		}
 		return neg_state;
 	}
 
+	// For unsigned types, neg_state is never used — report smaller size
+	template <bool SIGNED>
 	static idx_t StateSize() {
+		if (!SIGNED) {
+			return sizeof(PacClipSumStateWrapper) - sizeof(State *);
+		}
 		return sizeof(PacClipSumStateWrapper);
 	}
 };
