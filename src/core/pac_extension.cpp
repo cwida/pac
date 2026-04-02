@@ -255,6 +255,11 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                             "NULL (default) disables pac_clip_sum; set to e.g. 64 to enable.",
 	                             LogicalType::BIGINT, Value());
 
+	db.config.AddExtensionOption("pac_clip_scale",
+	                             "Scale unsupported outlier levels to nearest supported level instead of omitting. "
+	                             "Default false (omit).",
+	                             LogicalType::BOOLEAN, Value::BOOLEAN(false));
+
 	// Register pac_sum aggregate functions
 	RegisterPacSumFunctions(loader);
 	RegisterPacSumCountersFunctions(loader);

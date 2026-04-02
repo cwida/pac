@@ -372,55 +372,7 @@ void RegisterPacMaxCountersFunctions(ExtensionLoader &loader) {
 }
 
 // ============================================================================
-// Clip synonyms: pac_noised_clip_min/max = pac_noised_min/max,
-//                pac_clip_min/max = pac_min/max
-// ============================================================================
-void RegisterPacNoisedClipMinFunctions(ExtensionLoader &loader) {
-	AggregateFunctionSet fcn_set("pac_noised_clip_min");
-	fcn_set.AddFunction(AggregateFunction("pac_noised_clip_min", {LogicalType::UBIGINT, LogicalType::ANY},
-	                                      LogicalType::ANY, nullptr, nullptr, nullptr, nullptr, nullptr,
-	                                      FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr, PacMinMaxBind<false>));
-	fcn_set.AddFunction(AggregateFunction("pac_noised_clip_min",
-	                                      {LogicalType::UBIGINT, LogicalType::ANY, LogicalType::DOUBLE},
-	                                      LogicalType::ANY, nullptr, nullptr, nullptr, nullptr, nullptr,
-	                                      FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr, PacMinMaxBind<false>));
-	CreateAggregateFunctionInfo info(fcn_set);
-	loader.RegisterFunction(std::move(info));
-}
-
-void RegisterPacNoisedClipMaxFunctions(ExtensionLoader &loader) {
-	AggregateFunctionSet fcn_set("pac_noised_clip_max");
-	fcn_set.AddFunction(AggregateFunction("pac_noised_clip_max", {LogicalType::UBIGINT, LogicalType::ANY},
-	                                      LogicalType::ANY, nullptr, nullptr, nullptr, nullptr, nullptr,
-	                                      FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr, PacMinMaxBind<true>));
-	fcn_set.AddFunction(AggregateFunction(
-	    "pac_noised_clip_max", {LogicalType::UBIGINT, LogicalType::ANY, LogicalType::DOUBLE}, LogicalType::ANY, nullptr,
-	    nullptr, nullptr, nullptr, nullptr, FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr, PacMinMaxBind<true>));
-	CreateAggregateFunctionInfo info(fcn_set);
-	loader.RegisterFunction(std::move(info));
-}
-
-void RegisterPacClipMinFunctions(ExtensionLoader &loader) {
-	auto list_double_type = LogicalType::LIST(PacFloatLogicalType());
-	AggregateFunctionSet fcn_set("pac_clip_min");
-	fcn_set.AddFunction(AggregateFunction(
-	    "pac_clip_min", {LogicalType::UBIGINT, LogicalType::ANY}, list_double_type, nullptr, nullptr, nullptr, nullptr,
-	    nullptr, FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr, PacMinMaxCountersBind<false>));
-	AddPacListAggregateOverload(fcn_set, "clip_min");
-	CreateAggregateFunctionInfo info(fcn_set);
-	loader.RegisterFunction(std::move(info));
-}
-
-void RegisterPacClipMaxFunctions(ExtensionLoader &loader) {
-	auto list_double_type = LogicalType::LIST(PacFloatLogicalType());
-	AggregateFunctionSet fcn_set("pac_clip_max");
-	fcn_set.AddFunction(AggregateFunction(
-	    "pac_clip_max", {LogicalType::UBIGINT, LogicalType::ANY}, list_double_type, nullptr, nullptr, nullptr, nullptr,
-	    nullptr, FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr, PacMinMaxCountersBind<true>));
-	AddPacListAggregateOverload(fcn_set, "clip_max");
-	CreateAggregateFunctionInfo info(fcn_set);
-	loader.RegisterFunction(std::move(info));
-}
+// Clip min/max registration moved to pac_clip_min_max.cpp
 
 // Explicit template instantiations
 #define INST_ALL(T)                                                                                                    \

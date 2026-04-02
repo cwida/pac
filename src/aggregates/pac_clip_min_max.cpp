@@ -1,5 +1,4 @@
 #include "aggregates/pac_clip_min_max.hpp"
-#include "aggregates/pac_clip_sum.hpp" // for PAC2_FLOAT_SCALE, PAC2_DOUBLE_SCALE
 #include "categorical/pac_categorical.hpp"
 #include "duckdb/common/types/decimal.hpp"
 #include "duckdb/parser/parsed_data/create_aggregate_function_info.hpp"
@@ -8,18 +7,16 @@
 namespace duckdb {
 
 // ============================================================================
-// Inner state update: route one signed int64 value to the correct level
+// Inner state update: always unsigned (caller provides abs value)
 // ============================================================================
 template <bool IS_MAX>
 AUTOVECTORIZE inline void PacClipMinMaxUpdateOneInternal(PacClipMinMaxIntState<IS_MAX> &state, uint64_t key_hash,
-                                                         int64_t value, ArenaAllocator &allocator) {
+                                                         uint64_t value, ArenaAllocator &allocator) {
 	state.key_hash |= key_hash;
 
-	uint64_t abs_val = static_cast<uint64_t>(value >= 0 ? value : -value);
-	int level = PacClipMinMaxIntState<IS_MAX>::GetLevel(abs_val);
+	int level = PacClipMinMaxIntState<IS_MAX>::GetLevel(value);
 	int shift = level << 1;
-	// Arithmetic right shift preserves sign; fits in int8_t due to GetLevel threshold 128
-	int8_t shifted_val = static_cast<int8_t>(value >> shift);
+	uint8_t shifted_val = static_cast<uint8_t>((value >> shift) & 0xFF);
 
 	state.EnsureLevelAllocated(allocator, level);
 	uint64_t *buf = state.levels[level];
@@ -39,33 +36,25 @@ AUTOVECTORIZE inline void PacClipMinMaxUpdateOneInternal(PacClipMinMaxIntState<I
 	}
 }
 
-// Overload for unsigned int64 (always positive, shifted fits in 0..127 → int8_t safe)
+// ============================================================================
+// Route signed value to pos or neg state (two-sided, like clip_sum)
+// ============================================================================
 template <bool IS_MAX>
-AUTOVECTORIZE inline void PacClipMinMaxUpdateOneInternalUnsigned(PacClipMinMaxIntState<IS_MAX> &state,
-                                                                 uint64_t key_hash, uint64_t value,
-                                                                 ArenaAllocator &allocator) {
-	state.key_hash |= key_hash;
-
-	int level = PacClipMinMaxIntState<IS_MAX>::GetLevel(value);
-	int shift = level << 1;
-	int8_t shifted_val = static_cast<int8_t>((value >> shift) & 0x7F); // mask to 7 bits (0-127)
-
-	state.EnsureLevelAllocated(allocator, level);
-	uint64_t *buf = state.levels[level];
-	buf[PCMM_SWAR] |= (1ULL << (key_hash >> 58));
-
-	// BOUNDOPT
-	if (!PAC_IS_BETTER(shifted_val, state.level_bounds[level])) {
-		return;
-	}
-	state.UpdateExtreme(buf, shifted_val, key_hash);
-	if ((state.update_count & (BOUND_RECOMPUTE_INTERVAL - 1)) == 0) {
-		state.RecomputeBound(level);
+inline void PacClipMinMaxRouteValue(PacClipMinMaxStateWrapper<IS_MAX> &wrapper,
+                                    PacClipMinMaxIntState<IS_MAX> *pos_state, uint64_t hash, int64_t value,
+                                    ArenaAllocator &a) {
+	if (value < 0) {
+		auto *neg = wrapper.EnsureNegState(a);
+		PacClipMinMaxUpdateOneInternal<!IS_MAX>(*neg, hash, static_cast<uint64_t>(-value), a);
+		neg->update_count++;
+	} else {
+		PacClipMinMaxUpdateOneInternal<IS_MAX>(*pos_state, hash, static_cast<uint64_t>(value), a);
+		pos_state->update_count++;
 	}
 }
 
 // ============================================================================
-// Buffered update (single-sided, no pos/neg split)
+// Buffered update (two-sided: SIGNED routes to pos/neg, !SIGNED always pos)
 // ============================================================================
 template <bool IS_MAX, bool SIGNED, typename ValueT>
 AUTOVECTORIZE inline void PacClipMinMaxUpdateOne(PacClipMinMaxStateWrapper<IS_MAX> &agg, uint64_t key_hash,
@@ -74,20 +63,20 @@ AUTOVECTORIZE inline void PacClipMinMaxUpdateOne(PacClipMinMaxStateWrapper<IS_MA
 	if (DUCKDB_UNLIKELY(cnt == PacClipMinMaxStateWrapper<IS_MAX>::BUF_SIZE)) {
 		auto *dst_state = agg.EnsureState(a);
 		for (int i = 0; i < PacClipMinMaxStateWrapper<IS_MAX>::BUF_SIZE; i++) {
-			if constexpr (SIGNED) {
-				PacClipMinMaxUpdateOneInternal<IS_MAX>(*dst_state, agg.hash_buf[i], agg.val_buf[i], a);
+			if (SIGNED) {
+				PacClipMinMaxRouteValue<IS_MAX>(agg, dst_state, agg.hash_buf[i], agg.val_buf[i], a);
 			} else {
-				PacClipMinMaxUpdateOneInternalUnsigned<IS_MAX>(*dst_state, agg.hash_buf[i],
-				                                               static_cast<uint64_t>(agg.val_buf[i]), a);
+				PacClipMinMaxUpdateOneInternal<IS_MAX>(*dst_state, agg.hash_buf[i],
+				                                       static_cast<uint64_t>(agg.val_buf[i]), a);
+				dst_state->update_count++;
 			}
+		}
+		if (SIGNED) {
+			PacClipMinMaxRouteValue<IS_MAX>(agg, dst_state, key_hash, static_cast<int64_t>(value), a);
+		} else {
+			PacClipMinMaxUpdateOneInternal<IS_MAX>(*dst_state, key_hash, static_cast<uint64_t>(value), a);
 			dst_state->update_count++;
 		}
-		if constexpr (SIGNED) {
-			PacClipMinMaxUpdateOneInternal<IS_MAX>(*dst_state, key_hash, static_cast<int64_t>(value), a);
-		} else {
-			PacClipMinMaxUpdateOneInternalUnsigned<IS_MAX>(*dst_state, key_hash, static_cast<uint64_t>(value), a);
-		}
-		dst_state->update_count++;
 		agg.n_buffered &= ~PacClipMinMaxStateWrapper<IS_MAX>::BUF_MASK;
 	} else {
 		agg.val_buf[cnt] = static_cast<int64_t>(value);
@@ -106,13 +95,13 @@ inline void PacClipMinMaxFlushBuffer(PacClipMinMaxStateWrapper<IS_MAX> &src, Pac
 	if (cnt > 0) {
 		auto *dst_state = dst.EnsureState(a);
 		for (uint64_t i = 0; i < cnt; i++) {
-			if constexpr (SIGNED) {
-				PacClipMinMaxUpdateOneInternal<IS_MAX>(*dst_state, src.hash_buf[i], src.val_buf[i], a);
+			if (SIGNED) {
+				PacClipMinMaxRouteValue<IS_MAX>(dst, dst_state, src.hash_buf[i], src.val_buf[i], a);
 			} else {
-				PacClipMinMaxUpdateOneInternalUnsigned<IS_MAX>(*dst_state, src.hash_buf[i],
-				                                               static_cast<uint64_t>(src.val_buf[i]), a);
+				PacClipMinMaxUpdateOneInternal<IS_MAX>(*dst_state, src.hash_buf[i],
+				                                       static_cast<uint64_t>(src.val_buf[i]), a);
+				dst_state->update_count++;
 			}
-			dst_state->update_count++;
 		}
 		src.n_buffered &= ~PacClipMinMaxStateWrapper<IS_MAX>::BUF_MASK;
 	}
@@ -274,8 +263,8 @@ static void PacClipMinMaxScatterUpdateFloat(Vector inputs[], Vector &states, idx
 
 // X-macro: generate float/double Update/ScatterUpdate for MAX and MIN
 #define PCMM_FLOAT_TYPES                                                                                               \
-	XF(SingleFloat, float, PCMM_FLOAT_SHIFT)                                                                           \
-	XF(SingleDouble, double, PCMM_DOUBLE_SHIFT)
+	XF(SingleFloat, float, CLIP_FLOAT_SHIFT)                                                                           \
+	XF(SingleDouble, double, CLIP_DOUBLE_SHIFT)
 
 #define XF(NAME, FLOAT_T, SHIFT_VAL)                                                                                   \
 	static void PacClipMaxUpdate##NAME(Vector inputs[], AggregateInputData &aggr, idx_t, data_ptr_t state_p,           \
@@ -312,11 +301,21 @@ static void PacClipMinMaxCombineInt(Vector &src, Vector &dst, idx_t count, Arena
 		PacClipMinMaxFlushBuffer<IS_MAX, true>(*src_wrapper[i], *dst_wrapper[i], allocator);
 
 		auto *s = src_wrapper[i]->GetState();
-		if (!s) {
-			continue;
+		if (s) {
+			auto *d = dst_wrapper[i]->EnsureState(allocator);
+			d->CombineFrom(s, allocator);
 		}
-		auto *d = dst_wrapper[i]->EnsureState(allocator);
-		d->CombineFrom(s, allocator);
+
+		// Combine neg states
+		auto *s_neg = src_wrapper[i]->GetNegState();
+		if (s_neg) {
+			auto *d_neg = dst_wrapper[i]->GetNegState();
+			if (!d_neg) {
+				dst_wrapper[i]->neg_state = s_neg; // steal
+			} else {
+				d_neg->CombineFrom(s_neg, allocator);
+			}
+		}
 	}
 }
 
@@ -327,34 +326,7 @@ static void PacClipMinCombine(Vector &src, Vector &dst, AggregateInputData &aggr
 	PacClipMinMaxCombineInt<false>(src, dst, count, aggr.allocator);
 }
 
-// ============================================================================
-// Bind data
-// ============================================================================
-struct PacClipMinMaxBindData : public PacBindData {
-	int clip_support_threshold;
-	double float_scale;
-
-	PacClipMinMaxBindData(ClientContext &ctx, double mi_val, double correction_val, int clip_support,
-	                      double float_scale_val = 1.0)
-	    : PacBindData(ctx, mi_val, correction_val, 1.0), clip_support_threshold(clip_support),
-	      float_scale(float_scale_val) {
-	}
-
-	unique_ptr<FunctionData> Copy() const override {
-		auto copy = make_uniq<PacClipMinMaxBindData>(*this);
-		copy->total_update_count = 0;
-		copy->suspicious_count = 0;
-		copy->nonsuspicious_count = 0;
-		return copy;
-	}
-	bool Equals(const FunctionData &other) const override {
-		if (!PacBindData::Equals(other)) {
-			return false;
-		}
-		auto *o = dynamic_cast<const PacClipMinMaxBindData *>(&other);
-		return o && clip_support_threshold == o->clip_support_threshold && float_scale == o->float_scale;
-	}
-};
+// PacClipBindData is defined in pac_clip_aggr.hpp
 
 // ============================================================================
 // Finalize: noised scalar output
@@ -365,31 +337,54 @@ static void PacClipMinMaxFinalize(Vector &states, AggregateInputData &input, Vec
 	auto state_ptrs = FlatVector::GetData<PacClipMinMaxStateWrapper<IS_MAX> *>(states);
 	auto data = FlatVector::GetData<ACC_TYPE>(result);
 	auto &result_mask = FlatVector::Validity(result);
-	auto &bind = static_cast<PacClipMinMaxBindData &>(*input.bind_data);
+	auto &bind = static_cast<PacClipBindData &>(*input.bind_data);
 	double mi = bind.mi;
 	double correction = bind.correction;
 	uint64_t query_hash = bind.query_hash;
 	auto pstate = bind.pstate;
 	int clip_support = bind.clip_support_threshold;
+	bool clip_scale = bind.clip_scale;
 
 	for (idx_t i = 0; i < count; i++) {
 		PacClipMinMaxFlushBuffer<IS_MAX, true>(*state_ptrs[i], *state_ptrs[i], input.allocator);
 
 		PAC_FLOAT buf[64] = {0};
-		auto *s = state_ptrs[i]->GetState();
-		if (!s) {
+		auto *pos = state_ptrs[i]->GetState();
+		auto *neg = state_ptrs[i]->GetNegState();
+		if (!pos && !neg) {
 			result_mask.SetInvalid(offset + i);
 			continue;
 		}
-		uint64_t key_hash = s->key_hash;
+		uint64_t key_hash = (pos ? pos->key_hash : 0) | (neg ? neg->key_hash : 0);
 		std::mt19937_64 gen(bind.seed);
 		if (PacNoiseInNull(key_hash, mi, correction, gen)) {
 			result_mask.SetInvalid(offset + i);
 			continue;
 		}
 
-		s->GetTotals(buf, clip_support);
-		uint64_t update_count = s->update_count;
+		uint64_t update_count = 0;
+		if (pos) {
+			pos->GetTotals(buf, clip_support, clip_scale);
+			update_count = pos->update_count;
+		}
+
+		// Merge neg state: negate absolute extremes back to negative values
+		if (neg) {
+			PAC_FLOAT neg_buf[64] = {0};
+			neg->GetTotals(neg_buf, clip_support, clip_scale);
+			for (int j = 0; j < 64; j++) {
+				// Only merge if neg had a surviving contribution (not fully clipped)
+				if (neg_buf[j] != 0) {
+					PAC_FLOAT neg_val = -neg_buf[j];
+					if (IS_MAX) {
+						buf[j] = std::max(buf[j], neg_val);
+					} else {
+						buf[j] = std::min(buf[j], neg_val);
+					}
+				}
+			}
+			update_count += neg->update_count;
+		}
 
 		CheckPacSampleDiversity(key_hash, buf, update_count, IS_MAX ? "pac_noised_clip_max" : "pac_noised_clip_min",
 		                        bind);
@@ -429,10 +424,11 @@ template <bool IS_MAX>
 static void PacClipMinMaxFinalizeCounters(Vector &states, AggregateInputData &input, Vector &result, idx_t count,
                                           idx_t offset) {
 	auto state_ptrs = FlatVector::GetData<PacClipMinMaxStateWrapper<IS_MAX> *>(states);
-	auto &bind = static_cast<PacClipMinMaxBindData &>(*input.bind_data);
+	auto &bind = static_cast<PacClipBindData &>(*input.bind_data);
 	int clip_support = bind.clip_support_threshold;
 	double correction = bind.correction;
 	double float_scale = bind.float_scale;
+	bool clip_scale = bind.clip_scale;
 
 	auto list_entries = FlatVector::GetData<list_entry_t>(result);
 	auto &child_vec = ListVector::GetEntry(result);
@@ -453,11 +449,28 @@ static void PacClipMinMaxFinalizeCounters(Vector &states, AggregateInputData &in
 		uint64_t key_hash = 0;
 		uint64_t update_count = 0;
 
-		auto *s = state_ptrs[i]->GetState();
-		if (s) {
-			key_hash = s->key_hash;
-			update_count = s->update_count;
-			s->GetTotals(buf, clip_support);
+		auto *pos = state_ptrs[i]->GetState();
+		auto *neg = state_ptrs[i]->GetNegState();
+		if (pos) {
+			key_hash = pos->key_hash;
+			update_count = pos->update_count;
+			pos->GetTotals(buf, clip_support, clip_scale);
+		}
+		if (neg) {
+			PAC_FLOAT neg_buf[64] = {0};
+			neg->GetTotals(neg_buf, clip_support, clip_scale);
+			key_hash |= neg->key_hash;
+			for (int j = 0; j < 64; j++) {
+				if (neg_buf[j] != 0) {
+					PAC_FLOAT neg_val = -neg_buf[j];
+					if (IS_MAX) {
+						buf[j] = std::max(buf[j], neg_val);
+					} else {
+						buf[j] = std::min(buf[j], neg_val);
+					}
+				}
+			}
+			update_count += neg->update_count;
 		}
 
 		CheckPacSampleDiversity(key_hash, buf, update_count, IS_MAX ? "pac_clip_max" : "pac_clip_min", bind);
@@ -493,39 +506,7 @@ static void PacClipMinMaxInitialize(const AggregateFunction &, data_ptr_t state_
 	memset(state_p, 0, sizeof(PacClipMinMaxStateWrapper<IS_MAX>));
 }
 
-static unique_ptr<FunctionData> PacClipMinMaxBindWithScale(ClientContext &ctx, vector<unique_ptr<Expression>> &args,
-                                                           double float_scale = 1.0) {
-	double mi = GetPacMiFromSetting(ctx);
-	double correction = 1.0;
-	if (2 < args.size()) {
-		if (!args[2]->IsFoldable()) {
-			throw InvalidInputException("pac_clip_min/max: correction parameter must be a constant");
-		}
-		auto val = ExpressionExecutor::EvaluateScalar(ctx, *args[2]);
-		correction = val.GetValue<double>();
-		if (correction < 0.0) {
-			throw InvalidInputException("pac_clip_min/max: correction must be >= 0");
-		}
-	}
-	int clip_support = 0;
-	Value dc_val;
-	if (ctx.TryGetCurrentSetting("pac_clip_support", dc_val) && !dc_val.IsNull()) {
-		clip_support = static_cast<int>(dc_val.GetValue<int64_t>());
-	}
-	return make_uniq<PacClipMinMaxBindData>(ctx, mi, correction, clip_support, float_scale);
-}
-static unique_ptr<FunctionData> PacClipMinMaxBind(ClientContext &ctx, AggregateFunction &,
-                                                  vector<unique_ptr<Expression>> &args) {
-	return PacClipMinMaxBindWithScale(ctx, args);
-}
-static unique_ptr<FunctionData> PacClipMinMaxBindFloat(ClientContext &ctx, AggregateFunction &,
-                                                       vector<unique_ptr<Expression>> &args) {
-	return PacClipMinMaxBindWithScale(ctx, args, PCMM_FLOAT_SCALE);
-}
-static unique_ptr<FunctionData> PacClipMinMaxBindDouble(ClientContext &ctx, AggregateFunction &,
-                                                        vector<unique_ptr<Expression>> &args) {
-	return PacClipMinMaxBindWithScale(ctx, args, PCMM_DOUBLE_SCALE);
-}
+// PacClipBind, PacClipBindFloat, PacClipBindDouble are defined in pac_clip_aggr.hpp
 
 // ============================================================================
 // DECIMAL support: dispatch by physical type
@@ -573,7 +554,7 @@ static unique_ptr<FunctionData> BindDecimalPacNoisedClipMinMax(ClientContext &ct
 	function.name = IS_MAX ? "pac_noised_clip_max" : "pac_noised_clip_min";
 	function.arguments[1] = decimal_type;
 	function.return_type = LogicalType::DECIMAL(Decimal::MAX_WIDTH_DECIMAL, DecimalType::GetScale(decimal_type));
-	return PacClipMinMaxBind(ctx, function, args);
+	return PacClipBind(ctx, function, args);
 }
 
 // ============================================================================
@@ -587,11 +568,11 @@ static void AddClipMinMaxCountersFcn(AggregateFunctionSet &set, const string &na
 	set.AddFunction(AggregateFunction(name, {LogicalType::UBIGINT, value_type}, list_type,
 	                                  PacClipMinMaxStateSize<IS_MAX>, PacClipMinMaxInitialize<IS_MAX>, scatter,
 	                                  IS_MAX ? PacClipMaxCombine : PacClipMinCombine, finalize,
-	                                  FunctionNullHandling::DEFAULT_NULL_HANDLING, update, PacClipMinMaxBind));
+	                                  FunctionNullHandling::DEFAULT_NULL_HANDLING, update, PacClipBind));
 	set.AddFunction(AggregateFunction(name, {LogicalType::UBIGINT, value_type, LogicalType::DOUBLE}, list_type,
 	                                  PacClipMinMaxStateSize<IS_MAX>, PacClipMinMaxInitialize<IS_MAX>, scatter,
 	                                  IS_MAX ? PacClipMaxCombine : PacClipMinCombine, finalize,
-	                                  FunctionNullHandling::DEFAULT_NULL_HANDLING, update, PacClipMinMaxBind));
+	                                  FunctionNullHandling::DEFAULT_NULL_HANDLING, update, PacClipBind));
 }
 
 template <bool IS_MAX>
@@ -601,11 +582,11 @@ static void AddNoisedClipMinMaxFcn(AggregateFunctionSet &set, const string &name
 	set.AddFunction(AggregateFunction(name, {LogicalType::UBIGINT, value_type}, result_type,
 	                                  PacClipMinMaxStateSize<IS_MAX>, PacClipMinMaxInitialize<IS_MAX>, scatter,
 	                                  IS_MAX ? PacClipMaxCombine : PacClipMinCombine, finalize,
-	                                  FunctionNullHandling::DEFAULT_NULL_HANDLING, update, PacClipMinMaxBind));
+	                                  FunctionNullHandling::DEFAULT_NULL_HANDLING, update, PacClipBind));
 	set.AddFunction(AggregateFunction(name, {LogicalType::UBIGINT, value_type, LogicalType::DOUBLE}, result_type,
 	                                  PacClipMinMaxStateSize<IS_MAX>, PacClipMinMaxInitialize<IS_MAX>, scatter,
 	                                  IS_MAX ? PacClipMaxCombine : PacClipMinCombine, finalize,
-	                                  FunctionNullHandling::DEFAULT_NULL_HANDLING, update, PacClipMinMaxBind));
+	                                  FunctionNullHandling::DEFAULT_NULL_HANDLING, update, PacClipBind));
 }
 
 // Helper to register all type overloads
@@ -695,55 +676,55 @@ static void AddFloatDoubleOverloads(AggregateFunctionSet &set, const string &nam
 		auto list_type = LogicalType::LIST(PacFloatLogicalType());
 
 		// FLOAT
-		set.AddFunction(AggregateFunction(
-		    name, {LogicalType::UBIGINT, LogicalType::FLOAT}, list_type, state_size, init,
-		    IS_MAX ? PacClipMaxScatterUpdateSingleFloat : PacClipMinScatterUpdateSingleFloat, combine, finalize,
-		    FunctionNullHandling::DEFAULT_NULL_HANDLING,
-		    IS_MAX ? PacClipMaxUpdateSingleFloat : PacClipMinUpdateSingleFloat, PacClipMinMaxBindFloat));
+		set.AddFunction(
+		    AggregateFunction(name, {LogicalType::UBIGINT, LogicalType::FLOAT}, list_type, state_size, init,
+		                      IS_MAX ? PacClipMaxScatterUpdateSingleFloat : PacClipMinScatterUpdateSingleFloat, combine,
+		                      finalize, FunctionNullHandling::DEFAULT_NULL_HANDLING,
+		                      IS_MAX ? PacClipMaxUpdateSingleFloat : PacClipMinUpdateSingleFloat, PacClipBindFloat));
 		set.AddFunction(AggregateFunction(
 		    name, {LogicalType::UBIGINT, LogicalType::FLOAT, LogicalType::DOUBLE}, list_type, state_size, init,
 		    IS_MAX ? PacClipMaxScatterUpdateSingleFloat : PacClipMinScatterUpdateSingleFloat, combine, finalize,
 		    FunctionNullHandling::DEFAULT_NULL_HANDLING,
-		    IS_MAX ? PacClipMaxUpdateSingleFloat : PacClipMinUpdateSingleFloat, PacClipMinMaxBindFloat));
+		    IS_MAX ? PacClipMaxUpdateSingleFloat : PacClipMinUpdateSingleFloat, PacClipBindFloat));
 
 		// DOUBLE
-		set.AddFunction(AggregateFunction(
-		    name, {LogicalType::UBIGINT, LogicalType::DOUBLE}, list_type, state_size, init,
-		    IS_MAX ? PacClipMaxScatterUpdateSingleDouble : PacClipMinScatterUpdateSingleDouble, combine, finalize,
-		    FunctionNullHandling::DEFAULT_NULL_HANDLING,
-		    IS_MAX ? PacClipMaxUpdateSingleDouble : PacClipMinUpdateSingleDouble, PacClipMinMaxBindDouble));
+		set.AddFunction(
+		    AggregateFunction(name, {LogicalType::UBIGINT, LogicalType::DOUBLE}, list_type, state_size, init,
+		                      IS_MAX ? PacClipMaxScatterUpdateSingleDouble : PacClipMinScatterUpdateSingleDouble,
+		                      combine, finalize, FunctionNullHandling::DEFAULT_NULL_HANDLING,
+		                      IS_MAX ? PacClipMaxUpdateSingleDouble : PacClipMinUpdateSingleDouble, PacClipBindDouble));
 		set.AddFunction(AggregateFunction(
 		    name, {LogicalType::UBIGINT, LogicalType::DOUBLE, LogicalType::DOUBLE}, list_type, state_size, init,
 		    IS_MAX ? PacClipMaxScatterUpdateSingleDouble : PacClipMinScatterUpdateSingleDouble, combine, finalize,
 		    FunctionNullHandling::DEFAULT_NULL_HANDLING,
-		    IS_MAX ? PacClipMaxUpdateSingleDouble : PacClipMinUpdateSingleDouble, PacClipMinMaxBindDouble));
+		    IS_MAX ? PacClipMaxUpdateSingleDouble : PacClipMinUpdateSingleDouble, PacClipBindDouble));
 	} else {
 		auto float_finalize = IS_MAX ? PacClipMaxNoisedFinalizeFloat : PacClipMinNoisedFinalizeFloat;
 		auto double_finalize = IS_MAX ? PacClipMaxNoisedFinalizeDouble : PacClipMinNoisedFinalizeDouble;
 
 		// FLOAT → FLOAT
-		set.AddFunction(AggregateFunction(
-		    name, {LogicalType::UBIGINT, LogicalType::FLOAT}, LogicalType::FLOAT, state_size, init,
-		    IS_MAX ? PacClipMaxScatterUpdateSingleFloat : PacClipMinScatterUpdateSingleFloat, combine, float_finalize,
-		    FunctionNullHandling::DEFAULT_NULL_HANDLING,
-		    IS_MAX ? PacClipMaxUpdateSingleFloat : PacClipMinUpdateSingleFloat, PacClipMinMaxBindFloat));
+		set.AddFunction(
+		    AggregateFunction(name, {LogicalType::UBIGINT, LogicalType::FLOAT}, LogicalType::FLOAT, state_size, init,
+		                      IS_MAX ? PacClipMaxScatterUpdateSingleFloat : PacClipMinScatterUpdateSingleFloat, combine,
+		                      float_finalize, FunctionNullHandling::DEFAULT_NULL_HANDLING,
+		                      IS_MAX ? PacClipMaxUpdateSingleFloat : PacClipMinUpdateSingleFloat, PacClipBindFloat));
 		set.AddFunction(AggregateFunction(
 		    name, {LogicalType::UBIGINT, LogicalType::FLOAT, LogicalType::DOUBLE}, LogicalType::FLOAT, state_size, init,
 		    IS_MAX ? PacClipMaxScatterUpdateSingleFloat : PacClipMinScatterUpdateSingleFloat, combine, float_finalize,
 		    FunctionNullHandling::DEFAULT_NULL_HANDLING,
-		    IS_MAX ? PacClipMaxUpdateSingleFloat : PacClipMinUpdateSingleFloat, PacClipMinMaxBindFloat));
+		    IS_MAX ? PacClipMaxUpdateSingleFloat : PacClipMinUpdateSingleFloat, PacClipBindFloat));
 
 		// DOUBLE → DOUBLE
-		set.AddFunction(AggregateFunction(
-		    name, {LogicalType::UBIGINT, LogicalType::DOUBLE}, LogicalType::DOUBLE, state_size, init,
-		    IS_MAX ? PacClipMaxScatterUpdateSingleDouble : PacClipMinScatterUpdateSingleDouble, combine,
-		    double_finalize, FunctionNullHandling::DEFAULT_NULL_HANDLING,
-		    IS_MAX ? PacClipMaxUpdateSingleDouble : PacClipMinUpdateSingleDouble, PacClipMinMaxBindDouble));
+		set.AddFunction(
+		    AggregateFunction(name, {LogicalType::UBIGINT, LogicalType::DOUBLE}, LogicalType::DOUBLE, state_size, init,
+		                      IS_MAX ? PacClipMaxScatterUpdateSingleDouble : PacClipMinScatterUpdateSingleDouble,
+		                      combine, double_finalize, FunctionNullHandling::DEFAULT_NULL_HANDLING,
+		                      IS_MAX ? PacClipMaxUpdateSingleDouble : PacClipMinUpdateSingleDouble, PacClipBindDouble));
 		set.AddFunction(AggregateFunction(
 		    name, {LogicalType::UBIGINT, LogicalType::DOUBLE, LogicalType::DOUBLE}, LogicalType::DOUBLE, state_size,
 		    init, IS_MAX ? PacClipMaxScatterUpdateSingleDouble : PacClipMinScatterUpdateSingleDouble, combine,
 		    double_finalize, FunctionNullHandling::DEFAULT_NULL_HANDLING,
-		    IS_MAX ? PacClipMaxUpdateSingleDouble : PacClipMinUpdateSingleDouble, PacClipMinMaxBindDouble));
+		    IS_MAX ? PacClipMaxUpdateSingleDouble : PacClipMinUpdateSingleDouble, PacClipBindDouble));
 	}
 }
 

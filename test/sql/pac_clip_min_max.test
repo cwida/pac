@@ -100,7 +100,7 @@ SET pac_clip_support = NULL
 query I
 SELECT pac_noised_clip_min(hash(id)::UBIGINT, value) FROM min_outlier
 ----
--1015808
+-999424
 
 statement ok
 SET pac_clip_support = 5
@@ -112,7 +112,7 @@ SELECT pac_noised_clip_min(hash(id)::UBIGINT, value) FROM min_outlier
 
 # ============================================================================
 # Same-level values should NOT be clipped
-# Level 0 covers [-128, 127], so 50 and 120 are in the same level
+# Level 0 covers [0, 255], so 50 and 120 are in the same level
 # ============================================================================
 
 statement ok
@@ -278,5 +278,82 @@ true
 
 query I
 SELECT pac_noised_clip_min(hash(i)::UBIGINT, (i + 10)::UINTEGER) BETWEEN 1 AND 20 FROM range(1, 100) t(i)
+----
+true
+
+# ============================================================================
+# Two-sided: negative-only values
+# ============================================================================
+
+# MAX of all-negative values: should be close to -1 (the largest)
+query I
+SELECT pac_noised_clip_max(hash(i)::UBIGINT, -i) BETWEEN -10 AND 0 FROM range(1, 1001) t(i)
+----
+true
+
+# MIN of all-negative values: should be close to -1000 (the smallest)
+query I
+SELECT pac_noised_clip_min(hash(i)::UBIGINT, -i) BETWEEN -1100 AND -900 FROM range(1, 1001) t(i)
+----
+true
+
+# ============================================================================
+# Two-sided: mixed positive and negative values
+# ============================================================================
+
+# MAX of mixed: positives 1..500, negatives -1..-500 → max should be ~500
+query I
+SELECT pac_noised_clip_max(hash(i)::UBIGINT,
+  CASE WHEN i <= 500 THEN i ELSE -(i - 500) END
+) BETWEEN 400 AND 600 FROM range(1, 1001) t(i)
+----
+true
+
+# MIN of mixed: positives 1..500, negatives -1..-500 → min should be ~-500
+query I
+SELECT pac_noised_clip_min(hash(i)::UBIGINT,
+  CASE WHEN i <= 500 THEN i ELSE -(i - 500) END
+) BETWEEN -600 AND -400 FROM range(1, 1001) t(i)
+----
+true
+
+# ============================================================================
+# Two-sided: positive-only should not allocate neg state (just verify correctness)
+# ============================================================================
+
+query I
+SELECT pac_noised_clip_max(hash(i)::UBIGINT, i) BETWEEN 50 AND 128 FROM range(1, 100) t(i)
+----
+true
+
+query I
+SELECT pac_noised_clip_min(hash(i)::UBIGINT, i) BETWEEN 1 AND 10 FROM range(1, 100) t(i)
+----
+true
+
+# ============================================================================
+# Two-sided: negative outlier clipped from mixed data
+# ============================================================================
+
+statement ok
+CREATE TABLE neg_clip AS
+SELECT i as id,
+  CASE WHEN i <= 1000 THEN 50 + (i % 20)
+       ELSE -999999
+  END as value
+FROM range(1, 1002) t(i)
+
+# Without clip: min dominated by outlier
+query I
+SELECT pac_noised_clip_min(hash(id)::UBIGINT, value) < -500000 FROM neg_clip
+----
+true
+
+# With clip: outlier removed, min should be close to 50
+statement ok
+SET pac_clip_support = 5
+
+query I
+SELECT pac_noised_clip_min(hash(id)::UBIGINT, value) BETWEEN 40 AND 70 FROM neg_clip
 ----
 true
