@@ -312,3 +312,71 @@ Even the minimum level-3 value is zeroed when it's the sole contributor.
 
 5. **The pre-aggregation step remains essential** — 20K small items are correctly
    collapsed and clipped.
+
+---
+
+## pac_clip_scale comparison (2026-04-02)
+
+Tests `pac_clip_scale = true` (scale unsupported outlier levels to nearest supported
+level) vs `false` (hard-zero / omit). Peter's hypothesis: scaling should be safe
+because outliers become a minority in the already-supported bucket.
+
+Code version: after Peter's refactoring into `pac_clip_aggr.hpp`, CLIP_LEVEL_SHIFT=2
+(4x per level, was 16x previously).
+
+### Setup
+
+- N=1000 background users, acctbal ∈ [1, 10000]
+- pac_mi = 0.0078125 (1/128), 30 trials per condition
+- Background sum: filter<=3 = 18,347; filter<=999 = 4,871,091
+
+### Small filter results (filter<=3, clip_support=2)
+
+| Test | Outlier | scale=false best% | scale=true best% | scale=false std_in | scale=true std_in | std_out |
+|------|---------|-------------------|------------------|--------------------|-------------------|---------|
+| Extreme | tv=999,999 | **55.6%** | **64.8%** | 94,882 | 169,449 | 107,976 |
+| Moderate | tv=50,000 | **55.6%** | **61.1%** | 94,882 | 147,406 | 107,976 |
+| Multi-row | 20K×$50 | **55.6%** | **64.8%** | 94,882 | 169,449 | 107,976 |
+| Borderline | tv=65,536 | **55.6%** | **57.4%** | 94,882 | 104,640 | 107,976 |
+
+With **hard-zero** (scale=false): all outlier contributions are completely zeroed. The
+"in" distribution is identical to "out" — attack accuracy ~55% (random). No side-channel.
+
+With **scaling** (scale=true): outlier values are scaled down to the nearest supported
+level. This creates a mild variance side-channel (std ratio ~1.57x). Attack accuracy
+rises to 57-65% — measurable but not catastrophic.
+
+### Small filter results (clip_support=10 and 50)
+
+All conditions return 0 for both in/out (no level reaches 10 or 50 distinct
+contributors with only 3-4 users). Scale mode is irrelevant — both modes identical.
+
+### Wide filter results (filter<=999, clip_support=2)
+
+| clip | scale | mean_in | std_in | mean_out | std_out | best% |
+|------|-------|---------|--------|----------|---------|-------|
+| 2 | false | 4,737,114 | 1,516,576 | 4,973,475 | 1,642,654 | 53.3% |
+| 2 | true | 4,750,242 | 1,538,381 | 4,973,475 | 1,642,654 | 53.3% |
+| 50 | false | 4,734,354 | 1,516,680 | 4,970,423 | 1,643,039 | 53.3% |
+| 50 | true | 4,791,594 | 1,539,287 | 5,019,631 | 1,639,877 | 55.0% |
+
+No meaningful difference. Both modes near random with wide filters.
+
+### Key findings
+
+1. **Peter is partially right**: scaling does NOT cause a variance explosion. The leak
+   is moderate (~10 percentage points above random at worst), not catastrophic.
+   His intuition that scaled values become a minority in the supported bucket holds.
+
+2. **Hard-zero is still strictly better for privacy**: it produces zero information
+   leakage in all tested scenarios. Scaling leaks mildly.
+
+3. **Major improvement from 4x granularity**: the moderate outlier (tv=50,000) that
+   previously defeated clipping at 76.5% accuracy (when levels were 16x wide, both
+   5000 and 50000 in same level) is now caught by both modes (~55-61%). The shift
+   from CLIP_LEVEL_SHIFT=4 (16x) to CLIP_LEVEL_SHIFT=2 (4x) dramatically improved
+   detection of moderate outliers.
+
+4. **Recommendation**: keep hard-zero as default (no leakage), but scaling is a
+   reasonable option where utility matters more. The ~10pp accuracy gap may be
+   acceptable in many threat models.
