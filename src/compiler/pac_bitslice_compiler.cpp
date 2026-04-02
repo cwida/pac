@@ -880,6 +880,16 @@ void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExten
 	// errors.  The post-optimizer still handles user-written pac_avg() in SQL.
 	RewritePacAvgToDiv(input, plan);
 
+	// Clip rewrite: when pac_clip_support is set, refine PAC aggregates to use
+	// clipping variants with per-PU pre-aggregation below.
+	{
+		Value clip_val;
+		if (input.context.TryGetCurrentSetting("pac_clip_support", clip_val) && !clip_val.IsNull()) {
+			auto &pu_names = (pu_present_in_tree && !pu_via_cte) ? check.scanned_pu_tables : privacy_units;
+			RewriteClipAggregates(input, plan, check, pu_names);
+		}
+	}
+
 #if PAC_DEBUG
 	PAC_DEBUG_PRINT("=== PAC-OPTIMIZED PLAN ===");
 	plan->Print();

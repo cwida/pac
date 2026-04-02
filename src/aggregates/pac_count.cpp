@@ -350,4 +350,50 @@ void RegisterPacAvgFunctions(ExtensionLoader &loader) {
 	loader.RegisterFunction(std::move(avg_counters_info));
 }
 
+// ============================================================================
+// Clip synonyms: pac_noised_clip_count = pac_noised_count,
+//                pac_clip_count = pac_count
+// ============================================================================
+void RegisterPacNoisedClipCountFunctions(ExtensionLoader &loader) {
+	AggregateFunctionSet fcn_set("pac_noised_clip_count");
+
+	fcn_set.AddFunction(AggregateFunction("pac_noised_clip_count", {LogicalType::UBIGINT}, LogicalType::BIGINT,
+	                                      PacCountStateSize, PacCountInitialize, PacCountScatterUpdate, PacCountCombine,
+	                                      PacCountFinalize, FunctionNullHandling::SPECIAL_HANDLING, PacCountUpdate,
+	                                      PacCountBind));
+	fcn_set.AddFunction(AggregateFunction("pac_noised_clip_count", {LogicalType::UBIGINT, LogicalType::DOUBLE},
+	                                      LogicalType::BIGINT, PacCountStateSize, PacCountInitialize,
+	                                      PacCountScatterUpdate, PacCountCombine, PacCountFinalize,
+	                                      FunctionNullHandling::SPECIAL_HANDLING, PacCountUpdate, PacCountBind));
+	fcn_set.AddFunction(AggregateFunction("pac_noised_clip_count", {LogicalType::UBIGINT, LogicalType::ANY},
+	                                      LogicalType::BIGINT, PacCountStateSize, PacCountInitialize,
+	                                      PacCountColumnScatterUpdate, PacCountCombine, PacCountFinalize,
+	                                      FunctionNullHandling::SPECIAL_HANDLING, PacCountColumnUpdate, PacCountBind));
+	fcn_set.AddFunction(AggregateFunction(
+	    "pac_noised_clip_count", {LogicalType::UBIGINT, LogicalType::ANY, LogicalType::DOUBLE}, LogicalType::BIGINT,
+	    PacCountStateSize, PacCountInitialize, PacCountColumnScatterUpdate, PacCountCombine, PacCountFinalize,
+	    FunctionNullHandling::SPECIAL_HANDLING, PacCountColumnUpdate, PacCountBind));
+
+	CreateAggregateFunctionInfo info(fcn_set);
+	loader.RegisterFunction(std::move(info));
+}
+
+void RegisterPacClipCountFunctions(ExtensionLoader &loader) {
+	auto list_double_type = LogicalType::LIST(PacFloatLogicalType());
+	AggregateFunctionSet fcn_set("pac_clip_count");
+
+	fcn_set.AddFunction(AggregateFunction("pac_clip_count", {LogicalType::UBIGINT}, list_double_type, PacCountStateSize,
+	                                      PacCountInitialize, PacCountScatterUpdate, PacCountCombine,
+	                                      PacCountFinalizeCounters, FunctionNullHandling::DEFAULT_NULL_HANDLING,
+	                                      PacCountUpdate, PacCountBind));
+	fcn_set.AddFunction(AggregateFunction(
+	    "pac_clip_count", {LogicalType::UBIGINT, LogicalType::ANY}, list_double_type, PacCountStateSize,
+	    PacCountInitialize, PacCountColumnScatterUpdate, PacCountCombine, PacCountFinalizeCounters,
+	    FunctionNullHandling::DEFAULT_NULL_HANDLING, PacCountColumnUpdate, PacCountBind));
+	AddPacListAggregateOverload(fcn_set, "clip_count");
+
+	CreateAggregateFunctionInfo info(fcn_set);
+	loader.RegisterFunction(std::move(info));
+}
+
 } // namespace duckdb
