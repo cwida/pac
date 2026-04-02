@@ -18,7 +18,9 @@
 #include "aggregates/pac_aggregate.hpp"
 #include "aggregates/pac_count.hpp"
 #include "aggregates/pac_sum.hpp"
+#include "aggregates/pac_clip_sum.hpp"
 #include "aggregates/pac_min_max.hpp"
+#include "aggregates/pac_clip_min_max.hpp"
 #include "categorical/pac_categorical.hpp"
 #include "parser/pac_parser.hpp"
 #include "diff/pac_utility_diff.hpp"
@@ -247,17 +249,38 @@ static void LoadInternal(ExtensionLoader &loader) {
 	db.config.AddExtensionOption("pac_ptracking", "[INTERNAL] Enable persistent secret p-tracking for query-level MIA",
 	                             LogicalType::BOOLEAN, Value::BOOLEAN(true));
 
+	db.config.AddExtensionOption("pac_clip_support",
+	                             "Dynamic outlier clipping threshold for pac_clip_sum. "
+	                             "Levels with fewer than this many estimated distinct contributors are zeroed out. "
+	                             "NULL (default) disables pac_clip_sum; set to e.g. 64 to enable.",
+	                             LogicalType::BIGINT, Value());
+
+	db.config.AddExtensionOption("pac_clip_scale",
+	                             "Scale unsupported outlier levels to nearest supported level instead of omitting. "
+	                             "Default false (omit).",
+	                             LogicalType::BOOLEAN, Value::BOOLEAN(false));
+
 	// Register pac_sum aggregate functions
 	RegisterPacSumFunctions(loader);
 	RegisterPacSumCountersFunctions(loader);
+	RegisterPacClipSumFunctions(loader);
+	RegisterPacNoisedClipSumFunctions(loader);
+	RegisterPacNoisedClipSumCountFunctions(loader);
 	RegisterPacCountFunctions(loader);
 	RegisterPacCountCountersFunctions(loader);
+	RegisterPacClipCountFunctions(loader);
+	RegisterPacNoisedClipCountFunctions(loader);
 	// Register pac_min/pac_max aggregate functions
 	RegisterPacMinFunctions(loader);
 	RegisterPacMaxFunctions(loader);
 	// Register _counters variants for categorical queries
 	RegisterPacMinCountersFunctions(loader);
 	RegisterPacMaxCountersFunctions(loader);
+	// Register clip synonyms for min/max
+	RegisterPacClipMinFunctions(loader);
+	RegisterPacClipMaxFunctions(loader);
+	RegisterPacNoisedClipMinFunctions(loader);
+	RegisterPacNoisedClipMaxFunctions(loader);
 
 	// Register dummy pac_noised_avg / pac_avg (replaced by RewritePacAvgToDiv before execution)
 	RegisterPacAvgFunctions(loader);

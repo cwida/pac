@@ -371,6 +371,9 @@ void RegisterPacMaxCountersFunctions(ExtensionLoader &loader) {
 	loader.RegisterFunction(std::move(info));
 }
 
+// ============================================================================
+// Clip min/max registration moved to pac_clip_min_max.cpp
+
 // Explicit template instantiations
 #define INST_ALL(T)                                                                                                    \
 	template void PacMinMaxUpdate<T, false>(Vector[], AggregateInputData &, idx_t, data_ptr_t, idx_t);                 \

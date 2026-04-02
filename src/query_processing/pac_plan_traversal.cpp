@@ -812,7 +812,7 @@ bool AggregateGroupsByPUKey(LogicalAggregate *agg, const PACCompatibilityResult 
 }
 
 // Find the first aggregate in a subtree (depth-first).
-static LogicalAggregate *FindFirstChildAggregate(LogicalOperator *op) {
+LogicalAggregate *FindFirstChildAggregate(LogicalOperator *op) {
 	if (!op) {
 		return nullptr;
 	}

@@ -10,9 +10,19 @@ Always test your changes with real queries (e.g., TPC-H on sf1) before declaring
 
 Never execute git commands that could lose code. Always ask the user for permission on those.
 
+## Development rules
+
+- **New features must have tests.** Ask the user whether to create a new test file or extend an existing one in `test/sql/`.
+- **Never remove a failing test to "fix" a failure.** If a test fails, fix the underlying bug. Tests exist for a reason.
+- **Before implementing anything, search the existing codebase** for similar patterns or solutions. Check if a helper function, utility, or prior approach already addresses the problem. Reuse before reinventing.
+- **Use helper functions.** Factor shared logic into helpers rather than duplicating code. Check `src/include/utils/` and existing helpers in the file you're editing.
+- **Never edit the `duckdb/` submodule.** The DuckDB source is read-only. All PAC logic lives in `src/` and `test/`. If you need DuckDB internals, use the public API or ask the user.
+- **Keep the paper in mind.** The PAC mechanism is described in [SIMD-PAC-DB: Pretty Performant PAC Privacy](https://arxiv.org/abs/2603.15023). Refer to it for the theoretical foundations (noise calibration, mutual information bounds, counter semantics) before making changes to core aggregate logic.
+- **Add `PAC_DEBUG_PRINT` statements** at major code flow points (entry/exit of compilation phases, aggregate rewrites, clipping decisions). Use the existing `PAC_DEBUG_PRINT` macro from `src/include/pac_debug.hpp` — it's compiled out when `PAC_DEBUG` is 0.
+
 ## What is PAC?
 
-PAC (Pretty Accurate Counting) is a DuckDB extension that automatically privatizes SQL aggregate queries. It protects against Membership Inference Attacks by maintaining 64 parallel counters per aggregate (one per "world" bit), adding calibrated noise at finalization. Queries are rewritten transparently — users write normal SQL and PAC transforms it.
+PAC (Probably Approximately Correct) Privacy, or short: pac, is a DuckDB extension that automatically privatizes SQL aggregate queries. It protects against Membership Inference Attacks by maintaining 64 parallel counters per aggregate (one per "world" bit), adding calibrated noise at finalization. Queries are rewritten transparently — users write normal SQL and PAC transforms it.
 
 ## Build & Test
 
@@ -87,4 +97,37 @@ ALTER TABLE orders ADD PAC_LINK (o_custkey) REFERENCES customer (c_custkey);
 SET pac_mi = 0;        -- disable noise for testing
 SET pac_seed = 42;     -- reproducible results
 SET pac_clip_support = 40;  -- enable clip rewrite with support threshold
+```
+
+## Code style (clang-tidy)
+
+The project uses clang-tidy with DuckDB's configuration (`.clang-tidy`). Key naming rules:
+
+- **Classes/Enums**: `CamelCase` (e.g., `PacClipSumIntState`)
+- **Functions**: `CamelCase` (e.g., `GetLevel`, `AllocateLevel`)
+- **Variables/parameters/members**: `lower_case` (e.g., `max_level_used`, `key_hash`)
+- **Constants/static/constexpr**: `UPPER_CASE` (e.g., `PAC2_NUM_LEVELS`, `PAC2_LEVEL_SHIFT`)
+- **Macros**: `UPPER_CASE` (e.g., `PAC_DEBUG_PRINT`)
+- **Typedefs**: `lower_case_t` suffix (e.g., `aggregate_update_t`)
+
+Other style rules (from `.clang-format`, based on LLVM):
+
+- **Tabs for indentation**, width 4
+- **Column limit**: 120
+- **Braces**: same line as statement (K&R / Allman-attached)
+- **Pointers**: right-aligned (`int *ptr`, not `int* ptr`)
+- **No short functions on single line**
+- **Templates**: always break after `template<...>`
+- **Long arguments**: align after open bracket
+
+Run `make format-fix` to auto-format. Formatting runs automatically via hook after edits.
+
+## Attack evaluation
+
+Attack scripts live in `attacks/`. Results are documented in `attacks/clip_attack_results.md`.
+
+```bash
+bash attacks/clip_attack_test.sh 2>/dev/null     # main attack suite
+bash attacks/clip_multirow_test.sh 2>/dev/null   # 20K small items test
+bash attacks/clip_hardzero_stress.sh 2>/dev/null  # stress tests
 ```
