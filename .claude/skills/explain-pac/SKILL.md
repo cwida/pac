@@ -89,6 +89,42 @@ sampling per query** (each query uses a fresh random subset).
 - `pac_clip_support`: Minimum distinct contributors per magnitude level (NULL = disabled)
 - `pac_hash_repair`: Ensure pac_hash outputs exactly 32 bits set
 
+### Calibration Transfer (Blueprint, April 2026)
+
+PAC calibrates noise per query from the 64 counters' variance. The data is
+fixed; the "distribution" D is over random 50%-subsamples (the 64 worlds).
+The calibration transfer conjecture asks: when noise calibrated under one
+subsampling distribution D₀ also protects under a different distribution D₁.
+
+**What D₀ and D₁ represent** (NOT two table versions — the data is fixed):
+- Different effective subsampling distributions arising from different queries
+  or different populations. E.g., D₀ = variance profile of a broad query,
+  D₁ = variance profile of a narrow-filter query targeting one PU.
+- Or: D₀ = subsampling with Alice present, D₁ = without Alice. The
+  covariance Σ changes because Alice's contribution affects the 64 counters.
+
+**Why narrow-filter attacks succeed**: The noise was calibrated from the full
+query's variance (D₀). But the attacker's distinguishing task operates on a
+narrow slice (D₁) where one PU dominates. If d(D₀, D₁) is large, calibration
+doesn't transfer → the noise is insufficient → attack succeeds.
+
+**Conjecture**: If d(D₀, D₁) ≤ t, noise Q₀ from D₀ augmented by
+Δ = N(0, spectral_gap) is valid for D₁. The compensation Δ is instance-based
+(proportional to actual distributional distance, not worst-case like DP).
+
+**Connection to clipping**: pac_clip_support bounds per-PU influence on Σ.
+This keeps d(D₀, D₁) small regardless of filter → calibration transfers →
+attacks fail. Clipping is the mechanism that makes the transfer bound tight.
+
+**Open questions**: optimal distance metric (Wasserstein vs Fisher-Rao),
+sharp transfer constants, extending from continuous (SGD) to discrete
+(PAC DB's 64-out-of-128 subsampling) setting.
+
+Reference: "Calibration Transfer Between Close Distributions — Blueprint for
+Universal Membership Inference Resistance" (working document, 05 April 2026).
+Thesis: Sridhar, "Toward Provable Privacy for Black-Box Algorithms via
+Algorithmic Stability" (MIT PhD, February 2026), Chapter 3.
+
 ### DDL
 
 ```sql

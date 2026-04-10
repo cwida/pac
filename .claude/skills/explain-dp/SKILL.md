@@ -80,3 +80,22 @@ models. E.g., stronger regularization in ridge regression.
 For databases: this suggests that queries producing high-variance outputs (due to
 outliers, small groups, etc.) are inherently harder to privatize. Clipping reduces
 variance and thus the noise needed, improving the privacy-utility tradeoff.
+
+### DP vs PAC: Worst-Case vs Instance-Based Sensitivity
+
+DP calibrates noise to **global sensitivity**: max over ALL possible datasets of
+how much the output changes when one row is added/removed. This is a worst-case
+quantity independent of the actual data.
+
+PAC calibrates noise to the **actual data geometry**: the variance of the query
+output across subsamples of the real table. Stable queries on stable data get
+less noise automatically.
+
+The calibration transfer conjecture (Blueprint, April 2026) bridges the two:
+PAC's instance-based noise from one subsampling distribution D₀, augmented by
+a small compensation Δ for the spectral gap, transfers to a nearby D₁ (e.g.,
+a different query or different population). Δ is instance-based (proportional
+to the actual distributional distance d(D₀,D₁)), much smaller than DP's global
+sensitivity. Clipping bounds per-PU influence on the variance, keeping d small.
+This gives PAC "universal MIA resistance" that degrades gracefully with the
+effective distributional distance, rather than DP's uniform worst-case bound.
