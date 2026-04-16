@@ -7,7 +7,7 @@ This works on DuckDB v1.5 and beyond. See https://duckdb.org/install to install.
 ## Install
 
 ```sql
-INSTALL pac FROM COMMUNITY;
+INSTALL pac FROM community;
 LOAD pac;        
 ```
 
