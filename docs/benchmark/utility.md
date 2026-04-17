@@ -4,17 +4,17 @@ Lightweight SQL scripts for quick PAC testing directly through the DuckDB CLI, w
 
 ## Overview
 
-The utility scripts provide a fast way to exercise the PAC query compiler against TPC-H and ClickBench workloads. Each script sets the `pac_diffcols` configuration before every query, enabling PAC differential column tracking for the query's output.
+The utility scripts provide a fast way to exercise the PAC query compiler against TPC-H and ClickBench workloads and measure utility. Each script sets the `pac_diffcols` configuration before every query, enabling PAC differential column tracking for the query's output.
 
 ### What is `pac_diffcols`?
 
-The `pac_diffcols` setting tells DuckDB which columns to use for PAC differential privacy tracking. The format is:
+The `pac_diffcols` setting tells DuckDB which columns to use for PAC utility diffs. The Utiity Diff operator compares the original query result with the privatized result and measure error percentage, precision and recall. It does this by performing a full outer join between these. The assumption is that the X leasding columns of the results form a key to perform this comparison join on. The format is:
 
 ```
 'N:filename.csv'
 ```
 
-Where `N` is the number of `GROUP BY` columns in the query and `filename.csv` is the output file for differential results. For example, `'2:q01.csv'` indicates the query has two group-by columns and results are written to `q01.csv`.
+Where `N` is the number of `GROUP BY` columns in the query and `filename.csv` is the (optional) output file for differential results. For example, `'2:q01.csv'` indicates the query has two group-by columns and results are written to `q01.csv`. If there is such a colon and filename, and the file already exists, the new line with utility information is appended to it. This allows to execute a query 100 times and create a csv file with 100 results.
 
 ## Prerequisites
 
