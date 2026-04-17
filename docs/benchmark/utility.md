@@ -8,13 +8,13 @@ The utility scripts provide a fast way to exercise the PAC query compiler agains
 
 ### What is `pac_diffcols`?
 
-The `pac_diffcols` setting tells DuckDB which columns to use for PAC utility diffs. PAC's UtiityDiff operator compares the original query result with the privatized result and measures error percentage, precision and recall. Error percentage is 100*(noised/exact-1). Precision and recall count which fraction of the keys in the noised result are in the exact, resp. the fraction of axact keys in the noised result. The utility difference mode is active is `pac_diffcols` is defined (non-null), and modifies queries to return the precision in each non-key numeric cell, and it shows overall prevision (the average of the column precisions, where each column precision is the average of precisions in the column), recall and precision on standard error in a single line, or to a file.  It computes these values by performing a full outer join between the original and noised query. The assumption is that the X leasding columns of the results form a key to perform this comparison join on. The format is:
+The `pac_diffcols` setting tells DuckDB which columns to use for PAC utility diffs. PAC's UtiityDiff operator compares the original query result with the privatized result and measures error percentage, precision and recall. Error percentage is 100*(noised/exact-1). Precision and recall count which fraction of the keys in the noised result are in the exact, resp. the fraction of axact keys in the noised result. The utility difference mode is active if `pac_diffcols` is defined (non-null), and modifies queries to return the precision in each non-key numeric cell instead of its actual value, and it shows overall prevision (the average of the column precisions, where each column precision is the average of precisions in the column), recall and precision in a single line printed on (stderr) console output, or appended to a file. It computes these values by performing a full outer join between the original and noised query. The assumption is that the X leasding columns of the results form a key to perform this comparison join on. The format is:
 
 ```
 'N:filename.csv'
 ```
 
-Where `N` is the number of `GROUP BY` columns in the query and `filename.csv` is the (optional) output file for differential results. For example, `'2:q01.csv'` indicates the query has two group-by columns and results are written to `q01.csv`. If there is such a colon and filename, and the file already exists, the new line with utility information is appended to it. This allows to execute a query 100 times and create a csv file with 100 results.
+Where `N` is the number of `GROUP BY` columns in the query and `filename.csv` is the (optional) output file for differential results. For example, `'2:q01.csv'` indicates the query has two group-by columns and results are written to `q01.csv`. If there is such a colon and filename, the new line with utility information is appended to the file (it is created if it did not exist). This allows to execute a query 100 times and create a csv file with 100 results.
 
 ## Prerequisites
 
