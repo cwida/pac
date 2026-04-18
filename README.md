@@ -167,7 +167,6 @@ I. Battiston, D. Yuan, X. Zhu, P. Boncz. [SIMD-PAC-DB: Pretty Performant PAC Pri
       url={https://arxiv.org/abs/2603.15023},
 }
 ```
-Note to reviewers: the above is updated w.r.t. the paper under submission: evaluation subsections 6.3+6.4 have been improved.
 
 ## Maintainer
 
