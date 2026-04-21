@@ -145,11 +145,11 @@ utility=0.510000 recall=1.000000 precision=1.000000 (=4 -0 +0)
 
 ### Mutual Information (MI)
 
-PAC bounds the mutual information (MI) between the query output and whether any specific individual is in the database. The `pac_mi` parameter sets this bound: at the default `pac_mi = 0.0`, an attacker observing PAC query results gains zero additional information about any individual's presence. Higher values relax the bound, allowing less noise (more accurate results) at the cost of more information leakage.
+PAC bounds the mutual information (MI) between the query output and whether any specific individual is in the database. The `pac_mi` parameter sets this bound: at the default `pac_mi = 1/128`, an attacker observing PAC query results gains no additional information about any individual's presence. Higher values relax the bound, allowing less noise (more accurate results) at the cost of more information leakage.
 
 ## Documentation
 
-For implementation details, see the [docs/](docs/) folder:
+For implementation details, see the [docs/](docs/) folder: \
 [Parser](docs/pac/syntax.md) | [Query Operators](docs/pac/query_operators.md) | [PAC Functions](docs/pac/functions.md) | [Runtime Checks](docs/pac/runtime_checks.md) | [Tests](docs/test/README.md) | [Benchmarks](docs/benchmark/README.md)
 
 ## Literature
