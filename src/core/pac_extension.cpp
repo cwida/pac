@@ -180,8 +180,18 @@ static void LoadInternal(ExtensionLoader &loader) {
 		OptimizerExtension::Register(db.config, std::move(pac_avg_rule));
 	}
 
-	// Add option to enable/disable PAC noise application (this is useful for testing, since noise affects result
-	// determinism)
+	// Register derived_pu read rule (post-optimizer: inject pac_finalize for SELECT on derived_pu tables)
+	{
+		auto pac_derived_read_rule = PACDerivedReadRule();
+		OptimizerExtension::Register(db.config, std::move(pac_derived_read_rule));
+	}
+
+	// Enable lenient implicit casting so the binder can resolve comparisons (>, <, etc.)
+	// on derived_pu counter columns (LIST<FLOAT>) at bind time. Without this, the new
+	// casting rules reject FLOAT[] vs scalar comparisons before our optimizer can rewrite
+	// them to pac_filter_<cmp> calls.
+	db.config.SetOptionByName("old_implicit_casting", Value::BOOLEAN(true));
+
 	// ---- User-facing settings ----
 	// Controls probabilistic vs deterministic mode for noise/NULL decisions
 	db.config.AddExtensionOption(
@@ -251,6 +261,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// Control whether pac_hash() repairs hashes to exactly 32 bits set
 	db.config.AddExtensionOption("pac_hash_repair", "[INTERNAL] pac_hash() repairs hash to exactly 32 bits set",
 	                             LogicalType::BOOLEAN, Value::BOOLEAN(false));
+	// Propagate PAC metadata through CREATE TABLE AS SELECT
+	db.config.AddExtensionOption("pac_ctas", "[INTERNAL] Propagate PAC metadata through CTAS", LogicalType::BOOLEAN,
+	                             Value::BOOLEAN(true));
 	// Enable/disable persistent secret p-tracking for correct query-level privacy composition.
 	// When enabled (default), noise calibration tracks a Bayesian posterior over worlds across all cells
 	// in a query, providing query-level MIA protection. When disabled, each cell uses uniform variance
@@ -299,6 +312,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	// Register pac_mean scalar function (used by top-k pushdown for ordering)
 	RegisterPacMeanFunction(loader);
+
+	// Register pac_finalize scalar function (LIST<DOUBLE> -> DOUBLE, read-time noise for derived tables)
+	RegisterPacFinalizeFunction(loader);
 
 	// Register pac_hash scalar function (UBIGINT -> UBIGINT with exactly 32 bits set)
 	RegisterPacHashFunction(loader);

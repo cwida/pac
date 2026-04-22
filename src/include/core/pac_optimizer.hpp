@@ -38,6 +38,17 @@ public:
 	static void PACDropTableRuleFunction(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan);
 };
 
+// Post-optimizer rule: inject pac_finalize for SELECT on derived_pu tables.
+// Runs after DuckDB's built-in optimizers (which may remove trivial projections).
+class PACDerivedReadRule : public OptimizerExtension {
+public:
+	PACDerivedReadRule() {
+		optimize_function = PACDerivedReadFunction;
+	}
+
+	static void PACDerivedReadFunction(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan);
+};
+
 } // namespace duckdb
 
 #endif // DUCKDB_OPENPAC_REWRITE_RULE_HPP

@@ -35,8 +35,9 @@ set(EXTENSION_SOURCES
     src/metadata/pac_metadata_serialization.cpp
     src/aggregates/pac_aggregate.cpp
     src/aggregates/pac_count.cpp
-src/aggregates/pac_min_max.cpp
+    src/aggregates/pac_min_max.cpp
     src/aggregates/pac_sum.cpp
+    src/aggregates/pac_finalize.cpp
     src/aggregates/pac_clip_sum.cpp
     src/aggregates/pac_clip_min_max.cpp
     src/compiler/pac_bitslice_compiler.cpp
@@ -57,6 +58,7 @@ src/aggregates/pac_min_max.cpp
     src/diff/pac_utility_diff.cpp
     src/diff/pac_utility_summary.cpp
     src/query_processing/pac_topk_rewriter.cpp
+    src/query_processing/pac_derived_rewriter.cpp
     src/utils/pac_helpers.cpp)
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})

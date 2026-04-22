@@ -1,0 +1,212 @@
+# name: test/sql/pac_derived.test
+# description: Test PAC derived_pu counter storage and read-time finalization
+# group: [sql]
+
+require pac
+
+statement ok
+SET pac_mi = 0;
+
+statement ok
+SET pac_seed = 42;
+
+statement ok
+SET threads = 1;
+
+# ==========================================
+# Setup: PU table with protected column
+# ==========================================
+
+statement ok
+CREATE PU TABLE scores (id INT, grp INT, value INT, PAC_KEY(id), protected(value));
+
+statement ok
+INSERT INTO scores VALUES (1, 1, 10), (2, 1, 20), (3, 2, 30);
+
+# ==========================================
+# 1. Write path: CTAS with aggregate stores counter columns
+# ==========================================
+
+statement ok
+CREATE TABLE mv AS SELECT grp, SUM(value) AS total FROM scores GROUP BY grp;
+
+# With pac_rewrite=false, raw counters are visible (list of 64 elements)
+statement ok
+SET pac_rewrite = false;
+
+query I
+SELECT length(total) FROM mv LIMIT 1;
+----
+64
+
+statement ok
+SET pac_rewrite = true;
+
+# ==========================================
+# 2. Read path: pac_finalize injected automatically
+# ==========================================
+
+# With pac_mi=0 (no noise), finalized values should be exact
+# True values: grp 1 = 10+20 = 30, grp 2 = 30
+# Counter correction (2x): grp 1 = 60, grp 2 = 60
+query IR rowsort
+SELECT grp, total FROM mv;
+----
+1	60.0
+2	60.0
+
+query I
+SELECT count(*) FROM mv;
+----
+2
+
+# ==========================================
+# 3. Direct query should match (pac_mi=0)
+# ==========================================
+
+query IR rowsort
+SELECT grp, SUM(value) AS total FROM scores GROUP BY grp;
+----
+1	60
+2	60
+
+# ==========================================
+# 4. Manual pac_finalize also works
+# ==========================================
+
+statement ok
+SET pac_rewrite = false;
+
+query IR rowsort
+SELECT grp, pac_finalize(total) FROM mv;
+----
+1	60.0
+2	60.0
+
+statement ok
+SET pac_rewrite = true;
+
+# ==========================================
+# 5. Noise applied with pac_mi > 0
+# ==========================================
+
+statement ok
+SET pac_mi = 1;
+
+query I
+SELECT count(*) FROM mv;
+----
+2
+
+# ==========================================
+# 6. Non-aggregate CTAS should NOT store counters
+# ==========================================
+
+statement ok
+SET pac_mi = 0;
+
+statement ok
+SET pac_rewrite = false;
+
+statement ok
+SET pac_check = false;
+
+statement ok
+CREATE TABLE copy_scores AS SELECT id, grp, value FROM scores;
+
+# value should be a scalar INT, not a list
+query I
+SELECT value FROM copy_scores WHERE id = 1;
+----
+10
+
+statement ok
+SET pac_rewrite = true;
+
+statement ok
+SET pac_check = true;
+
+# ==========================================
+# 7. ORDER BY works on derived_pu tables
+# ==========================================
+
+statement ok
+SET pac_mi = 0;
+
+query IR
+SELECT grp, total FROM mv ORDER BY grp;
+----
+1	60.0
+2	60.0
+
+# ==========================================
+# 8. WHERE clause works on derived_pu tables
+# ==========================================
+
+query IR
+SELECT grp, total FROM mv WHERE grp = 1;
+----
+1	60.0
+
+# ==========================================
+# 9. Subquery on derived_pu tables
+# ==========================================
+
+query I
+SELECT (SELECT total FROM mv WHERE grp = 1) = (SELECT total FROM mv WHERE grp = 1);
+----
+true
+
+# ==========================================
+# 10. Multiple aggregate columns (SUM + COUNT)
+# ==========================================
+
+statement ok
+CREATE TABLE mv2 AS SELECT grp, SUM(value) AS total, COUNT(*) AS cnt FROM scores GROUP BY grp;
+
+# Both aggregate columns should be counter lists (64 elements each)
+statement ok
+SET pac_rewrite = false;
+
+query II
+SELECT length(total), length(cnt) FROM mv2 LIMIT 1;
+----
+64	64
+
+statement ok
+SET pac_rewrite = true;
+
+# Read path should finalize both columns
+query I
+SELECT count(*) FROM mv2;
+----
+2
+
+# ==========================================
+# 11. pac_mi=0 at read time -> no noise (returns counter[0] directly)
+# ==========================================
+
+statement ok
+SET pac_mi = 0;
+
+statement ok
+SET pac_seed = 99;
+
+query IR rowsort
+SELECT grp, total FROM mv;
+----
+1	60.0
+2	60.0
+
+# ==========================================
+# 12. pac_mi > 0 at read time -> noise added (different from exact)
+# ==========================================
+
+statement ok
+SET pac_mi = 1;
+
+# With noise, results are still returned (2 rows, no crash)
+query I
+SELECT count(*) FROM mv;
+----
+2

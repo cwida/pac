@@ -1,0 +1,15 @@
+LOAD 'build/release/extension/pac/pac.duckdb_extension';
+PRAGMA clear_pac_metadata;
+SET pac_seed = 42;
+SET pac_hash_repair = true;
+SET pac_mi = 0;
+SET threads = 1;
+ALTER TABLE customer ADD PAC_KEY (c_custkey);
+ALTER TABLE customer SET PU;
+ALTER PU TABLE customer ADD PROTECTED (c_custkey);
+ALTER PU TABLE customer ADD PROTECTED (c_comment);
+ALTER PU TABLE customer ADD PROTECTED (c_acctbal);
+ALTER PU TABLE customer ADD PROTECTED (c_name);
+ALTER PU TABLE customer ADD PROTECTED (c_address);
+ALTER TABLE orders ADD PAC_LINK (o_custkey) REFERENCES customer(c_custkey);
+ALTER TABLE lineitem ADD PAC_LINK (l_orderkey) REFERENCES orders(o_orderkey);

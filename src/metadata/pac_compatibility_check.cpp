@@ -1013,7 +1013,10 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 	// Check for protected columns FIRST (before other structural checks)
 	// This ensures we get the correct error message for protected column violations.
 	// The unified set covers PU PKs, LINK FKs, and metadata PROTECTED columns.
-	if (!result.protected_columns.empty()) {
+	// The pac_check setting can be disabled (e.g. by IVM during delta maintenance)
+	// to allow queries that project protected columns outside aggregates.
+	bool pac_check_enabled = GetBooleanSetting(context, "pac_check", true);
+	if (!result.protected_columns.empty() && pac_check_enabled) {
 		CheckOutputColumnsNotProtected(*plan, *plan, result.protected_columns);
 		CheckFiltersNotUsingProtectedColumns(*plan, *plan, result.protected_columns);
 	}

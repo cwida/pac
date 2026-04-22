@@ -75,6 +75,26 @@ ALTER TABLE orders DROP PROTECTED (o_totalprice);
 - `SET PU` requires a `PAC_KEY` to be defined first.
 - `DROP` requires the specified link or column to exist in metadata.
 
+### Derived Tables (`CREATE TABLE AS SELECT`)
+
+When a `CREATE TABLE AS SELECT` (CTAS) sources from a PU or derived table, PAC automatically propagates metadata to the new table, marking it as a **derived table**:
+
+```sql
+-- Schema copy: PAC_KEY(id) and PROTECTED(value) are propagated
+CREATE TABLE copy AS SELECT * FROM pu_table LIMIT 0;
+
+-- Renames are tracked: 'amount' inherits protected status from 'value'
+CREATE TABLE renamed AS SELECT id, value AS amount FROM pu_table LIMIT 0;
+
+-- Aggregate CTAS: only GROUP BY pass-throughs stay protected
+-- 'total' is NOT protected (already noised by PAC), 'grp' passes through unchanged
+CREATE TABLE summary AS SELECT grp, SUM(value) AS total FROM pu_table GROUP BY grp;
+```
+
+Derived tables are **transparent to SELECT** (no PAC checks or noise) but trigger PAC noise when used as a source in DML statements containing aggregates (e.g., `INSERT INTO ... SELECT ... GROUP BY`).
+
+Controlled by `SET pac_ctas = true` (default). Disable with `SET pac_ctas = false`.
+
 ### `DROP TABLE`
 
 When a table with PAC metadata is dropped, the `PACDropTableRule` optimizer extension removes the table's metadata, removes `PAC_LINK`s from other tables that reference it, and saves the updated metadata.

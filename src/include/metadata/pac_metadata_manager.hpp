@@ -28,8 +28,9 @@ public:
 	// Add or update metadata for a table
 	void AddOrUpdateTable(const string &table_name, const PACTableMetadata &metadata);
 
-	// Get metadata for a table
+	// Get metadata for a table (const and mutable variants)
 	const PACTableMetadata *GetTableMetadata(const string &table_name) const;
+	PACTableMetadata *GetMutableTableMetadata(const string &table_name);
 
 	// Check if a table has PAC metadata
 	bool HasMetadata(const string &table_name) const;

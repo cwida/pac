@@ -642,4 +642,3 @@ DROP TABLE d_sales;
 
 statement ok
 DROP TABLE d_customers;
-

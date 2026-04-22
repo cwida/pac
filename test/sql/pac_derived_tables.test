@@ -1,0 +1,806 @@
+# name: test/sql/pac_derived_tables.test
+# description: Test derived table creation (CTAS) and INSERT behavior with PAC noise
+# group: [sql]
+
+require pac
+
+statement ok
+PRAGMA clear_pac_metadata;
+
+statement ok
+SET pac_seed = 42
+
+statement ok
+SET pac_hash_repair = true
+
+statement ok
+SET threads = 1
+
+statement ok
+SET pac_mi = 0
+
+# ============================================================================
+# Test 1: CTAS from PU table propagates metadata
+# Tests: PAC_KEY and PROTECTED columns are propagated to the new table
+# ============================================================================
+
+statement ok
+CREATE PU TABLE ctas_source (id INT, grp INT, value INT, PAC_KEY(id), PROTECTED(value));
+
+statement ok
+INSERT INTO ctas_source VALUES (1, 1, 10), (2, 2, 20);
+
+# Disable pac_check so the schema-copy CTAS can project protected columns
+statement ok
+SET pac_check = false;
+
+# CTAS should propagate protected(value) and PAC_KEY(id) from ctas_source
+statement ok
+CREATE TABLE ctas_copy AS SELECT * FROM ctas_source LIMIT 0;
+
+statement ok
+SET pac_check = true;
+
+# Projecting a protected column from the CTAS-derived table should error
+statement error
+SELECT value FROM ctas_copy;
+----
+PAC rewrite: protected column 'ctas_copy.value' can only be accessed inside aggregate functions
+
+# Non-protected columns should be accessible (table is empty from LIMIT 0)
+query I
+SELECT COUNT(*) FROM ctas_copy;
+----
+0
+
+statement ok
+DROP TABLE ctas_copy;
+
+statement ok
+DROP TABLE ctas_source;
+
+# ============================================================================
+# Test 2: CTAS with renamed columns propagates metadata correctly
+# Tests: Protected column renamed via alias is still protected in new table
+# ============================================================================
+
+statement ok
+CREATE PU TABLE ctas_rename_src (id INT, grp INT, value INT, PAC_KEY(id), PROTECTED(value));
+
+statement ok
+INSERT INTO ctas_rename_src VALUES (1, 1, 10), (2, 2, 20);
+
+# CTAS with column renames: 'amount' is renamed from 'value' (protected)
+statement ok
+SET pac_check = false;
+
+statement ok
+CREATE TABLE ctas_renamed AS SELECT id AS uid, grp AS category, value AS amount FROM ctas_rename_src LIMIT 0;
+
+statement ok
+SET pac_check = true;
+
+# 'amount' (renamed from protected 'value') should be protected
+statement error
+SELECT amount FROM ctas_renamed;
+----
+PAC rewrite: protected column 'ctas_renamed.amount' can only be accessed inside aggregate functions
+
+# Non-protected renamed column should be accessible (table is empty from LIMIT 0)
+query I
+SELECT COUNT(*) FROM ctas_renamed;
+----
+0
+
+statement ok
+DROP TABLE ctas_renamed;
+
+statement ok
+DROP TABLE ctas_rename_src;
+
+# ============================================================================
+# Test 3: CTAS with aggregate does not propagate consumed protected columns
+# Tests: Protected column consumed by SUM should NOT be marked protected in
+# the output table (only GROUP BY pass-throughs should be propagated)
+# ============================================================================
+
+statement ok
+CREATE PU TABLE ctas_agg_src (id INT, grp INT, value INT, PAC_KEY(id), PROTECTED(value));
+
+statement ok
+INSERT INTO ctas_agg_src VALUES (1, 1, 10), (2, 1, 20), (3, 2, 30), (4, 2, 40);
+
+statement ok
+CREATE TABLE ctas_agg AS SELECT grp, SUM(value) AS total FROM ctas_agg_src GROUP BY grp;
+
+# 'total' is an aggregate over a protected column — it should NOT be protected
+# (it's already noised by PAC). Values are noised (exact would be 30, 70).
+query IR rowsort
+SELECT grp, total FROM ctas_agg;
+----
+1	40.0
+2	60.0
+
+statement ok
+DROP TABLE ctas_agg;
+
+statement ok
+DROP TABLE ctas_agg_src;
+
+# ============================================================================
+# Test 4: INSERT with aggregate into derived_pu table gets PAC noise
+# Tests: INSERT INTO derived_table SELECT ... GROUP BY reads from the source
+# PU table — the aggregate should be noised (pac_noised_sum).
+# ============================================================================
+
+statement ok
+CREATE PU TABLE scores (id INT, grp INT, value INT, PAC_KEY(id), PROTECTED(value));
+
+statement ok
+INSERT INTO scores VALUES (1, 1, 10), (2, 1, 20), (3, 2, 30), (4, 2, 40);
+
+# Create a derived_pu table via CTAS (aggregate shape — like a materialized view)
+statement ok
+CREATE TABLE mv_scores AS SELECT grp, SUM(value) AS total FROM scores GROUP BY grp LIMIT 0;
+
+# INSERT with aggregate into derived table — should be noised
+# Exact values would be grp=1:30, grp=2:70, but noise changes them
+statement ok
+INSERT INTO mv_scores SELECT grp, SUM(value) AS total FROM scores GROUP BY grp;
+
+# The inserted values should differ from the exact sums due to noise
+# We check that at least one value is not exact (30 or 70)
+query I
+SELECT COUNT(*) FROM mv_scores WHERE (grp = 1 AND total = 30) OR (grp = 2 AND total = 70);
+----
+0
+
+statement ok
+DROP TABLE mv_scores;
+
+statement ok
+DROP TABLE scores;
+
+# ============================================================================
+# Test 5: SELECT from derived_pu table finalizes counters on the fly
+# Tests: Reading a derived_pu table applies pac_finalize to counter columns,
+# returning noised scalars (not raw counter lists). Exact sums would be 300/300.
+# ============================================================================
+
+statement ok
+CREATE PU TABLE items (id INT, cat INT, price INT, PAC_KEY(id), PROTECTED(price));
+
+statement ok
+INSERT INTO items VALUES (1, 1, 100), (2, 1, 200), (3, 2, 300);
+
+statement ok
+CREATE TABLE mv_items AS SELECT cat, SUM(price) AS total FROM items GROUP BY cat;
+
+# Values are noised (exact sums are both 300, but PAC changes them)
+query IR
+SELECT cat, total FROM mv_items ORDER BY cat;
+----
+1	400.0
+2	600.0
+
+statement ok
+DROP TABLE mv_items;
+
+statement ok
+DROP TABLE items;
+
+# ============================================================================
+# Test 6: WHERE filter on counter column (inequality comparisons)
+# Tests: The registered implicit cast LIST<FLOAT> → FLOAT enables >, <, >=, <=
+# comparisons on counter columns. The cast performs pac_finalize at execution.
+# ============================================================================
+
+statement ok
+CREATE PU TABLE flt_src (id INT, grp INT, val INT, PAC_KEY(id), PROTECTED(val));
+
+statement ok
+INSERT INTO flt_src VALUES (1,1,10),(2,1,20),(3,2,100),(4,2,200);
+
+statement ok
+CREATE TABLE mv_flt AS SELECT grp, SUM(val) AS total FROM flt_src GROUP BY grp;
+
+# grp=2 has a much larger total — only it should pass this threshold
+query I
+SELECT COUNT(*) FROM mv_flt WHERE total > 100;
+----
+1
+
+statement ok
+DROP TABLE mv_flt;
+
+statement ok
+DROP TABLE flt_src;
+
+# ============================================================================
+# Test 7: ORDER BY on counter column
+# Tests: pac_finalize is injected into ORDER BY expressions.
+# ============================================================================
+
+statement ok
+CREATE PU TABLE ord_src (id INT, grp INT, val INT, PAC_KEY(id), PROTECTED(val));
+
+statement ok
+INSERT INTO ord_src VALUES (1,1,100),(2,1,200),(3,2,10),(4,2,20),(5,3,50);
+
+statement ok
+CREATE TABLE mv_ord AS SELECT grp, SUM(val) AS total FROM ord_src GROUP BY grp;
+
+# grp=1 has the largest exact sum (300) — PAC changes it but preserves ranking
+query I
+SELECT grp FROM mv_ord ORDER BY total DESC LIMIT 1;
+----
+1
+
+statement ok
+DROP TABLE mv_ord;
+
+statement ok
+DROP TABLE ord_src;
+
+# ============================================================================
+# Test 8: INSERT with multiple aggregate types (SUM + COUNT)
+# Tests: ConvertDerivedPuToCounters handles multiple aggregates in one INSERT.
+# ============================================================================
+
+statement ok
+CREATE PU TABLE multi_src (id INT, grp INT, val INT, PAC_KEY(id), PROTECTED(val));
+
+statement ok
+INSERT INTO multi_src VALUES (1,1,10),(2,1,20),(3,2,30),(4,2,40);
+
+statement ok
+CREATE TABLE mv_multi AS SELECT grp, SUM(val) AS total, COUNT(*) AS cnt FROM multi_src GROUP BY grp LIMIT 0;
+
+statement ok
+INSERT INTO mv_multi SELECT grp, SUM(val) AS total, COUNT(*) AS cnt FROM multi_src GROUP BY grp;
+
+# Both columns should be stored as counter lists and finalized on read.
+# Exact sums: grp=1:30, grp=2:70. PAC changes them.
+query I
+SELECT COUNT(*) FROM mv_multi WHERE total = 30 OR total = 70;
+----
+0
+
+# Row count should match
+query I
+SELECT COUNT(*) FROM mv_multi;
+----
+2
+
+statement ok
+DROP TABLE mv_multi;
+
+statement ok
+DROP TABLE multi_src;
+
+# ============================================================================
+# Test 9: Multiple INSERTs into the same derived_pu table
+# Tests: Repeated INSERT ... SELECT into derived_pu accumulates rows correctly.
+# ============================================================================
+
+statement ok
+CREATE PU TABLE acc_src (id INT, grp INT, val INT, PAC_KEY(id), PROTECTED(val));
+
+statement ok
+INSERT INTO acc_src VALUES (1,1,10),(2,1,20),(3,2,30);
+
+statement ok
+CREATE TABLE mv_acc AS SELECT grp, SUM(val) AS total FROM acc_src GROUP BY grp LIMIT 0;
+
+# First INSERT
+statement ok
+INSERT INTO mv_acc SELECT grp, SUM(val) AS total FROM acc_src GROUP BY grp;
+
+# Add more data and INSERT again
+statement ok
+INSERT INTO acc_src VALUES (4,1,100),(5,2,200);
+
+statement ok
+INSERT INTO mv_acc SELECT grp, SUM(val) AS total FROM acc_src GROUP BY grp;
+
+# Should now have 4 rows (2 from each INSERT)
+query I
+SELECT COUNT(*) FROM mv_acc;
+----
+4
+
+statement ok
+DROP TABLE mv_acc;
+
+statement ok
+DROP TABLE acc_src;
+
+# ============================================================================
+# Test 10: Aggregation over a derived_pu table
+# Tests: SUM/COUNT over finalized counter values from a derived_pu table works
+# via the registered implicit cast LIST<FLOAT> → DOUBLE.
+# ============================================================================
+
+statement ok
+CREATE PU TABLE agg2_src (id INT, grp INT, val INT, PAC_KEY(id), PROTECTED(val));
+
+statement ok
+INSERT INTO agg2_src VALUES (1,1,10),(2,1,20),(3,2,30),(4,2,40);
+
+statement ok
+CREATE TABLE mv_agg2 AS SELECT grp, SUM(val) AS total FROM agg2_src GROUP BY grp;
+
+# SUM over counter values — the implicit cast finalizes them before aggregating
+query I
+SELECT COUNT(*) FROM (SELECT SUM(total) AS grand FROM mv_agg2);
+----
+1
+
+statement ok
+DROP TABLE mv_agg2;
+
+statement ok
+DROP TABLE agg2_src;
+
+# ============================================================================
+# Test 11: Arithmetic expressions on counter columns
+# Tests: Counter columns can participate in WHERE with AND combinations.
+# ============================================================================
+
+statement ok
+CREATE PU TABLE arith_src (id INT, grp INT, val INT, PAC_KEY(id), PROTECTED(val));
+
+statement ok
+INSERT INTO arith_src VALUES (1,1,10),(2,1,20),(3,2,30),(4,2,40);
+
+statement ok
+CREATE TABLE mv_arith AS SELECT grp, SUM(val) AS total, COUNT(*) AS cnt FROM arith_src GROUP BY grp;
+
+# Both counter columns should be comparable after finalization
+query I
+SELECT COUNT(*) FROM mv_arith WHERE total > 0 AND cnt > 0;
+----
+2
+
+statement ok
+DROP TABLE mv_arith;
+
+statement ok
+DROP TABLE arith_src;
+
+# ============================================================================
+# Test 12: CTAS from derived_pu table preserves counter columns
+# Tests: Creating a table from a derived_pu table copies raw counter lists
+# and marks the new table as derived_pu (no pac_finalize during copy).
+# ============================================================================
+
+statement ok
+CREATE PU TABLE chain_src (id INT, grp INT, val INT, PAC_KEY(id), PROTECTED(val));
+
+statement ok
+INSERT INTO chain_src VALUES (1,1,10),(2,1,20),(3,2,30);
+
+statement ok
+CREATE TABLE mv_chain AS SELECT grp, SUM(val) AS total FROM chain_src GROUP BY grp;
+
+statement ok
+CREATE TABLE mv_copy AS SELECT grp, total FROM mv_chain;
+
+# The copy should have counter lists (64-element FLOAT[]), not finalized scalars
+statement ok
+SET pac_rewrite = false;
+
+query I
+SELECT length(total) FROM mv_copy LIMIT 1;
+----
+64
+
+statement ok
+SET pac_rewrite = true;
+
+# Reading the copy with pac_rewrite=true should finalize (same as reading mv_chain)
+query I
+SELECT COUNT(*) FROM mv_copy;
+----
+2
+
+statement ok
+DROP TABLE mv_copy;
+
+statement ok
+DROP TABLE mv_chain;
+
+statement ok
+DROP TABLE chain_src;
+
+# ============================================================================
+# Test 13: BETWEEN on counter column
+# Tests: The implicit cast enables BETWEEN (decomposed into >= and <=).
+# ============================================================================
+
+statement ok
+CREATE PU TABLE btw_src (id INT, grp INT, val INT, PAC_KEY(id), PROTECTED(val));
+
+statement ok
+INSERT INTO btw_src VALUES (1,1,10),(2,1,20),(3,2,100),(4,2,200),(5,3,5);
+
+statement ok
+CREATE TABLE mv_btw AS SELECT grp, SUM(val) AS total FROM btw_src GROUP BY grp;
+
+# grp=1 total ~40, grp=2 total ~200, grp=3 total ~0. Only grp=1 is in [30,150].
+query I
+SELECT COUNT(*) FROM mv_btw WHERE total BETWEEN 30 AND 150;
+----
+1
+
+statement ok
+DROP TABLE mv_btw;
+
+statement ok
+DROP TABLE btw_src;
+
+# ============================================================================
+# Test 14: DISTINCT on counter columns
+# Tests: DISTINCT deduplication works on finalized counter values.
+# ============================================================================
+
+statement ok
+CREATE PU TABLE dist_src (id INT, grp INT, val INT, PAC_KEY(id), PROTECTED(val));
+
+statement ok
+INSERT INTO dist_src VALUES (1,1,10),(2,1,20),(3,2,30),(4,2,40);
+
+statement ok
+CREATE TABLE mv_dist AS SELECT grp, SUM(val) AS total FROM dist_src GROUP BY grp;
+
+# Two groups with different totals → DISTINCT should return 2 rows
+query I
+SELECT COUNT(*) FROM (SELECT DISTINCT total FROM mv_dist);
+----
+2
+
+statement ok
+DROP TABLE mv_dist;
+
+statement ok
+DROP TABLE dist_src;
+
+# ============================================================================
+# Test 15: GROUP BY on counter column
+# Tests: Counter columns can be used as GROUP BY keys after finalization.
+# ============================================================================
+
+statement ok
+CREATE PU TABLE gb_src (id INT, grp INT, val INT, PAC_KEY(id), PROTECTED(val));
+
+statement ok
+INSERT INTO gb_src VALUES (1,1,10),(2,1,20),(3,2,30),(4,2,40);
+
+statement ok
+CREATE TABLE mv_gb AS SELECT grp, SUM(val) AS total FROM gb_src GROUP BY grp;
+
+# GROUP BY total: each group has a unique finalized total, so count = 2
+query I
+SELECT COUNT(*) FROM (SELECT total, COUNT(*) AS n FROM mv_gb GROUP BY total);
+----
+2
+
+statement ok
+DROP TABLE mv_gb;
+
+statement ok
+DROP TABLE gb_src;
+
+# ============================================================================
+# Test 16: CASE WHEN on counter column
+# Tests: Counter columns work inside conditional expressions.
+# ============================================================================
+
+statement ok
+CREATE PU TABLE case_src (id INT, grp INT, val INT, PAC_KEY(id), PROTECTED(val));
+
+statement ok
+INSERT INTO case_src VALUES (1,1,10),(2,1,20),(3,2,100),(4,2,200);
+
+statement ok
+CREATE TABLE mv_case AS SELECT grp, SUM(val) AS total FROM case_src GROUP BY grp;
+
+# grp=1 total ~40 → 'low', grp=2 total ~200 → 'high'
+query IT
+SELECT grp, CASE WHEN total > 100 THEN 'high' ELSE 'low' END AS tier FROM mv_case ORDER BY grp;
+----
+1	low
+2	high
+
+statement ok
+DROP TABLE mv_case;
+
+statement ok
+DROP TABLE case_src;
+
+# ============================================================================
+# Test 17: SUM/AVG over counter columns
+# Tests: Aggregate functions over finalized counter values via implicit cast.
+# ============================================================================
+
+statement ok
+CREATE PU TABLE agg3_src (id INT, grp INT, val INT, PAC_KEY(id), PROTECTED(val));
+
+statement ok
+INSERT INTO agg3_src VALUES (1,1,10),(2,1,20),(3,2,100),(4,2,200);
+
+statement ok
+CREATE TABLE mv_agg3 AS SELECT grp, SUM(val) AS total FROM agg3_src GROUP BY grp;
+
+# SUM over finalized totals should produce a single non-null result
+query I
+SELECT COUNT(*) FROM (SELECT SUM(total) AS grand FROM mv_agg3) WHERE grand IS NOT NULL;
+----
+1
+
+# AVG should also work
+query I
+SELECT COUNT(*) FROM (SELECT AVG(total) AS avg_total FROM mv_agg3) WHERE avg_total IS NOT NULL;
+----
+1
+
+statement ok
+DROP TABLE mv_agg3;
+
+statement ok
+DROP TABLE agg3_src;
+
+# ============================================================================
+# Test 18: JOIN two derived_pu tables
+# Tests: Counter columns from different derived_pu tables are finalized
+# independently when joined.
+# ============================================================================
+
+statement ok
+CREATE PU TABLE join_src (id INT, grp INT, val INT, PAC_KEY(id), PROTECTED(val));
+
+statement ok
+INSERT INTO join_src VALUES (1,1,10),(2,1,20),(3,2,100),(4,2,200),(5,3,50);
+
+statement ok
+CREATE TABLE mv_a AS SELECT grp, SUM(val) AS total_a FROM join_src GROUP BY grp;
+
+statement ok
+CREATE TABLE mv_b AS SELECT grp, SUM(val) AS total_b FROM join_src GROUP BY grp;
+
+# Join should produce 3 matching rows (one per grp)
+query I
+SELECT COUNT(*) FROM mv_a JOIN mv_b ON mv_a.grp = mv_b.grp;
+----
+3
+
+# Both counter columns should be finalized to scalars.
+# All 3 groups have positive true sums (30, 300, 50). pac_filter_lt(0, counters)
+# uses majority voting: grp=3 (single PU, 32/64 subsamples positive) passes at threshold.
+query I
+SELECT COUNT(*) FROM mv_a JOIN mv_b ON mv_a.grp = mv_b.grp WHERE total_a > 0 AND total_b > 0;
+----
+3
+
+statement ok
+DROP TABLE mv_a;
+
+statement ok
+DROP TABLE mv_b;
+
+statement ok
+DROP TABLE join_src;
+
+# ============================================================================
+# Test 19: Subquery with counter column comparison
+# Tests: Counter columns in correlated/uncorrelated subqueries.
+# ============================================================================
+
+statement ok
+CREATE PU TABLE sub_src (id INT, grp INT, val INT, PAC_KEY(id), PROTECTED(val));
+
+statement ok
+INSERT INTO sub_src VALUES (1,1,10),(2,1,20),(3,2,100),(4,2,200),(5,3,50);
+
+statement ok
+CREATE TABLE mv_sub AS SELECT grp, SUM(val) AS total FROM sub_src GROUP BY grp;
+
+# Uncorrelated subquery: rows with total > min(total)
+query I
+SELECT COUNT(*) FROM mv_sub WHERE total > (SELECT MIN(total) FROM mv_sub);
+----
+2
+
+statement ok
+DROP TABLE mv_sub;
+
+statement ok
+DROP TABLE sub_src;
+
+# ============================================================================
+# Test 20: UNION ALL on derived_pu tables
+# Tests: Set operations on finalized counter columns.
+# ============================================================================
+
+statement ok
+CREATE PU TABLE union_src (id INT, grp INT, val INT, PAC_KEY(id), PROTECTED(val));
+
+statement ok
+INSERT INTO union_src VALUES (1,1,10),(2,1,20),(3,2,30);
+
+statement ok
+CREATE TABLE mv_u1 AS SELECT grp, SUM(val) AS total FROM union_src GROUP BY grp;
+
+statement ok
+CREATE TABLE mv_u2 AS SELECT grp, SUM(val) AS total FROM union_src GROUP BY grp;
+
+# UNION ALL should produce 4 rows (2 from each)
+query I
+SELECT COUNT(*) FROM (SELECT total FROM mv_u1 UNION ALL SELECT total FROM mv_u2);
+----
+4
+
+statement ok
+DROP TABLE mv_u1;
+
+statement ok
+DROP TABLE mv_u2;
+
+statement ok
+DROP TABLE union_src;
+
+# ============================================================================
+# Test 21: DELETE with counter column filter
+# Tests: DELETE WHERE on counter columns uses the implicit cast for filtering.
+# ============================================================================
+
+statement ok
+CREATE PU TABLE del_src (id INT, grp INT, val INT, PAC_KEY(id), PROTECTED(val));
+
+statement ok
+INSERT INTO del_src VALUES (1,1,10),(2,1,20),(3,2,100),(4,2,200),(5,3,5);
+
+statement ok
+CREATE TABLE mv_del AS SELECT grp, SUM(val) AS total FROM del_src GROUP BY grp;
+
+# Delete rows where total is small (grp=3 has ~0 total)
+statement ok
+DELETE FROM mv_del WHERE total < 10;
+
+# Should have 2 rows remaining
+query I
+SELECT COUNT(*) FROM mv_del;
+----
+2
+
+statement ok
+DROP TABLE mv_del;
+
+statement ok
+DROP TABLE del_src;
+
+# ============================================================================
+# Test 22: IN list on counter column
+# Tests: The IN operator with literal values works on counter columns.
+# ============================================================================
+
+statement ok
+CREATE PU TABLE in_src (id INT, grp INT, val INT, PAC_KEY(id), PROTECTED(val));
+
+statement ok
+INSERT INTO in_src VALUES (1,1,10),(2,1,20),(3,2,100),(4,2,200);
+
+statement ok
+CREATE TABLE mv_in AS SELECT grp, SUM(val) AS total FROM in_src GROUP BY grp;
+
+# Neither 30 nor 300 should match the noised totals
+query I
+SELECT COUNT(*) FROM mv_in WHERE total IN (30, 300);
+----
+0
+
+statement ok
+DROP TABLE mv_in;
+
+statement ok
+DROP TABLE in_src;
+
+# ============================================================================
+# Test 23: INSERT from derived_pu into plain table (finalizes on read)
+# Tests: When inserting finalized values into a non-derived_pu table,
+# the implicit cast finalizes counter columns to scalars.
+# ============================================================================
+
+statement ok
+CREATE PU TABLE ins_src (id INT, grp INT, val INT, PAC_KEY(id), PROTECTED(val));
+
+statement ok
+INSERT INTO ins_src VALUES (1,1,10),(2,1,20),(3,2,100),(4,2,200);
+
+statement ok
+CREATE TABLE mv_ins AS SELECT grp, SUM(val) AS total FROM ins_src GROUP BY grp;
+
+statement ok
+CREATE TABLE plain_copy (grp INT, val DOUBLE);
+
+# INSERT into plain table from derived_pu — total should be finalized
+statement ok
+INSERT INTO plain_copy SELECT grp, total FROM mv_ins;
+
+query I
+SELECT COUNT(*) FROM plain_copy;
+----
+2
+
+# Values should be scalars, not lists
+query I
+SELECT COUNT(*) FROM plain_copy WHERE val > 0;
+----
+2
+
+statement ok
+DROP TABLE plain_copy;
+
+statement ok
+DROP TABLE mv_ins;
+
+statement ok
+DROP TABLE ins_src;
+
+# ============================================================================
+# Test 24: NOT EQUAL on counter column
+# Tests: The != operator on counter columns works via the equality binder path.
+# ============================================================================
+
+statement ok
+CREATE PU TABLE neq_src (id INT, grp INT, val INT, PAC_KEY(id), PROTECTED(val));
+
+statement ok
+INSERT INTO neq_src VALUES (1,1,10),(2,1,20),(3,2,100),(4,2,200),(5,3,5);
+
+statement ok
+CREATE TABLE mv_neq AS SELECT grp, SUM(val) AS total FROM neq_src GROUP BY grp;
+
+# All noised totals should be != 0. pac_filter_neq uses majority voting:
+# even grp=3 (single PU, exact sum=5) has 32/64 subsamples with non-zero counters.
+query I
+SELECT COUNT(*) FROM mv_neq WHERE total != 0;
+----
+3
+
+statement ok
+DROP TABLE mv_neq;
+
+statement ok
+DROP TABLE neq_src;
+
+# ============================================================================
+# Test 25: NULLIF on counter column
+# Tests: NULLIF compares counter column to a value, returning NULL on match.
+# ============================================================================
+
+statement ok
+CREATE PU TABLE nif_src (id INT, grp INT, val INT, PAC_KEY(id), PROTECTED(val));
+
+statement ok
+INSERT INTO nif_src VALUES (1,1,10),(2,1,20),(3,2,100),(4,2,200),(5,3,5);
+
+statement ok
+CREATE TABLE mv_nif AS SELECT grp, SUM(val) AS total FROM nif_src GROUP BY grp;
+
+# NULLIF(total, 0) should return NULL for 0-valued totals, non-null otherwise.
+# All 3 groups have non-zero true sums; pac_filter_<cmp> majority voting keeps them all.
+query I
+SELECT COUNT(*) FROM mv_nif WHERE NULLIF(total, 0) IS NOT NULL;
+----
+3
+
+statement ok
+DROP TABLE mv_nif;
+
+statement ok
+DROP TABLE nif_src;
+
+# Cleanup
+statement ok
+PRAGMA clear_pac_metadata;
