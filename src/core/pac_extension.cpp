@@ -18,7 +18,9 @@
 #include "aggregates/pac_aggregate.hpp"
 #include "aggregates/pac_count.hpp"
 #include "aggregates/pac_sum.hpp"
+#include "aggregates/pac_clip_sum.hpp"
 #include "aggregates/pac_min_max.hpp"
+#include "aggregates/pac_clip_min_max.hpp"
 #include "categorical/pac_categorical.hpp"
 #include "parser/pac_parser.hpp"
 #include "diff/pac_utility_diff.hpp"
@@ -209,6 +211,15 @@ static void LoadInternal(ExtensionLoader &loader) {
 	db.config.AddExtensionOption(
 	    "pac_diffcols", "Measure utility: specify number of key columns and optional output path (e.g. '2:out.csv')",
 	    LogicalType::VARCHAR);
+	// Utility threshold: probabilistically NULL cells where |noised_value| / noise_std_dev < threshold.
+	// Z-score threshold for utility NULLing: NULLs cells whose signal-to-noise ratio is below threshold.
+	// Uses a sigmoid P(keep) = 1/(1+exp(-3*(z - threshold))) for smooth probabilistic NULLing.
+	// This is safe post-processing of the already-noised output (data processing inequality).
+	// Default: NULL (disabled). Set to e.g. 4.0 to enable (~20% expected relative error cutoff).
+	db.config.AddExtensionOption("pac_utility_threshold",
+	                             "Z-score threshold for utility NULLing: NULL cells with |value|/noise_std < threshold "
+	                             "(default: NULL = disabled, set to e.g. 4 to enable)",
+	                             LogicalType::DOUBLE, Value(LogicalType::DOUBLE));
 
 	// ---- Internal settings ----
 	// Enforce protected column access restrictions (prevents direct projection of protected columns)
@@ -260,17 +271,38 @@ static void LoadInternal(ExtensionLoader &loader) {
 	db.config.AddExtensionOption("pac_ptracking", "[INTERNAL] Enable persistent secret p-tracking for query-level MIA",
 	                             LogicalType::BOOLEAN, Value::BOOLEAN(true));
 
+	db.config.AddExtensionOption("pac_clip_support",
+	                             "Dynamic outlier clipping threshold for pac_clip_sum. "
+	                             "Levels with fewer than this many estimated distinct contributors are zeroed out. "
+	                             "NULL (default) disables pac_clip_sum; set to e.g. 64 to enable.",
+	                             LogicalType::BIGINT, Value());
+
+	db.config.AddExtensionOption("pac_clip_scale",
+	                             "Scale unsupported outlier levels to nearest supported level instead of omitting. "
+	                             "Default false (omit).",
+	                             LogicalType::BOOLEAN, Value::BOOLEAN(false));
+
 	// Register pac_sum aggregate functions
 	RegisterPacSumFunctions(loader);
 	RegisterPacSumCountersFunctions(loader);
+	RegisterPacClipSumFunctions(loader);
+	RegisterPacNoisedClipSumFunctions(loader);
+	RegisterPacNoisedClipSumCountFunctions(loader);
 	RegisterPacCountFunctions(loader);
 	RegisterPacCountCountersFunctions(loader);
+	RegisterPacClipCountFunctions(loader);
+	RegisterPacNoisedClipCountFunctions(loader);
 	// Register pac_min/pac_max aggregate functions
 	RegisterPacMinFunctions(loader);
 	RegisterPacMaxFunctions(loader);
 	// Register _counters variants for categorical queries
 	RegisterPacMinCountersFunctions(loader);
 	RegisterPacMaxCountersFunctions(loader);
+	// Register clip synonyms for min/max
+	RegisterPacClipMinFunctions(loader);
+	RegisterPacClipMaxFunctions(loader);
+	RegisterPacNoisedClipMinFunctions(loader);
+	RegisterPacNoisedClipMaxFunctions(loader);
 
 	// Register dummy pac_noised_avg / pac_avg (replaced by RewritePacAvgToDiv before execution)
 	RegisterPacAvgFunctions(loader);

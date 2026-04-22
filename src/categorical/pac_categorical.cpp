@@ -18,6 +18,7 @@
 
 #include <random>
 #include <cmath>
+#include <limits>
 
 #ifdef _MSC_VER
 #include <intrin.h>
@@ -45,11 +46,17 @@ struct PacCategoricalBindData : public FunctionData {
 	uint64_t seed;
 	uint64_t query_hash;               // derived from seed: used as counter selector for NoisySample
 	std::shared_ptr<PacPState> pstate; // p-tracking state shared across query (may be nullptr)
+	double utility_threshold;          // z-score threshold for utility NULLing (NaN = disabled)
 
 	// Primary constructor - reads seed from pac_seed setting, or uses default 42 if not set.
 	// When mi > 0, seed is randomized per query via the query number.
 	explicit PacCategoricalBindData(ClientContext &ctx, double mi_val = 0.0, double correction_val = 1.0)
-	    : mi(mi_val), correction(correction_val) {
+	    : mi(mi_val), correction(correction_val), utility_threshold(std::numeric_limits<double>::quiet_NaN()) {
+		// Read utility threshold setting
+		Value ut_val;
+		if (ctx.TryGetCurrentSetting("pac_utility_threshold", ut_val) && !ut_val.IsNull()) {
+			utility_threshold = ut_val.GetValue<double>();
+		}
 		Value pac_seed_val;
 		if (ctx.TryGetCurrentSetting("pac_seed", pac_seed_val) && !pac_seed_val.IsNull()) {
 			seed = uint64_t(pac_seed_val.GetValue<int64_t>());
@@ -602,8 +609,12 @@ static void PacNoisedFunction(DataChunk &args, ExpressionState &state, Vector &r
 			auto child_idx = child_data.sel->get_index(entry.offset + j);
 			counters[j] = child_values[child_idx];
 		}
+		double noise_var = 0.0;
 		result_data[i] = PacNoisySampleFrom64Counters(counters, bind_data.mi, bind_data.correction, gen, ~key_hash,
-		                                              bind_data.query_hash, bind_data.pstate);
+		                                              bind_data.query_hash, bind_data.pstate, &noise_var);
+		if (PacUtilityNull(static_cast<double>(result_data[i]), noise_var, bind_data.utility_threshold, gen)) {
+			result_validity.SetInvalid(i);
+		}
 	}
 }
 
@@ -743,8 +754,13 @@ static void PacNoisedDivFunction(DataChunk &args, ExpressionState &state, Vector
 			PAC_FLOAT c = cnt_values[c_idx];
 			counters[j] = s / c; // 0/0 → NaN, which propagates correctly
 		}
-		result_data[i] = static_cast<double>(PacNoisySampleFrom64Counters(
-		    counters, bind_data.mi, bind_data.correction, gen, ~key_hash, bind_data.query_hash, bind_data.pstate));
+		double noise_var = 0.0;
+		result_data[i] = static_cast<double>(PacNoisySampleFrom64Counters(counters, bind_data.mi, bind_data.correction,
+		                                                                  gen, ~key_hash, bind_data.query_hash,
+		                                                                  bind_data.pstate, &noise_var));
+		if (PacUtilityNull(result_data[i], noise_var, bind_data.utility_threshold, gen)) {
+			result_validity.SetInvalid(i);
+		}
 	}
 }
 

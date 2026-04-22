@@ -7,7 +7,7 @@ This works on DuckDB v1.5 and beyond. See https://duckdb.org/install to install.
 ## Install
 
 ```sql
-INSTALL pac FROM COMMUNITY;
+INSTALL pac FROM community;
 LOAD pac;        
 ```
 
@@ -41,11 +41,12 @@ ALTER TABLE orders ADD PROTECTED (o_comment);
 ALTER TABLE lineitem ADD PROTECTED (l_comment);
 
 -- protected columns cannot be returned
-SELECT c_name FROM employees;
+SELECT c_name FROM customer;
 -- Error: protected column 'customer.c_name' can only be accessed inside
 -- aggregate functions (e.g., SUM, COUNT, AVG, MIN, MAX)
 
---The noised result is close to the real answer but perturbed — an attacker cannot determine whether any specific employee is in the database. 
+--The noised result is close to the real answer but perturbed — an attacker cannot determine whether
+--any specific customer (who might have made many purchases) is in the database. 
 SELECT l_returnflag, l_linestatus, SUM(l_extendedprice) FROM lineitem GROUP BY ALL;
 ┌──────────────┬──────────────┬──────────────────────┐
 │ l_returnflag │ l_linestatus │ sum(l_extendedprice) │
@@ -59,7 +60,7 @@ SELECT l_returnflag, l_linestatus, SUM(l_extendedprice) FROM lineitem GROUP BY A
 
 -- PAC rewrites the query plan automatically
 -- Note that: (1) the GROUP_BY uses a pac_noised_sum(#2, #3), not a standard sum()
---            (2) while the query only mentions lineitem, pac joins with orders to get c_cuskey (the PU key)
+--            (2) while the query only mentions lineitem, pac joins with orders to get _custkey (the PU key)
 EXPLAIN SELECT l_returnflag, l_linestatus, SUM(l_extendedprice) FROM lineitem GROUP BY ALL;
 ┌───────────────────────────┐
 │   PERFECT_HASH_GROUP_BY   │
@@ -94,7 +95,8 @@ EXPLAIN SELECT l_returnflag, l_linestatus, SUM(l_extendedprice) FROM lineitem GR
                              │      ~1,500,000 rows      │
                              └───────────────────────────┘
 
--- every time the result is noised a bit differently (the database is resampled)
+-- every time the result is noised a bit differently (the database is resampled -- though this is "virtual"
+-- "on-the-fly", because it is one  by perturbing the hash function that feeds into the stochastic aggregates)
 SELECT l_returnflag, l_linestatus, SUM(l_extendedprice) FROM lineitem GROUP BY ALL;
 ┌──────────────┬──────────────┬──────────────────────┐
 │ l_returnflag │ l_linestatus │ sum(l_extendedprice) │
@@ -143,7 +145,7 @@ utility=0.510000 recall=1.000000 precision=1.000000 (=4 -0 +0)
 
 ### Mutual Information (MI)
 
-PAC bounds the mutual information (MI) between the query output and whether any specific individual is in the database. The `pac_mi` parameter sets this bound: at the default `pac_mi = 0.0`, an attacker observing PAC query results gains zero additional information about any individual's presence. Higher values relax the bound, allowing less noise (more accurate results) at the cost of more information leakage.
+PAC bounds the mutual information (MI) between the query output and whether any specific individual is in the database. The `pac_mi` parameter sets this bound: at the default `pac_mi = 1/128`, an attacker observing PAC query results gains no additional information about any individual's presence. Higher values relax the bound, allowing less noise (more accurate results) at the cost of more information leakage.
 
 ## SQL Reference
 
@@ -186,7 +188,7 @@ PAC rewrites standard aggregates: `SUM`, `COUNT`, `AVG`, `MIN`, `MAX`, and `COUN
 
 ## Documentation
 
-For implementation details, see the [docs/](docs/) folder:
+For implementation details, see the [docs/](docs/) folder: \
 [Parser](docs/pac/syntax.md) | [Query Operators](docs/pac/query_operators.md) | [PAC Functions](docs/pac/functions.md) | [Runtime Checks](docs/pac/runtime_checks.md) | [Tests](docs/test/README.md) | [Benchmarks](docs/benchmark/README.md)
 
 ## Literature
@@ -204,7 +206,6 @@ I. Battiston, D. Yuan, X. Zhu, P. Boncz. [SIMD-PAC-DB: Pretty Performant PAC Pri
       url={https://arxiv.org/abs/2603.15023},
 }
 ```
-Note to reviewers: the above is updated w.r.t. the paper under submission: evaluation subsections 6.3+6.4 have been improved.
 
 ## Maintainer
 

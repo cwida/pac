@@ -9,3 +9,6 @@
 [submodule "benchmark/sqlstorm/SQLStorm"]
 	path = benchmark/sqlstorm/SQLStorm
 	url = https://github.com/SQL-Storm/SQLStorm.git
+[submodule ".claude/skills/shared"]
+	path = .claude/skills/shared
+	url = https://github.com/ila/duckdb-claude-skills.git

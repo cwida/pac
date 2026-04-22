@@ -63,6 +63,41 @@ This naturally scales with data sparsity: sparse groups (few contributing PUs) h
 
 If the input list is NULL (e.g., from a LEFT JOIN where no matching rows exist), returns a list of 64 NULLs instead. This prevents downstream operations from crashing on NULL list inputs.
 
+## Utility NULLing
+
+**Problem**: PAC noise can dominate the true aggregate value for small or sparse groups, producing results that are technically private but practically useless (e.g., a true sum of 5 reported as 2000 due to noise). Returning such low-utility cells can mislead analysts.
+
+**Mechanism**: When `pac_utility_threshold` is set to a numeric value (e.g., `SET pac_utility_threshold = 4`), PAC post-processes each noised result cell by computing its z-score:
+
+```
+z = |noised_value| / noise_std_dev
+```
+
+where `noise_std_dev = sqrt(noise_variance)` is the standard deviation of the noise that was added. Cells with low z-scores (signal dominated by noise) are probabilistically NULLed using a smooth sigmoid:
+
+```
+P(keep) = 1 / (1 + exp(-steepness * (z - threshold)))
+```
+
+with `steepness = 3`. At the threshold z-score, P(keep) ≈ 50%. Well above threshold, cells are almost always kept; well below, almost always NULLed.
+
+**Variance scaling**: For aggregates that use 2x compensation (SUM, COUNT — which double the result to account for ~50% sampling), the noise variance is scaled by 4x (since `Var(2X) = 4·Var(X)`). MIN/MAX use the raw noise variance (no compensation).
+
+**Privacy safety**: This is safe post-processing of the already-noised output. By the data processing inequality, any function of a differentially private output is at least as private. The sigmoid decision uses independent random coins (from the same seeded RNG stream), not the underlying data.
+
+**Scope**: Utility NULLing applies to all PAC aggregate finalize paths:
+- `pac_noised_sum`, `pac_noised_count`, `pac_noised_min`, `pac_noised_max`
+- `pac_noised_clip_sum`, `pac_noised_clip_min`, `pac_noised_clip_max` (when `pac_clip_support` is also active)
+- Categorical terminals: `pac_noised`, `pac_noised_div`
+
+**Configuration**:
+```sql
+SET pac_utility_threshold = 4;     -- enable: z < 4 → likely NULLed (~20% relative error cutoff)
+SET pac_utility_threshold = NULL;  -- disable (default)
+```
+
+**Default**: Disabled (`NULL`). Must be explicitly enabled.
+
 ## Stability
 
 ### Hash Repair (pac_hash_repair)

@@ -38,6 +38,8 @@ set(EXTENSION_SOURCES
 src/aggregates/pac_min_max.cpp
     src/aggregates/pac_sum.cpp
     src/aggregates/pac_finalize.cpp
+    src/aggregates/pac_clip_sum.cpp
+    src/aggregates/pac_clip_min_max.cpp
     src/compiler/pac_bitslice_compiler.cpp
     src/compiler/pac_compiler_helpers.cpp
     src/query_processing/pac_avg_rewriter.cpp

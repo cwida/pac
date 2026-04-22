@@ -156,4 +156,6 @@ There is some preliminary support for using multiple PU tables inside the same s
 | `pac_seed` | random | Fix seed for reproducible results |
 | `pac_noise` | `true` | Toggle noise injection |
 | `pac_diffcols` | `NULL` | [Utility diff](docs/pac/utility.md): compare noised vs exact results |
+| `pac_utility_threshold` | `NULL` (disabled) | Z-score threshold for [utility NULLing](runtime_checks.md#utility-nulling): probabilistically NULL result cells with low signal-to-noise ratio. Set to e.g. `4` to enable. |
+| `pac_clip_support` | `NULL` (disabled) | Enable clipping: aggregate per-PU values with outlier elimination at the given support threshold |
 
