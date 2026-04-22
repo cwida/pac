@@ -185,6 +185,7 @@ PAC rewrites standard aggregates: `SUM`, `COUNT`, `AVG`, `MIN`, `MAX`, and `COUN
 | `pac_noise` | `true` | Toggle noise injection |
 | `pac_ctas` | `true` | Propagate PAC metadata through CTAS |
 | `pac_diffcols` | `NULL` | [Utility diff](docs/pac/utility.md): compare noised vs exact results |
+=======
 
 ## Documentation
 
