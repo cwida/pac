@@ -662,6 +662,68 @@ SELECT COUNT(*), SUM(id), AVG(id) FROM u;
 ----
 100	4950	49.5
 
+# ---------------------------------------------------------------------------
+# Phase I: WHERE clauses (filter pushdown is transparent to dp_elastic)
+# WHERE adds a LogicalFilter between scan and aggregate; the aggregate node
+# is unchanged so sensitivity, clipping, and budget split all apply on the
+# filtered result. Tested under privacy_noise=false for deterministic checks.
+# ---------------------------------------------------------------------------
+
+# WHERE on PU table — count of ids 51..99 = 49
+query I
+SELECT COUNT(*) FROM u WHERE id > 50;
+----
+49
+
+# WHERE on PU table with SUM — sum of ids 51..99 = 3675 (no clipping at bound=100)
+statement ok
+SET dp_sum_bound = 100.0;
+
+query I
+SELECT SUM(id) FROM u WHERE id > 50;
+----
+3675
+
+# WHERE on PU table with AVG — avg of ids 51..99 = 75.0
+query I
+SELECT AVG(id) FROM u WHERE id > 50;
+----
+75.0
+
+# WHERE with implicit FK chain (filter on orders, no explicit join to u)
+# amount > 3.0 → values 4,5,6 in 7-cycle, 71 full cycles → 71*3 = 213
+query I
+SELECT COUNT(*) FROM orders WHERE amount > 3.0;
+----
+213
+
+# WHERE with explicit join — same result as implicit
+query I
+SELECT COUNT(*) FROM u JOIN orders ON u.id = orders.uid WHERE amount > 3.0;
+----
+213
+
+# WHERE with GROUP BY on a non-PU, non-protected column (orders.amount)
+query II
+SELECT CAST(amount AS INTEGER) AS g, COUNT(*) FROM orders WHERE amount > 2.0 GROUP BY g ORDER BY g;
+----
+3	71
+4	71
+5	71
+6	71
+
+# WHERE with multi-aggregate budget split
+query II
+SELECT COUNT(*), SUM(id) FROM u WHERE id > 50;
+----
+49	3675
+
+# WHERE that filters out all rows — returns 0 (empty aggregate)
+query I
+SELECT COUNT(*) FROM u WHERE id > 1000;
+----
+0
+
 statement ok
 RESET dp_sum_bound;
 
