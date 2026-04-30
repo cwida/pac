@@ -368,21 +368,25 @@ bool PACParserExtension::ParseAlterTableAddPAC(const string &query, string &stri
 #endif
 	}
 
-	// Validate PU keyword matches table status
+	// Check for PAC-related keywords (needed before the PU keyword validation below)
+	bool has_pac_key = query_lower.find("pac_key") != string::npos;
+	bool has_pac_link = query_lower.find("pac_link") != string::npos;
+	bool has_protected = query_lower.find("protected") != string::npos;
+
+	// Validate PU keyword matches table status.
+	// ADD PAC_KEY is exempt from the !used_pu_keyword && is_pu error because:
+	// - PAC_KEY is idempotent (safe to re-add)
+	// - In DuckDB's batch mode (-c flag), PRAGMA clear_pac_metadata is parsed before it
+	//   executes, so stale JSON metadata can make a PU table appear as PU at parse time
 	bool is_pu = existing && existing->is_privacy_unit;
 	if (used_pu_keyword && !is_pu) {
 		throw ParserException("Table '" + metadata.table_name +
 		                      "' is not a privacy unit. Use ALTER TABLE (without PU) for non-PU tables.");
 	}
-	if (!used_pu_keyword && is_pu) {
+	if (!used_pu_keyword && is_pu && (has_pac_link || has_protected)) {
 		throw ParserException("Table '" + metadata.table_name +
 		                      "' is a privacy unit. Use ALTER PU TABLE for PU tables.");
 	}
-
-	// Check for PAC-related keywords
-	bool has_pac_key = query_lower.find("pac_key") != string::npos;
-	bool has_pac_link = query_lower.find("pac_link") != string::npos;
-	bool has_protected = query_lower.find("protected") != string::npos;
 
 	// Extract and merge new PAC clauses
 	if (has_pac_key) {
@@ -523,13 +527,10 @@ bool PACParserExtension::ParseAlterTableDropPAC(const string &query, string &str
 			metadata = *existing;
 		}
 
-		// Require PAC_KEY to be defined before SET PU
-		if (metadata.primary_key_columns.empty()) {
-			throw ParserException("ALTER TABLE SET PU requires a PAC_KEY. "
-			                      "First run: ALTER TABLE " +
-			                      metadata.table_name + " ADD PAC_KEY (column_name)");
-		}
-
+		// Mark as pending SET PU — validation deferred to plan time.
+		// Parse-time check fails in batch mode (-c flag) where DuckDB parses all statements
+		// before planning any: ADD PAC_KEY's metadata isn't in PACMetadataManager yet.
+		metadata.is_set_pu_op = true;
 		metadata.is_privacy_unit = true;
 
 		// Metadata-only operation

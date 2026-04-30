@@ -1,0 +1,467 @@
+# name: test/sql/pac_dp_elastic.test
+# description: Elastic-sensitivity DP mode — Phase A: plumbing only
+# group: [sql]
+
+require pac
+
+statement ok
+PRAGMA clear_pac_metadata;
+
+statement ok
+SET pac_seed = 42;
+
+statement ok
+SET threads = 1;
+
+# ---------------------------------------------------------------------------
+# Phase A: defaults and settings registration
+# ---------------------------------------------------------------------------
+
+# Default privacy_mode is 'pac'
+query I
+SELECT current_setting('privacy_mode');
+----
+pac
+
+# Default dp_epsilon is 1.0
+query I
+SELECT current_setting('dp_epsilon');
+----
+1.0
+
+# Settings are writable
+statement ok
+SET privacy_mode = 'dp_elastic';
+
+query I
+SELECT current_setting('privacy_mode');
+----
+dp_elastic
+
+statement ok
+SET dp_epsilon = 0.5;
+
+statement ok
+SET dp_sum_bound = 100.0;
+
+# ---------------------------------------------------------------------------
+# dp_laplace_noise scalar UDF works standalone
+# ---------------------------------------------------------------------------
+
+statement ok
+SET privacy_mode = 'pac';
+
+# Scale 0 returns value unchanged
+query I
+SELECT dp_laplace_noise(100.0, 0.0);
+----
+100.0
+
+# Non-zero scale produces a noised value (exact value is seed-dependent, just check it's finite)
+query I
+SELECT abs(dp_laplace_noise(100.0, 5.0) - 100.0) < 1000;
+----
+true
+
+# ---------------------------------------------------------------------------
+# dp_elastic dispatch reaches the stub (Phase A: NotImplemented)
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE u (id BIGINT, region VARCHAR);
+
+statement ok
+INSERT INTO u SELECT i, 'r' || (i % 5) FROM range(100) t(i);
+
+statement ok
+ALTER TABLE u ADD PAC_KEY (id);
+
+statement ok
+ALTER TABLE u SET PU;
+
+statement ok
+SET privacy_mode = 'dp_elastic';
+
+statement ok
+SET dp_epsilon = 1.0;
+
+# ---------------------------------------------------------------------------
+# Phase B: COUNT(*) on a single PU table, no joins
+# ---------------------------------------------------------------------------
+
+# Laplace scale for COUNT = 1/ε = 1; noise std-dev = √2 ≈ 1.41.
+# 100 samples → P(|noise| > 50) is astronomically small.
+query I
+SELECT abs(COUNT(*) - 100) < 50 FROM u;
+----
+true
+
+# COUNT preserves its original type (BIGINT). Noise is cast back after Laplace.
+query I
+SELECT typeof(COUNT(*)) FROM u;
+----
+BIGINT
+
+# With very small epsilon, noise is large but still finite
+statement ok
+SET dp_epsilon = 0.01;
+
+query I
+SELECT COUNT(*) IS NOT NULL AND COUNT(*) < 1000000 FROM u;
+----
+true
+
+statement ok
+SET dp_epsilon = 1.0;
+
+# ---------------------------------------------------------------------------
+# Phase B: FK join setup (orders: 500 rows, 5 orders per user → mf_K = 5)
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE orders (uid BIGINT, amount DOUBLE);
+
+statement ok
+INSERT INTO orders SELECT i % 100, (i % 7)*1.0 FROM range(500) t(i);
+
+statement ok
+ALTER TABLE orders ADD PAC_LINK (uid) REFERENCES u(id);
+
+# ---------------------------------------------------------------------------
+# Phase C: SUM with dp_sum_bound clipping on a single PU table
+# ---------------------------------------------------------------------------
+
+# SUM requires dp_sum_bound — error if unset
+statement ok
+RESET dp_sum_bound;
+
+statement error
+SELECT SUM(id) FROM u;
+----
+dp_sum_bound
+
+# With bound set: query succeeds, result is noised around true sum
+# True sum of 0..99 = 4950. Clip at 100 → per-tuple contribution ≤ 100.
+# Noise scale = 100/1 = 100, std-dev = 100·√2 ≈ 141. Allow generous slack.
+statement ok
+SET dp_sum_bound = 100.0;
+
+query I
+SELECT abs(SUM(id) - 4950) < 2000 FROM u;
+----
+true
+
+# Output type preserved (HUGEINT for sum of BIGINT)
+query I
+SELECT typeof(SUM(id)) FROM u;
+----
+HUGEINT
+
+# Clipping takes effect: with bound=5, per-tuple contribution ≤ 5 → max sum ≤ 5 * 100 = 500
+# True unclipped sum is 4950; clipped sum should be ~500. Allow noise slack.
+statement ok
+SET dp_sum_bound = 5.0;
+
+query I
+SELECT abs(SUM(id) - 500) < 500 FROM u;
+----
+true
+
+# Negative values are clipped to -C
+statement ok
+CREATE TABLE signed_u (id BIGINT, v BIGINT);
+
+statement ok
+INSERT INTO signed_u SELECT i, CASE WHEN i % 2 = 0 THEN 1000 ELSE -1000 END FROM range(100) t(i);
+
+statement ok
+ALTER TABLE signed_u ADD PAC_KEY (id);
+
+statement ok
+ALTER TABLE signed_u SET PU;
+
+statement ok
+SET dp_sum_bound = 10.0;
+
+# True sum = 0 (balanced +1000/-1000). Clipped contribution is ±10.
+# Noise scale = 10/1 = 10, std-dev ≈ 14. Sum should stay near 0.
+query I
+SELECT abs(SUM(v)) < 200 FROM signed_u;
+----
+true
+
+# MIN still rejected
+statement error
+SELECT MIN(id) FROM u;
+----
+only COUNT and SUM
+
+# ---------------------------------------------------------------------------
+# Phase D: FK joins — elastic sensitivity = product of mf_K along chain
+# ---------------------------------------------------------------------------
+
+statement ok
+SET dp_epsilon = 1.0;
+
+# orders: 500 rows, uid = i % 100 → each user has exactly 5 orders → mf_K = 5
+# ES = 5, scale = 5/1.0 = 5, noise std ≈ 7. True COUNT = 500. Allow large slack.
+query I
+SELECT abs(COUNT(*) - 500) < 500 FROM u JOIN orders ON u.id = orders.uid;
+----
+true
+
+# COUNT type preserved (BIGINT) even after Laplace + cast
+query I
+SELECT typeof(COUNT(*)) FROM u JOIN orders ON u.id = orders.uid;
+----
+BIGINT
+
+# SUM with join: amount values in 0..6, all < dp_sum_bound=10 → no clipping
+# True sum = 500 * avg(0..6) = 500 * 3 = 1500
+# scale = 5 * 10 / 1.0 = 50, noise std ≈ 70. Allow 1000 slack.
+statement ok
+SET dp_sum_bound = 10.0;
+
+query I
+SELECT abs(SUM(amount) - 1500) < 1000 FROM u JOIN orders ON u.id = orders.uid;
+----
+true
+
+# SUM output type preserved (DOUBLE for sum of DOUBLE)
+query I
+SELECT typeof(SUM(amount)) FROM u JOIN orders ON u.id = orders.uid;
+----
+DOUBLE
+
+# Star/diamond joins rejected: reviews also links directly to u,
+# making it a star (u ← orders, u ← reviews) not a linear chain
+statement ok
+CREATE TABLE reviews (uid BIGINT, score INT);
+
+statement ok
+INSERT INTO reviews SELECT i % 100, i % 5 FROM range(200) t(i);
+
+statement ok
+ALTER TABLE reviews ADD PAC_LINK (uid) REFERENCES u(id);
+
+statement error
+SELECT COUNT(*) FROM u JOIN orders ON u.id = orders.uid JOIN reviews ON u.id = reviews.uid;
+----
+star/diamond
+
+# ---------------------------------------------------------------------------
+# Phase D: 2-hop FK chain — mf_K multiplicativity
+# customers2 ← customer_orders (mf_K=5) ← order_lines (mf_K=3) → ES = 15
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE customers2 (cust_id BIGINT);
+
+statement ok
+INSERT INTO customers2 SELECT i FROM range(50) t(i);
+
+statement ok
+ALTER TABLE customers2 ADD PAC_KEY (cust_id);
+
+statement ok
+ALTER TABLE customers2 SET PU;
+
+statement ok
+CREATE TABLE customer_orders (ord_id BIGINT, cust_id BIGINT);
+
+statement ok
+INSERT INTO customer_orders SELECT i, i % 50 FROM range(250) t(i);
+
+statement ok
+ALTER TABLE customer_orders ADD PAC_KEY (ord_id);
+
+statement ok
+ALTER TABLE customer_orders ADD PAC_LINK (cust_id) REFERENCES customers2(cust_id);
+
+statement ok
+CREATE TABLE order_lines (line_id BIGINT, ord_id BIGINT, price DOUBLE);
+
+statement ok
+INSERT INTO order_lines SELECT i, i % 250, (i % 5) * 1.0 FROM range(750) t(i);
+
+statement ok
+ALTER TABLE order_lines ADD PAC_KEY (line_id);
+
+statement ok
+ALTER TABLE order_lines ADD PAC_LINK (ord_id) REFERENCES customer_orders(ord_id);
+
+statement ok
+SET dp_epsilon = 1.0;
+RESET dp_sum_bound;
+
+# ES = 5 * 3 = 15, scale = 15, noise std ≈ 21. True COUNT = 750. Allow 1500 slack.
+query I
+SELECT abs(COUNT(*) - 750) < 1500
+FROM customers2
+JOIN customer_orders ON customers2.cust_id = customer_orders.cust_id
+JOIN order_lines ON customer_orders.ord_id = order_lines.ord_id;
+----
+true
+
+# ---------------------------------------------------------------------------
+# Phase E: smooth elastic sensitivity (dp_delta → (ε, δ)-DP)
+# ---------------------------------------------------------------------------
+
+# Single PU, no joins: mf_values=[], SES_β=1.0 → ES = 2*1.0 = 2.0 → scale = 2.0/ε
+statement ok
+SET dp_delta = 1e-6;
+SET dp_epsilon = 1.0;
+
+query I
+SELECT COUNT(*) IS NOT NULL AND abs(COUNT(*) - 100) < 300 FROM u;
+----
+true
+
+# 1-hop join: mf_K=5, β=ε/(2·ln(2/δ))≈0.034 → SES≈13 → ES=2*13=26 → very noisy but finite
+query I
+SELECT COUNT(*) IS NOT NULL AND COUNT(*) < 100000 FROM u JOIN orders ON u.id = orders.uid;
+----
+true
+
+statement ok
+RESET dp_delta;
+
+# ---------------------------------------------------------------------------
+# Utility comparison: pac_diffcols with dp_elastic
+# ---------------------------------------------------------------------------
+
+# Very high epsilon → Laplace scale ≈ 0 → COUNT unchanged after BIGINT cast → 0% error
+# pac_diffcols='0' uses positional matching (suitable for ungrouped aggregates)
+statement ok
+SET dp_epsilon = 10000.0;
+SET pac_diffcols = '0';
+
+# 100 rows, COUNT(*) = 100. Noise ≈ 0 at epsilon=10000 → error% = 0.
+query I
+SELECT COUNT(*) FROM u;
+----
+0
+
+statement ok
+SET pac_diffcols = NULL;
+SET dp_epsilon = 1.0;
+
+# ---------------------------------------------------------------------------
+# Deterministic tests — pac_noise = false (zero Laplace scale, exact results)
+# Mirrors pac_mi = 0 in PAC mode: compilation pipeline runs (clipping, FK chain,
+# sensitivity) but Laplace scale is forced to 0 → output is the exact aggregate.
+# ---------------------------------------------------------------------------
+
+statement ok
+SET pac_noise = false;
+
+# Exact COUNT
+query I
+SELECT COUNT(*) FROM u;
+----
+100
+
+query I
+SELECT typeof(COUNT(*)) FROM u;
+----
+BIGINT
+
+# SUM no clipping (bound=100 > max id=99): 0+1+…+99 = 4950
+statement ok
+SET dp_sum_bound = 100.0;
+
+query I
+SELECT SUM(id) FROM u;
+----
+4950
+
+query I
+SELECT typeof(SUM(id)) FROM u;
+----
+HUGEINT
+
+# SUM with clipping at 5: ids 0..4 contribute 0+1+2+3+4=10; ids 5..99 each contribute 5 (95 rows=475) → 485
+statement ok
+SET dp_sum_bound = 5.0;
+
+query I
+SELECT SUM(id) FROM u;
+----
+485
+
+# Symmetric clipping: v=±1000 clipped to ±10 → sum = 50*(+10) + 50*(-10) = 0
+statement ok
+SET dp_sum_bound = 10.0;
+
+query I
+SELECT SUM(v) FROM signed_u;
+----
+0
+
+# 1-hop JOIN COUNT: 500 orders (5 per user × 100 users)
+statement ok
+RESET dp_sum_bound;
+
+query I
+SELECT COUNT(*) FROM u JOIN orders ON u.id = orders.uid;
+----
+500
+
+# 1-hop JOIN SUM no clipping (amount 0..6, bound=10): true sum = 1494
+statement ok
+SET dp_sum_bound = 10.0;
+
+query I
+SELECT SUM(amount) FROM u JOIN orders ON u.id = orders.uid;
+----
+1494.0
+
+# 1-hop JOIN SUM with clipping (bound=3): values 4,5,6 → 3; per 7-cycle: 0+1+2+3+3+3+3=15;
+# 71 full cycles = 1065; remaining (i%7 for i=497,498,499) = 0+1+2 = 3; total = 1068
+statement ok
+SET dp_sum_bound = 3.0;
+
+query I
+SELECT SUM(amount) FROM u JOIN orders ON u.id = orders.uid;
+----
+1068.0
+
+# 2-hop chain COUNT: 750 order_lines (3 per order × 250 orders)
+statement ok
+RESET dp_sum_bound;
+
+query I
+SELECT COUNT(*) FROM customers2
+JOIN customer_orders ON customers2.cust_id = customer_orders.cust_id
+JOIN order_lines ON customer_orders.ord_id = order_lines.ord_id;
+----
+750
+
+# 2-hop SUM: price = (i%5)*1.0 for i=0..749; values 0..4 all ≤ bound=5 (no clipping)
+# 750/5=150 cycles × (0+1+2+3+4)=10 → 1500.0
+statement ok
+SET dp_sum_bound = 5.0;
+
+query I
+SELECT SUM(price) FROM customers2
+JOIN customer_orders ON customers2.cust_id = customer_orders.cust_id
+JOIN order_lines ON customer_orders.ord_id = order_lines.ord_id;
+----
+1500.0
+
+# pac_diffcols with pac_noise=false: exact match → error% = 0
+statement ok
+SET pac_diffcols = '0';
+RESET dp_sum_bound;
+
+query I
+SELECT COUNT(*) FROM u;
+----
+0
+
+statement ok
+SET pac_diffcols = NULL;
+
+statement ok
+SET pac_noise = true;
+

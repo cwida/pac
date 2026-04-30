@@ -41,6 +41,7 @@ struct PACTableMetadata {
 	vector<string> counter_columns; // Column names storing PAC counter lists (LIST<FLOAT>)
 	bool is_privacy_unit = false;   // True if created with CREATE PU TABLE or SET PAC
 	bool derived_pu = false;        // True if created via CTAS from a PU or derived_pu table
+	bool is_set_pu_op = false;      // Transient: SET PU op needs plan-time key validation (not serialized)
 
 	PACTableMetadata() = default;
 	explicit PACTableMetadata(string name) : table_name(std::move(name)) {

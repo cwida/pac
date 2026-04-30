@@ -574,6 +574,59 @@ bool IsPacNoiseEnabled(ClientContext &context, bool default_value) {
 	}
 }
 
+string GetPrivacyMode(ClientContext &context) {
+	Value v;
+	if (!context.TryGetCurrentSetting("privacy_mode", v) || v.IsNull()) {
+		return "pac";
+	}
+	string s = v.ToString();
+	std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return std::tolower(c); });
+	auto begin = s.find_first_not_of(" \t\n\r");
+	auto end = s.find_last_not_of(" \t\n\r");
+	if (begin == string::npos) {
+		return "pac";
+	}
+	return s.substr(begin, end - begin + 1);
+}
+
+double GetDpEpsilon(ClientContext &context, double default_value) {
+	Value v;
+	if (!context.TryGetCurrentSetting("dp_epsilon", v) || v.IsNull()) {
+		return default_value;
+	}
+	try {
+		return v.GetValue<double>();
+	} catch (...) {
+		return default_value;
+	}
+}
+
+bool TryGetDpSumBound(ClientContext &context, double &out) {
+	Value v;
+	if (!context.TryGetCurrentSetting("dp_sum_bound", v) || v.IsNull()) {
+		return false;
+	}
+	try {
+		out = v.GetValue<double>();
+		return true;
+	} catch (...) {
+		return false;
+	}
+}
+
+bool TryGetDpDelta(ClientContext &context, double &out) {
+	Value v;
+	if (!context.TryGetCurrentSetting("dp_delta", v) || v.IsNull()) {
+		return false;
+	}
+	try {
+		out = v.GetValue<double>();
+		return true;
+	} catch (...) {
+		return false;
+	}
+}
+
 // Add implementation for GetPacCompileMethod
 string GetPacCompileMethod(ClientContext &context, const string &default_method) {
 	Value v;
