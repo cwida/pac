@@ -220,7 +220,7 @@ This gives a formal (ε,δ)-DP guarantee at the **user level** — neighboring d
 
 ### Supported Aggregates and Operators
 
-Both modes rewrite standard aggregates: `SUM`, `COUNT`, `AVG`, `MIN`, `MAX`, and `COUNT(DISTINCT)`. Joins, subqueries (correlated and uncorrelated), `UNION`/`UNION ALL`, `GROUP BY`, `HAVING`, `ORDER BY`, and `LIMIT` all work. Window functions and `EXCEPT`/`INTERSECT` are not yet supported.
+PAC mode supports `SUM`, `COUNT`, `AVG`, `MIN`, `MAX`, and `COUNT(DISTINCT)`. DP-elastic supports `SUM`, `COUNT`, and `AVG` — `MIN` and `MAX` have unbounded sensitivity in DP and are not supported. Joins, subqueries (correlated and uncorrelated), `UNION`/`UNION ALL`, `GROUP BY`, `HAVING`, `ORDER BY`, and `LIMIT` all work. Window functions and `EXCEPT`/`INTERSECT` are not yet supported.
 
 ### DDL Quick Reference
 

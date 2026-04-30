@@ -63,10 +63,13 @@ The optimizer hook runs in `pre_optimize_function` — BEFORE DuckDB's built-in 
 
 ### DP-elastic pipeline phases (in order)
 
-1. **Compatibility check** (`privacy_compatibility_check.cpp`) — same structural checks; must be equijoins along the PRIVACY_LINK chain
-2. **FK chain extraction** (`dp_elastic_compiler.cpp:ExtractFKChain`) — validates the join path is a linear FK chain
-3. **Sensitivity computation** (`dp_elastic_compiler.cpp:ComputeMfK`) — per-table max frequency; global ES = ∏ mf; smooth ES with β = ε/(2·ln(2/δ)) when δ > 0
-4. **Aggregate rewrite** (`dp_elastic_compiler.cpp`) — SUM clipped to `[-dp_sum_bound, dp_sum_bound]`, then `dp_laplace_noise(agg, sensitivity/epsilon)` injected
+1. **Compatibility check** (`privacy_compatibility_check.cpp`) — same structural checks; FK chain may be implicit (derived from PRIVACY_LINK metadata when the PU table is absent from the SQL)
+2. **FK chain extraction** (`dp_elastic_compiler.cpp:ExtractFKChain`) — validates the chain is linear; supports both explicit joins and implicit (metadata-only) chains
+3. **AVG rewrite** (`dp_elastic_compiler.cpp:RewriteAvgAggregates`) — each `AVG(x)` becomes `SUM(x) + COUNT(*)` with ε/2 budget split per component
+4. **Sensitivity computation** (`dp_elastic_compiler.cpp:ComputeMfK`) — per-table max frequency; global ES = ∏ mf; smooth ES with β = ε/(2·ln(2/δ)) when δ > 0
+5. **Aggregate rewrite** (`dp_elastic_compiler.cpp`) — SUM clipped to `[-dp_sum_bound, dp_sum_bound]`, then `dp_laplace_noise(agg, sensitivity/epsilon)` injected
+6. **AVG ratio projection** (`dp_elastic_compiler.cpp:WrapAvgRatioProjection`) — for each rewritten AVG: `noised_SUM / max(1, noised_COUNT)`
+7. **τ-thresholding** (`dp_elastic_compiler.cpp:ApplyGroupSuppression`) — if `privacy_min_group_count` set, drops groups where `|noised| < threshold·√2·scale`
 
 ### Aggregate naming convention
 

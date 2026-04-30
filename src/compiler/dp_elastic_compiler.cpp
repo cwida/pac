@@ -3,8 +3,12 @@
 #include "query_processing/pac_plan_traversal.hpp"
 #include "privacy_debug.hpp"
 
+#include "duckdb/catalog/catalog.hpp"
+#include "duckdb/catalog/catalog_entry/aggregate_function_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
+#include "duckdb/common/constants.hpp"
 #include "duckdb/common/exception.hpp"
+#include "duckdb/function/function_binder.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/optimizer/column_binding_replacer.hpp"
 #include "duckdb/optimizer/optimizer.hpp"
@@ -38,6 +42,59 @@ struct DPFKChain {
 	// fk_cols[i] = FK column on tables[i] linking to tables[i+1]
 	vector<string> fk_cols;
 };
+
+// ----------------------------------------------------------------------------
+// AVG decomposition — each AVG(x) is rewritten to SUM(x) + COUNT(*) so we can
+// apply Laplace noise independently with ε/2 budget split on each component.
+// ----------------------------------------------------------------------------
+
+struct AvgInfo {
+	idx_t sum_pos;   // position of the AVG→SUM in the rewritten aggregate (in-place)
+	idx_t count_pos; // position of the appended COUNT(*) in the rewritten aggregate
+};
+
+// Bind a plain aggregate function (sum, count_star, etc.) by name.
+static unique_ptr<Expression> BindAggregateLocal(OptimizerExtensionInput &input, const string &func_name,
+                                                 unique_ptr<Expression> arg) {
+	FunctionBinder function_binder(input.context);
+	ErrorData error;
+	vector<unique_ptr<Expression>> children;
+	vector<LogicalType> arg_types;
+	if (arg) {
+		arg_types.push_back(arg->return_type);
+		children.push_back(std::move(arg));
+	}
+	auto &entry = Catalog::GetSystemCatalog(input.context)
+	                  .GetEntry<AggregateFunctionCatalogEntry>(input.context, DEFAULT_SCHEMA, func_name);
+	auto best = function_binder.BindFunction(entry.name, entry.functions, arg_types, error);
+	if (!best.IsValid()) {
+		throw InternalException("dp_elastic: failed to bind aggregate '" + func_name + "'");
+	}
+	auto func = entry.functions.GetFunctionByOffset(best.GetIndex());
+	return function_binder.BindAggregateFunction(func, std::move(children), nullptr, AggregateType::NON_DISTINCT);
+}
+
+// Replace each AVG(x) with SUM(x) in-place and append a COUNT(*) at the end.
+// Returns info pairing each (sum_pos, count_pos) for post-processing.
+static vector<AvgInfo> RewriteAvgAggregates(OptimizerExtensionInput &input, LogicalAggregate *agg) {
+	vector<AvgInfo> avg_infos;
+	idx_t n_original = agg->expressions.size();
+	for (idx_t i = 0; i < n_original; i++) {
+		auto &aggr = agg->expressions[i]->Cast<BoundAggregateExpression>();
+		if (aggr.function.name != "avg") {
+			continue;
+		}
+		auto arg = std::move(aggr.children[0]);
+		agg->expressions[i] = BindAggregateLocal(input, "sum", std::move(arg));
+		idx_t count_pos = agg->expressions.size();
+		agg->expressions.push_back(BindAggregateLocal(input, "count_star", nullptr));
+		avg_infos.push_back({i, count_pos});
+	}
+	if (!avg_infos.empty()) {
+		agg->ResolveOperatorTypes();
+	}
+	return avg_infos;
+}
 
 // ----------------------------------------------------------------------------
 // Plan walkers
@@ -205,14 +262,14 @@ static DPEligibility CheckDPEligibility(unique_ptr<LogicalOperator> &plan, const
 			throw InvalidInputException("dp_elastic: DISTINCT aggregates are not supported");
 		}
 		const string &name = a.function.name;
-		if (name != "count" && name != "count_star" && name != "sum") {
-			throw InvalidInputException("dp_elastic: only COUNT and SUM are supported (got '" + name + "')");
+		if (name != "count" && name != "count_star" && name != "sum" && name != "avg") {
+			throw InvalidInputException("dp_elastic: only COUNT, SUM, and AVG are supported (got '" + name + "')");
 		}
-		if (name == "sum" && a.children.size() != 1) {
-			throw InvalidInputException("dp_elastic: sum must have exactly one argument");
+		if ((name == "sum" || name == "avg") && a.children.size() != 1) {
+			throw InvalidInputException("dp_elastic: " + name + " must have exactly one argument");
 		}
-		if (name == "sum" && !a.children[0]->return_type.IsNumeric()) {
-			throw InvalidInputException("dp_elastic: SUM argument must be a numeric type (got '" +
+		if ((name == "sum" || name == "avg") && !a.children[0]->return_type.IsNumeric()) {
+			throw InvalidInputException("dp_elastic: " + name + " argument must be a numeric type (got '" +
 			                            a.children[0]->return_type.ToString() + "')");
 		}
 	}
@@ -315,10 +372,11 @@ static double ComputeElasticSensitivity(ClientContext &context, const DPFKChain 
 // Aggregate helpers
 // ----------------------------------------------------------------------------
 
+// Returns true if any aggregate requires dp_sum_bound (SUM or AVG, before AVG→SUM rewrite).
 static bool AggregateContainsSum(const LogicalAggregate *agg) {
 	for (auto &expr : agg->expressions) {
 		auto &a = expr->Cast<BoundAggregateExpression>();
-		if (a.function.name == "sum") {
+		if (a.function.name == "sum" || a.function.name == "avg") {
 			return true;
 		}
 	}
@@ -437,14 +495,17 @@ static NoiseProjection WrapAggregateWithLaplace(OptimizerExtensionInput &input, 
 }
 
 // ----------------------------------------------------------------------------
-// Group suppression filter — inserts LogicalFilter above the noise projection.
+// Group suppression filter — inserts LogicalFilter above `anchor`.
 // Drops groups where |noised_value| / (sqrt(2) * scale) < threshold for any agg.
-// This is a post-processing step (safe by data processing inequality).
+// col_types[ai] and agg_scales[ai] are indexed over the n_aggs output agg columns;
+// scale == 0 skips that column (e.g. AVG ratio output has complex scale).
+// Returns the inserted LogicalFilter*, or nullptr if no conditions were generated.
 // ----------------------------------------------------------------------------
 
-static void ApplyGroupSuppression(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
-                                  const NoiseProjection &noise_proj, idx_t n_groups, idx_t n_aggs,
-                                  const vector<double> &agg_scales, double threshold) {
+static LogicalFilter *ApplyGroupSuppression(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
+                                            LogicalOperator *anchor, idx_t source_proj_idx,
+                                            const vector<LogicalType> &col_types, idx_t n_groups, idx_t n_aggs,
+                                            const vector<double> &agg_scales, double threshold) {
 	vector<unique_ptr<Expression>> conditions;
 	for (idx_t ai = 0; ai < n_aggs; ai++) {
 		double scale = agg_scales[ai];
@@ -452,8 +513,8 @@ static void ApplyGroupSuppression(OptimizerExtensionInput &input, unique_ptr<Log
 			continue;
 		}
 		double suppress_bound = threshold * std::sqrt(2.0) * scale;
-		auto col_type = noise_proj.proj_types[n_groups + ai];
-		auto col_ref = make_uniq<BoundColumnRefExpression>(col_type, ColumnBinding(noise_proj.proj_idx, n_groups + ai));
+		auto col_ref =
+		    make_uniq<BoundColumnRefExpression>(col_types[ai], ColumnBinding(source_proj_idx, n_groups + ai));
 		auto col_as_double = BoundCastExpression::AddCastToType(input.context, std::move(col_ref), LogicalType::DOUBLE);
 		auto abs_col = input.optimizer.BindScalarFunction("abs", std::move(col_as_double));
 		auto bound_const = make_uniq<BoundConstantExpression>(Value::DOUBLE(suppress_bound));
@@ -461,20 +522,107 @@ static void ApplyGroupSuppression(OptimizerExtensionInput &input, unique_ptr<Log
 		                                                          std::move(abs_col), std::move(bound_const)));
 	}
 	if (conditions.empty()) {
-		return;
+		return nullptr;
 	}
 
 	auto filter = make_uniq<LogicalFilter>();
 	filter->expressions = std::move(conditions);
 
-	auto *slot = FindSlotForOperator(plan, noise_proj.proj_ptr);
+	auto *slot = FindSlotForOperator(plan, anchor);
 	if (!slot) {
-		throw InternalException("dp_elastic: could not locate noise projection for suppression filter");
+		throw InternalException("dp_elastic: could not locate anchor for suppression filter");
 	}
 	filter->children.push_back(std::move(*slot));
 	filter->ResolveOperatorTypes();
+	auto *filter_ptr = filter.get();
 	*slot = std::move(filter);
 	// LogicalFilter passes through all column bindings unchanged — no remapping needed
+	return filter_ptr;
+}
+
+// ----------------------------------------------------------------------------
+// AVG ratio projection — inserts a LogicalProjection above `insert_above` that
+// computes noised_SUM / max(1, noised_COUNT) for each AVG-rewritten position.
+// Non-AVG columns are passed through unchanged.
+// Returns {ratio_proj_idx, ratio_proj_ptr} for downstream use.
+// ----------------------------------------------------------------------------
+
+static std::pair<idx_t, LogicalProjection *>
+WrapAvgRatioProjection(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
+                       const NoiseProjection &noise_proj, const vector<AvgInfo> &avg_infos, idx_t n_groups,
+                       idx_t n_original_aggs, LogicalOperator *insert_above) {
+	D_ASSERT(!avg_infos.empty());
+
+	// Build lookup: original-agg-position → AvgInfo
+	std::unordered_map<idx_t, const AvgInfo *> avg_lookup;
+	for (auto &info : avg_infos) {
+		avg_lookup[info.sum_pos] = &info;
+	}
+
+	vector<unique_ptr<Expression>> proj_exprs;
+	proj_exprs.reserve(n_groups + n_original_aggs);
+
+	// Pass-through group columns
+	for (idx_t gi = 0; gi < n_groups; gi++) {
+		proj_exprs.push_back(
+		    make_uniq<BoundColumnRefExpression>(noise_proj.proj_types[gi], ColumnBinding(noise_proj.proj_idx, gi)));
+	}
+
+	// For each original agg position: pass-through or compute AVG ratio
+	for (idx_t ai = 0; ai < n_original_aggs; ai++) {
+		auto it = avg_lookup.find(ai);
+		if (it == avg_lookup.end()) {
+			// Non-AVG: pass the noised value through
+			auto col_type = noise_proj.proj_types[n_groups + ai];
+			proj_exprs.push_back(
+			    make_uniq<BoundColumnRefExpression>(col_type, ColumnBinding(noise_proj.proj_idx, n_groups + ai)));
+		} else {
+			// AVG: compute CAST(noised_sum AS DOUBLE) / greatest(CAST(noised_count AS DOUBLE), 1.0)
+			const AvgInfo &info = *it->second;
+			auto sum_type = noise_proj.proj_types[n_groups + info.sum_pos];
+			auto cnt_type = noise_proj.proj_types[n_groups + info.count_pos];
+			auto sum_ref = make_uniq<BoundColumnRefExpression>(
+			    sum_type, ColumnBinding(noise_proj.proj_idx, n_groups + info.sum_pos));
+			auto cnt_ref = make_uniq<BoundColumnRefExpression>(
+			    cnt_type, ColumnBinding(noise_proj.proj_idx, n_groups + info.count_pos));
+			auto sum_dbl = BoundCastExpression::AddCastToType(input.context, std::move(sum_ref), LogicalType::DOUBLE);
+			auto cnt_dbl = BoundCastExpression::AddCastToType(input.context, std::move(cnt_ref), LogicalType::DOUBLE);
+			auto one = make_uniq<BoundConstantExpression>(Value::DOUBLE(1.0));
+			auto safe_cnt = input.optimizer.BindScalarFunction("greatest", std::move(cnt_dbl), std::move(one));
+			// DuckDB registers "/" as "divide" for scalar functions
+			auto ratio = input.optimizer.BindScalarFunction("/", std::move(sum_dbl), std::move(safe_cnt));
+			proj_exprs.push_back(std::move(ratio));
+		}
+	}
+
+	idx_t ratio_idx = input.optimizer.binder.GenerateTableIndex();
+	auto ratio_proj = make_uniq<LogicalProjection>(ratio_idx, std::move(proj_exprs));
+
+	auto *slot = FindSlotForOperator(plan, insert_above);
+	if (!slot) {
+		throw InternalException("dp_elastic: could not locate insert point for AVG ratio projection");
+	}
+	auto old_node = std::move(*slot);
+	ratio_proj->children.push_back(std::move(old_node));
+	ratio_proj->ResolveOperatorTypes();
+	auto *ratio_ptr = ratio_proj.get();
+	*slot = std::move(ratio_proj);
+
+	// Remap upstream references: noise_proj group/agg cols → ratio_proj cols
+	ColumnBindingReplacer replacer;
+	for (idx_t gi = 0; gi < n_groups; gi++) {
+		replacer.replacement_bindings.emplace_back(ColumnBinding(noise_proj.proj_idx, gi),
+		                                           ColumnBinding(ratio_idx, gi));
+	}
+	for (idx_t ai = 0; ai < n_original_aggs; ai++) {
+		replacer.replacement_bindings.emplace_back(ColumnBinding(noise_proj.proj_idx, n_groups + ai),
+		                                           ColumnBinding(ratio_idx, n_groups + ai));
+	}
+	// Extra COUNT(*) positions are consumed inside ratio_proj — no upstream references
+	replacer.stop_operator = ratio_ptr;
+	replacer.VisitOperator(*plan);
+
+	return {ratio_idx, ratio_ptr};
 }
 
 // ----------------------------------------------------------------------------
@@ -498,12 +646,25 @@ void CompileDPElasticQuery(const PrivacyCompatibilityResult &check, OptimizerExt
 	auto eligibility = CheckDPEligibility(plan, privacy_units, check);
 	auto *agg = eligibility.top_agg;
 
+	// Rewrite AVG(x) → SUM(x) + COUNT(*) before bound/clipping checks.
+	// Each AVG uses ε/2 per component so the combined cost is still ε-DP.
+	auto avg_infos = RewriteAvgAggregates(input, agg);
+	idx_t n_original_aggs = agg->expressions.size() - avg_infos.size();
+	idx_t n_groups = agg->groups.size();
+
+	// Build fast lookup: which positions are AVG-derived (need budget split)?
+	std::unordered_set<idx_t> avg_positions;
+	for (auto &info : avg_infos) {
+		avg_positions.insert(info.sum_pos);
+		avg_positions.insert(info.count_pos);
+	}
+
 	double sum_bound = 0.0;
-	bool has_sum = AggregateContainsSum(agg);
+	bool has_sum = AggregateContainsSum(agg); // SUM or AVG→SUM
 	if (has_sum) {
 		if (!TryGetDpSumBound(input.context, sum_bound)) {
 			throw InvalidInputException(
-			    "dp_elastic: dp_sum_bound must be set for SUM aggregates (SET dp_sum_bound = <C>)");
+			    "dp_elastic: dp_sum_bound must be set for SUM and AVG aggregates (SET dp_sum_bound = <C>)");
 		}
 		if (sum_bound <= 0.0 || !std::isfinite(sum_bound)) {
 			throw InvalidInputException("dp_elastic: dp_sum_bound must be a positive finite number (got " +
@@ -520,12 +681,17 @@ void CompileDPElasticQuery(const PrivacyCompatibilityResult &check, OptimizerExt
 	// This mirrors pac_mi=0 for PAC and enables deterministic testing.
 	bool noise_enabled = IsPacNoiseEnabled(input.context, true);
 
+	// Build per-aggregate Laplace scales. AVG-derived positions use ε/2 (budget split),
+	// doubling the scale so that SUM+COUNT together consume exactly ε.
 	vector<double> agg_scales;
 	agg_scales.reserve(agg->expressions.size());
-	for (auto &expr : agg->expressions) {
-		auto &aggr = expr->Cast<BoundAggregateExpression>();
+	for (idx_t ai = 0; ai < agg->expressions.size(); ai++) {
+		auto &aggr = agg->expressions[ai]->Cast<BoundAggregateExpression>();
 		double sens = Sensitivity(aggr, sum_bound, es);
 		double scale = noise_enabled ? (sens / epsilon) : 0.0;
+		if (avg_positions.count(ai)) {
+			scale *= 2.0; // budget split: each AVG component uses ε/2
+		}
 		agg_scales.push_back(scale);
 		PRIVACY_DEBUG_PRINT("[DP_ELASTIC] agg '" + aggr.function.name + "' sensitivity=" + std::to_string(sens) +
 		                    " scale=" + std::to_string(scale));
@@ -534,15 +700,65 @@ void CompileDPElasticQuery(const PrivacyCompatibilityResult &check, OptimizerExt
 	auto noise_proj = WrapAggregateWithLaplace(input, plan, agg, agg_scales);
 
 	// τ-thresholding: drop groups where |noised_value| / (√2·scale) < threshold.
-	// Applied as a FILTER above the noise projection — safe post-processing by DPI.
+	// For AVG positions the ratio output has complex scale → scale=0 skips them.
+	// Applied as a FILTER directly above the noise projection (inside ratio_proj if AVGs present),
+	// then the AVG ratio projection is wrapped on top. Order matters: the filter conditions
+	// reference noise_proj bindings that remain valid through both the filter and ratio_proj.
 	Value threshold_val;
-	if (input.context.TryGetCurrentSetting("privacy_min_group_count", threshold_val) && !threshold_val.IsNull()) {
-		double threshold = threshold_val.GetValue<double>();
-		if (threshold > 0.0 && std::isfinite(threshold)) {
-			idx_t n_groups = agg->groups.size();
-			idx_t n_aggs = agg->expressions.size();
-			ApplyGroupSuppression(input, plan, noise_proj, n_groups, n_aggs, agg_scales, threshold);
+	double threshold = 0.0;
+	bool apply_suppression = input.context.TryGetCurrentSetting("privacy_min_group_count", threshold_val) &&
+	                         !threshold_val.IsNull() && (threshold = threshold_val.GetValue<double>()) > 0.0 &&
+	                         std::isfinite(threshold);
+
+	if (apply_suppression) {
+		// Suppression scales: 0 for AVG sum positions (ratio output, not directly Laplace),
+		// normal for everything else (including AVG-derived COUNT positions).
+		vector<double> suppress_scales(agg->expressions.size());
+		for (idx_t ai = 0; ai < agg->expressions.size(); ai++) {
+			bool is_avg_sum = std::any_of(avg_infos.begin(), avg_infos.end(),
+			                              [ai](const AvgInfo &info) { return info.sum_pos == ai; });
+			suppress_scales[ai] = is_avg_sum ? 0.0 : agg_scales[ai];
 		}
+		vector<LogicalType> noise_col_types(agg->expressions.size());
+		for (idx_t ai = 0; ai < agg->expressions.size(); ai++) {
+			noise_col_types[ai] = noise_proj.proj_types[n_groups + ai];
+		}
+		ApplyGroupSuppression(input, plan, noise_proj.proj_ptr, noise_proj.proj_idx, noise_col_types, n_groups,
+		                      agg->expressions.size(), suppress_scales, threshold);
+	}
+
+	// Wrap AVG: insert ratio projection above the (possibly filtered) noise projection.
+	if (!avg_infos.empty()) {
+		// Find the current top of the noise_proj subtree (may be a filter now)
+		auto *insert_above = FindSlotForOperator(plan, noise_proj.proj_ptr)
+		                         ? static_cast<LogicalOperator *>(noise_proj.proj_ptr)
+		                         : noise_proj.proj_ptr;
+		// Walk up: if a filter was inserted above noise_proj, insert_above should be the filter.
+		// FindSlotForOperator returns the slot *containing* noise_proj.proj_ptr. We need to
+		// determine if noise_proj.proj_ptr is now wrapped by a filter. Walk the plan to find the
+		// parent of noise_proj.proj_ptr.
+		struct ParentFinder : LogicalOperatorVisitor {
+			LogicalOperator *target;
+			LogicalOperator *parent = nullptr;
+			explicit ParentFinder(LogicalOperator *t) : target(t) {
+			}
+			void VisitOperator(LogicalOperator &op) override {
+				for (auto &child : op.children) {
+					if (child.get() == target) {
+						parent = &op;
+						return;
+					}
+				}
+				VisitOperatorChildren(op);
+			}
+		};
+		ParentFinder finder(noise_proj.proj_ptr);
+		finder.VisitOperator(*plan);
+		// If noise_proj has a parent (a filter), insert ratio above the parent; otherwise above noise_proj itself.
+		LogicalOperator *actual_top = (finder.parent && finder.parent->type == LogicalOperatorType::LOGICAL_FILTER)
+		                                  ? finder.parent
+		                                  : noise_proj.proj_ptr;
+		WrapAvgRatioProjection(input, plan, noise_proj, avg_infos, n_groups, n_original_aggs, actual_top);
 	}
 
 #if PRIVACY_DEBUG

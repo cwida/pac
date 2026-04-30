@@ -194,7 +194,7 @@ true
 statement error
 SELECT MIN(id) FROM u;
 ----
-only COUNT and SUM
+only COUNT, SUM, and AVG
 
 # ---------------------------------------------------------------------------
 # Phase D: FK joins — elastic sensitivity = product of mf_K along chain
@@ -526,6 +526,117 @@ SELECT COUNT(*) FROM no_link_table;
 
 statement ok
 DROP TABLE no_link_table;
+
+statement ok
+RESET dp_sum_bound;
+
+statement ok
+SET privacy_noise = true;
+
+# ---------------------------------------------------------------------------
+# Phase G: AVG via SUM/COUNT decomposition with ε/2 budget split
+# ---------------------------------------------------------------------------
+# AVG(x) = noised_SUM(clipped(x)) / max(1, noised_COUNT). Each component uses
+# ε/2 → combined cost is still ε-DP. Output type is DOUBLE.
+# ---------------------------------------------------------------------------
+
+# AVG requires dp_sum_bound — error if unset
+statement ok
+RESET dp_sum_bound;
+
+statement error
+SELECT AVG(id) FROM u;
+----
+dp_sum_bound
+
+# With bound=100 (no clipping): true avg of 0..99 = 49.5; noised result close
+statement ok
+SET dp_sum_bound = 100.0;
+
+query I
+SELECT abs(AVG(id) - 49.5) < 1000 FROM u;
+----
+true
+
+# Output type is DOUBLE (AVG always returns a floating point ratio)
+query I
+SELECT typeof(AVG(id)) FROM u;
+----
+DOUBLE
+
+# 1-hop join AVG: amount values in 0..6, bound=10 → no clipping. True avg = 1494/500 = 2.988
+statement ok
+SET dp_sum_bound = 10.0;
+
+query I
+SELECT abs(AVG(amount) - 2.988) < 100 FROM u JOIN orders ON u.id = orders.uid;
+----
+true
+
+# Implicit FK chain: AVG(amount) on orders without explicit join — same as the joined version
+query I
+SELECT abs(AVG(amount) - 2.988) < 100 FROM orders;
+----
+true
+
+# ---------------------------------------------------------------------------
+# Phase G: AVG deterministic tests (privacy_noise = false)
+# ---------------------------------------------------------------------------
+
+statement ok
+SET privacy_noise = false;
+
+# True avg without clipping: 0+1+...+99 / 100 = 49.5
+statement ok
+SET dp_sum_bound = 100.0;
+
+query I
+SELECT AVG(id) FROM u;
+----
+49.5
+
+# Clipping at 40: ids 0..39 unchanged; ids 40..99 → 40 (60 rows × 40 = 2400)
+# Clipped sum = 780 + 2400 = 3180; clipped avg = 3180/100 = 31.8
+statement ok
+SET dp_sum_bound = 40.0;
+
+query I
+SELECT AVG(id) FROM u;
+----
+31.8
+
+# 1-hop join AVG: bound=10 (no clipping); true sum=1494, count=500 → avg = 2.988
+statement ok
+SET dp_sum_bound = 10.0;
+
+query I
+SELECT AVG(amount) FROM u JOIN orders ON u.id = orders.uid;
+----
+2.988
+
+# Implicit FK chain (no explicit join) — same result
+query I
+SELECT AVG(amount) FROM orders;
+----
+2.988
+
+# 2-hop chain AVG: 750 lines, price=(i%5)*1.0; values 0..4 ≤ bound=5 (no clipping)
+# Sum = 150 * (0+1+2+3+4) = 1500; avg = 1500/750 = 2.0
+statement ok
+SET dp_sum_bound = 5.0;
+
+query I
+SELECT AVG(price) FROM customers2
+JOIN customer_orders ON customers2.cust_id = customer_orders.cust_id
+JOIN order_lines ON customer_orders.ord_id = order_lines.ord_id;
+----
+2.0
+
+# Implicit FK chain (2-hop, no explicit joins) — same result
+query I
+SELECT AVG(price) FROM order_lines;
+----
+2.0
 
 statement ok
 RESET dp_sum_bound;
