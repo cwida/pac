@@ -2,10 +2,10 @@
 // PAC Metadata Serialization
 //
 // This file implements JSON serialization and deserialization for PAC metadata.
-// It handles converting PACTableMetadata structures to/from JSON format and
+// It handles converting PrivacyTableMetadata structures to/from JSON format and
 // provides file I/O operations for persisting metadata across database sessions.
 //
-// Created by refactoring pac_parser.cpp on 1/22/26.
+// Created by refactoring privacy_parser.cpp on 1/22/26.
 //
 
 // IMPORTANT: <regex> must be included BEFORE duckdb headers on Windows MSVC
@@ -14,9 +14,9 @@
 #include <fstream>
 #include <sstream>
 
-#include "parser/pac_parser.hpp"
-#include "metadata/pac_metadata_manager.hpp"
-#include "metadata/pac_metadata_serialization.hpp"
+#include "parser/privacy_parser.hpp"
+#include "metadata/privacy_metadata_manager.hpp"
+#include "metadata/privacy_metadata_serialization.hpp"
 
 namespace duckdb {
 
@@ -25,7 +25,7 @@ namespace duckdb {
 // ============================================================================
 
 /**
- * SerializeToJSON: Converts a PACTableMetadata struct to JSON format
+ * SerializeToJSON: Converts a PrivacyTableMetadata struct to JSON format
  *
  * JSON Structure:
  * {
@@ -41,7 +41,7 @@ namespace duckdb {
  *   "protected_columns": ["o_totalprice", "o_orderdate"]
  * }
  */
-string PACMetadataManager::SerializeToJSON(const PACTableMetadata &metadata, const string &indent) const {
+string PrivacyMetadataManager::SerializeToJSON(const PrivacyTableMetadata &metadata, const string &indent) const {
 	std::stringstream ss;
 	ss << "{\n";
 	ss << indent << "  \"table_name\": \"" << metadata.table_name << "\",\n";
@@ -127,7 +127,7 @@ string PACMetadataManager::SerializeToJSON(const PACTableMetadata &metadata, con
  *
  * @return JSON string representing all table metadata
  */
-string PACMetadataManager::SerializeAllToJSON() const {
+string PrivacyMetadataManager::SerializeAllToJSON() const {
 	std::lock_guard<std::mutex> lock(metadata_mutex);
 	std::stringstream ss;
 	ss << "{\n  \"tables\": [\n";
@@ -156,7 +156,7 @@ string PACMetadataManager::SerializeAllToJSON() const {
  *
  * Throws IOException if the file can't be opened or written.
  */
-void PACMetadataManager::SaveToFile(const string &filepath) {
+void PrivacyMetadataManager::SaveToFile(const string &filepath) {
 	std::ofstream file(filepath);
 	if (!file.is_open()) {
 		throw IOException("Failed to open PAC metadata file for writing: " + filepath);
@@ -172,7 +172,7 @@ void PACMetadataManager::SaveToFile(const string &filepath) {
  *
  * Throws IOException if the file can't be opened or read.
  */
-void PACMetadataManager::LoadFromFile(const string &filepath) {
+void PrivacyMetadataManager::LoadFromFile(const string &filepath) {
 	std::ifstream file(filepath);
 	if (!file.is_open()) {
 		throw IOException("Failed to open PAC metadata file for reading: " + filepath);
@@ -190,14 +190,14 @@ void PACMetadataManager::LoadFromFile(const string &filepath) {
 // ============================================================================
 
 /**
- * DeserializeFromJSON: Parses JSON and constructs a PACTableMetadata struct
+ * DeserializeFromJSON: Parses JSON and constructs a PrivacyTableMetadata struct
  *
  * This function supports both old format (single local_column/referenced_column)
  * and new format (arrays local_columns/referenced_columns) for backward compatibility.
  */
-PACTableMetadata PACMetadataManager::DeserializeFromJSON(const string &json) {
+PrivacyTableMetadata PrivacyMetadataManager::DeserializeFromJSON(const string &json) {
 	// Simple JSON parsing (for production, consider using a proper JSON library)
-	PACTableMetadata metadata;
+	PrivacyTableMetadata metadata;
 
 	// Extract table name
 	std::regex table_name_regex(R"xxx("table_name"\s*:\s*"([^"]+)")xxx");
@@ -377,7 +377,7 @@ PACTableMetadata PACMetadataManager::DeserializeFromJSON(const string &json) {
  * for all tables. It expects the JSON to have a "tables" array containing individual
  * table objects.
  */
-void PACMetadataManager::DeserializeAllFromJSON(const string &json) {
+void PrivacyMetadataManager::DeserializeAllFromJSON(const string &json) {
 	std::lock_guard<std::mutex> lock(metadata_mutex);
 	table_metadata.clear();
 

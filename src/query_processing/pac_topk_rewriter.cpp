@@ -6,9 +6,9 @@
 //
 
 #include "query_processing/pac_topk_rewriter.hpp"
-#include "pac_debug.hpp"
+#include "privacy_debug.hpp"
 #include "duckdb/parser/parsed_data/create_scalar_function_info.hpp"
-#include "utils/pac_helpers.hpp"
+#include "utils/privacy_helpers.hpp"
 #include "aggregates/pac_aggregate.hpp"
 #include "categorical/pac_categorical_rewriter.hpp"
 
@@ -301,14 +301,14 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 	// Check the setting
 	bool pushdown_enabled = GetBooleanSetting(input.context, "pac_pushdown_topk", true);
 	if (!pushdown_enabled) {
-#if PAC_DEBUG
-		PAC_DEBUG_PRINT("PACTopKRule: pac_pushdown_topk is disabled, skipping");
+#if PRIVACY_DEBUG
+		PRIVACY_DEBUG_PRINT("PACTopKRule: pac_pushdown_topk is disabled, skipping");
 #endif
 		return;
 	}
 
-#if PAC_DEBUG
-	PAC_DEBUG_PRINT("PACTopKRule: Visiting node type=" + std::to_string(static_cast<int>(plan->type)));
+#if PRIVACY_DEBUG
+	PRIVACY_DEBUG_PRINT("PACTopKRule: Visiting node type=" + std::to_string(static_cast<int>(plan->type)));
 #endif
 
 	// Recurse into children first (bottom-up) so TopN nodes buried under
@@ -341,48 +341,49 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 	// Find TopN context at this node
 	TopKContext ctx = FindTopKContext(plan);
 	if (!ctx.topn || !ctx.aggregate) {
-#if PAC_DEBUG
+#if PRIVACY_DEBUG
 		if (!ctx.topn) {
-			PAC_DEBUG_PRINT("PACTopKRule: No TopN found at this node, skipping");
+			PRIVACY_DEBUG_PRINT("PACTopKRule: No TopN found at this node, skipping");
 		} else {
-			PAC_DEBUG_PRINT("PACTopKRule: TopN found but no aggregate child, skipping");
+			PRIVACY_DEBUG_PRINT("PACTopKRule: TopN found but no aggregate child, skipping");
 		}
 #endif
 		return;
 	}
 
-#if PAC_DEBUG
-	PAC_DEBUG_PRINT("PACTopKRule: Found TopN (limit=" + std::to_string(ctx.topn->limit) +
-	                ") above aggregate (groups=" + std::to_string(ctx.aggregate->groups.size()) +
-	                ", aggs=" + std::to_string(ctx.aggregate->expressions.size()) + ")");
+#if PRIVACY_DEBUG
+	PRIVACY_DEBUG_PRINT("PACTopKRule: Found TopN (limit=" + std::to_string(ctx.topn->limit) +
+	                    ") above aggregate (groups=" + std::to_string(ctx.aggregate->groups.size()) +
+	                    ", aggs=" + std::to_string(ctx.aggregate->expressions.size()) + ")");
 	if (ctx.has_intermediate_projection) {
-		PAC_DEBUG_PRINT("PACTopKRule: " + std::to_string(ctx.intermediate_projections.size()) +
-		                " intermediate projection(s) present");
+		PRIVACY_DEBUG_PRINT("PACTopKRule: " + std::to_string(ctx.intermediate_projections.size()) +
+		                    " intermediate projection(s) present");
 	}
 #endif
 
 	// Find PAC aggregates
 	vector<PacTopKAggInfo> pac_aggs = FindPacAggregates(*ctx.aggregate);
 	if (pac_aggs.empty()) {
-#if PAC_DEBUG
-		PAC_DEBUG_PRINT("PACTopKRule: No PAC aggregates found in aggregate node, skipping");
+#if PRIVACY_DEBUG
+		PRIVACY_DEBUG_PRINT("PACTopKRule: No PAC aggregates found in aggregate node, skipping");
 #endif
 		return;
 	}
 
-#if PAC_DEBUG
+#if PRIVACY_DEBUG
 	for (auto &info : pac_aggs) {
-		PAC_DEBUG_PRINT("PACTopKRule: Found PAC aggregate: " + info.original_name + " at index " +
-		                std::to_string(info.agg_index) + " binding=[" + std::to_string(info.agg_binding.table_index) +
-		                "." + std::to_string(info.agg_binding.column_index) + "]");
+		PRIVACY_DEBUG_PRINT("PACTopKRule: Found PAC aggregate: " + info.original_name + " at index " +
+		                    std::to_string(info.agg_index) + " binding=[" +
+		                    std::to_string(info.agg_binding.table_index) + "." +
+		                    std::to_string(info.agg_binding.column_index) + "]");
 	}
 #endif
 
 	// Check that at least one TopN order expression references a PAC aggregate
 	bool has_pac_order = false;
 	for (auto &order : ctx.topn->orders) {
-#if PAC_DEBUG
-		PAC_DEBUG_PRINT("PACTopKRule: Checking order expression: " + order.expression->ToString());
+#if PRIVACY_DEBUG
+		PRIVACY_DEBUG_PRINT("PACTopKRule: Checking order expression: " + order.expression->ToString());
 #endif
 		if (OrderExprReferencesPacAgg(*order.expression, pac_aggs, ctx.intermediate_projections, 0)) {
 			has_pac_order = true;
@@ -390,15 +391,15 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 		}
 	}
 	if (!has_pac_order) {
-#if PAC_DEBUG
-		PAC_DEBUG_PRINT("PACTopKRule: No TopN order expression references a PAC aggregate, skipping");
+#if PRIVACY_DEBUG
+		PRIVACY_DEBUG_PRINT("PACTopKRule: No TopN order expression references a PAC aggregate, skipping");
 #endif
 		return;
 	}
 
-#if PAC_DEBUG
-	PAC_DEBUG_PRINT("PACTopKRule: Detected TopN over PAC aggregate, rewriting for top-k pushdown");
-	PAC_DEBUG_PRINT("PACTopKRule: Found " + std::to_string(pac_aggs.size()) + " PAC aggregates to rewrite");
+#if PRIVACY_DEBUG
+	PRIVACY_DEBUG_PRINT("PACTopKRule: Detected TopN over PAC aggregate, rewriting for top-k pushdown");
+	PRIVACY_DEBUG_PRINT("PACTopKRule: Found " + std::to_string(pac_aggs.size()) + " PAC aggregates to rewrite");
 #endif
 
 	// Save original TopN orders for the ORDER BY we'll add on top after rewriting.
@@ -439,8 +440,8 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 	// ==========================================================================
 	// Step 1: Convert pac_* aggregates to pac_*_counters
 	// ==========================================================================
-#if PAC_DEBUG
-	PAC_DEBUG_PRINT("PACTopKRule: Step 1 - Converting PAC aggregates to _counters variants");
+#if PRIVACY_DEBUG
+	PRIVACY_DEBUG_PRINT("PACTopKRule: Step 1 - Converting PAC aggregates to _counters variants");
 #endif
 	for (auto &info : pac_aggs) {
 		auto &expr = agg.expressions[info.agg_index];
@@ -452,16 +453,16 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 		auto new_aggr = RebindAggregate(input.context, GetCountersVariant(bound_agg.function.name), std::move(children),
 		                                bound_agg.IsDistinct());
 		if (new_aggr) {
-#if PAC_DEBUG
-			PAC_DEBUG_PRINT("PACTopKRule:   Rebound " + info.original_name + " -> " +
-			                GetCountersVariant(info.original_name));
+#if PRIVACY_DEBUG
+			PRIVACY_DEBUG_PRINT("PACTopKRule:   Rebound " + info.original_name + " -> " +
+			                    GetCountersVariant(info.original_name));
 #endif
 			agg.expressions[info.agg_index] = std::move(new_aggr);
 		} else {
 			// Fallback: rename in place
-#if PAC_DEBUG
-			PAC_DEBUG_PRINT("PACTopKRule:   Fallback rename " + info.original_name + " -> " +
-			                GetCountersVariant(bound_agg.function.name));
+#if PRIVACY_DEBUG
+			PRIVACY_DEBUG_PRINT("PACTopKRule:   Fallback rename " + info.original_name + " -> " +
+			                    GetCountersVariant(bound_agg.function.name));
 #endif
 			bound_agg.function.name = GetCountersVariant(bound_agg.function.name);
 			bound_agg.function.return_type = list_type;
@@ -479,8 +480,8 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 	//         This projection passes through all existing columns and adds
 	//         pac_mean(counters) columns for ordering.
 	// ==========================================================================
-#if PAC_DEBUG
-	PAC_DEBUG_PRINT("PACTopKRule: Step 2 - Building mean projection");
+#if PRIVACY_DEBUG
+	PRIVACY_DEBUG_PRINT("PACTopKRule: Step 2 - Building mean projection");
 #endif
 	idx_t mean_proj_idx = binder.GenerateTableIndex();
 	vector<unique_ptr<Expression>> mean_proj_exprs;
@@ -664,17 +665,17 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 		// NoisedProj, but compound expressions (e.g. CONCAT using aggregate
 		// results) need scalar values at evaluation time.
 		// ------------------------------------------------------------------
-#if PAC_DEBUG
-		PAC_DEBUG_PRINT("PACTopKRule: Step A3b - Wrapping LIST refs in compound expressions");
+#if PRIVACY_DEBUG
+		PRIVACY_DEBUG_PRINT("PACTopKRule: Step A3b - Wrapping LIST refs in compound expressions");
 #endif
 		for (idx_t pi = 0; pi < ctx.intermediate_projections.size(); pi++) {
 			auto *proj = ctx.intermediate_projections[pi];
 			for (idx_t i = 0; i < proj->expressions.size(); i++) {
 				auto &expr = proj->expressions[i];
-#if PAC_DEBUG
-				PAC_DEBUG_PRINT("PACTopKRule:   A3b proj expr[" + std::to_string(i) +
-				                "] type=" + std::to_string((int)expr->type) +
-				                " return_type=" + expr->return_type.ToString() + " expr=" + expr->ToString());
+#if PRIVACY_DEBUG
+				PRIVACY_DEBUG_PRINT("PACTopKRule:   A3b proj expr[" + std::to_string(i) +
+				                    "] type=" + std::to_string((int)expr->type) +
+				                    " return_type=" + expr->return_type.ToString() + " expr=" + expr->ToString());
 #endif
 				if (expr->type == ExpressionType::BOUND_COLUMN_REF) {
 					continue;
@@ -682,8 +683,8 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 				std::function<void(unique_ptr<Expression> &)> WrapListRefs = [&](unique_ptr<Expression> &e) {
 					if (e->type == ExpressionType::BOUND_COLUMN_REF && e->return_type.id() == LogicalTypeId::LIST) {
 						auto binding = e->Cast<BoundColumnRefExpression>().binding;
-#if PAC_DEBUG
-						PAC_DEBUG_PRINT("PACTopKRule:     A3b WRAPPING LIST colref: " + e->ToString());
+#if PRIVACY_DEBUG
+						PRIVACY_DEBUG_PRINT("PACTopKRule:     A3b WRAPPING LIST colref: " + e->ToString());
 #endif
 						e = input.optimizer.BindScalarFunction("pac_noised", std::move(e));
 						// Cast back to original aggregate type (e.g. FLOAT→DOUBLE for AVG).
@@ -721,9 +722,9 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 						if (cast_expr.child->type == ExpressionType::BOUND_COLUMN_REF &&
 						    cast_expr.child->return_type.id() == LogicalTypeId::LIST) {
 							auto target_type = cast_expr.return_type;
-#if PAC_DEBUG
-							PAC_DEBUG_PRINT("PACTopKRule:     A3b REPLACING CAST(LIST->" + target_type.ToString() +
-							                ") with CAST(pac_noised()->" + target_type.ToString() + ")");
+#if PRIVACY_DEBUG
+							PRIVACY_DEBUG_PRINT("PACTopKRule:     A3b REPLACING CAST(LIST->" + target_type.ToString() +
+							                    ") with CAST(pac_noised()->" + target_type.ToString() + ")");
 #endif
 							auto noised = input.optimizer.BindScalarFunction("pac_noised", std::move(cast_expr.child));
 							e = BoundCastExpression::AddCastToType(input.context, std::move(noised), target_type);
@@ -800,10 +801,10 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 		// Before: plan(TopN) -> Proj_outer -> ... -> Proj_inner -> MeanProj -> Agg
 		// After:  OrderBy -> NoisedProj -> TopN -> Proj_outer -> ... -> Proj_inner -> MeanProj -> Agg
 		// ------------------------------------------------------------------
-#if PAC_DEBUG
-		PAC_DEBUG_PRINT("PACTopKRule: Step A6 - Reassembling plan tree (with intermediate projections)");
-		PAC_DEBUG_PRINT("PACTopKRule:   mean_proj table_index=" + std::to_string(mean_proj_idx));
-		PAC_DEBUG_PRINT("PACTopKRule:   noised_proj table_index=" + std::to_string(noised_proj_idx));
+#if PRIVACY_DEBUG
+		PRIVACY_DEBUG_PRINT("PACTopKRule: Step A6 - Reassembling plan tree (with intermediate projections)");
+		PRIVACY_DEBUG_PRINT("PACTopKRule:   mean_proj table_index=" + std::to_string(mean_proj_idx));
+		PRIVACY_DEBUG_PRINT("PACTopKRule:   noised_proj table_index=" + std::to_string(noised_proj_idx));
 #endif
 
 		noised_proj->children.push_back(std::move(plan));
@@ -883,10 +884,10 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 		}
 
 		// Step B3: Reassemble
-#if PAC_DEBUG
-		PAC_DEBUG_PRINT("PACTopKRule: Step B3 - Reassembling plan tree (no intermediate projections)");
-		PAC_DEBUG_PRINT("PACTopKRule:   mean_proj table_index=" + std::to_string(mean_proj_idx));
-		PAC_DEBUG_PRINT("PACTopKRule:   noised_proj table_index=" + std::to_string(noised_proj_idx));
+#if PRIVACY_DEBUG
+		PRIVACY_DEBUG_PRINT("PACTopKRule: Step B3 - Reassembling plan tree (no intermediate projections)");
+		PRIVACY_DEBUG_PRINT("PACTopKRule:   mean_proj table_index=" + std::to_string(mean_proj_idx));
+		PRIVACY_DEBUG_PRINT("PACTopKRule:   noised_proj table_index=" + std::to_string(noised_proj_idx));
 #endif
 
 		mean_proj->children.push_back(std::move(plan->children[0])); // aggregate
@@ -937,9 +938,9 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 		plan = std::move(order_by);
 	}
 
-#if PAC_DEBUG
-	PAC_DEBUG_PRINT("PACTopKRule: Successfully rewrote plan for top-k pushdown");
-	PAC_DEBUG_PRINT(plan->ToString());
+#if PRIVACY_DEBUG
+	PRIVACY_DEBUG_PRINT("PACTopKRule: Successfully rewrote plan for top-k pushdown");
+	PRIVACY_DEBUG_PRINT(plan->ToString());
 #endif
 }
 

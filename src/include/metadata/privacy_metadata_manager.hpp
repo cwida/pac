@@ -1,10 +1,10 @@
 //
 // PAC Metadata Manager Header
 //
-// This file declares the PACMetadataManager class which manages PAC table metadata in memory.
+// This file declares the PrivacyMetadataManager class which manages PAC table metadata in memory.
 // It provides thread-safe storage and retrieval of metadata for PAC-protected tables.
 //
-// Created by refactoring pac_parser.hpp on 1/22/26.
+// Created by refactoring privacy_parser.hpp on 1/22/26.
 //
 
 #ifndef PAC_METADATA_MANAGER_HPP
@@ -12,7 +12,7 @@
 
 #include "duckdb.hpp"
 #include "duckdb/main/client_context.hpp"
-#include "parser/pac_parser.hpp"
+#include "parser/privacy_parser.hpp"
 #include <string>
 #include <vector>
 #include <unordered_map>
@@ -21,16 +21,16 @@
 namespace duckdb {
 
 // Global PAC metadata manager - stores all PAC metadata in memory
-class PACMetadataManager {
+class PrivacyMetadataManager {
 public:
-	static PACMetadataManager &Get();
+	static PrivacyMetadataManager &Get();
 
 	// Add or update metadata for a table
-	void AddOrUpdateTable(const string &table_name, const PACTableMetadata &metadata);
+	void AddOrUpdateTable(const string &table_name, const PrivacyTableMetadata &metadata);
 
 	// Get metadata for a table (const and mutable variants)
-	const PACTableMetadata *GetTableMetadata(const string &table_name) const;
-	PACTableMetadata *GetMutableTableMetadata(const string &table_name);
+	const PrivacyTableMetadata *GetTableMetadata(const string &table_name) const;
+	PrivacyTableMetadata *GetMutableTableMetadata(const string &table_name);
 
 	// Check if a table has PAC metadata
 	bool HasMetadata(const string &table_name) const;
@@ -47,19 +47,19 @@ public:
 	// Get the metadata file path based on database path
 	static string GetMetadataFilePath(ClientContext &context);
 
-	// Serialization methods (implemented in pac_metadata_serialization.cpp)
-	string SerializeToJSON(const PACTableMetadata &metadata, const string &indent = "") const;
+	// Serialization methods (implemented in privacy_metadata_serialization.cpp)
+	string SerializeToJSON(const PrivacyTableMetadata &metadata, const string &indent = "") const;
 	string SerializeAllToJSON() const;
-	PACTableMetadata DeserializeFromJSON(const string &json);
+	PrivacyTableMetadata DeserializeFromJSON(const string &json);
 	void DeserializeAllFromJSON(const string &json);
 
-	// File I/O methods (implemented in pac_metadata_serialization.cpp)
+	// File I/O methods (implemented in privacy_metadata_serialization.cpp)
 	void SaveToFile(const string &filepath);
 	void LoadFromFile(const string &filepath);
 
 private:
-	PACMetadataManager() = default;
-	unordered_map<string, PACTableMetadata> table_metadata;
+	PrivacyMetadataManager() = default;
+	unordered_map<string, PrivacyTableMetadata> table_metadata;
 	mutable std::mutex metadata_mutex;
 };
 

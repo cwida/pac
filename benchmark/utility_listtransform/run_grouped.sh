@@ -118,7 +118,7 @@ for i in $(seq 1 "$RUNS"); do
         ELAPSED=$(( $(date +%s) - START ))
         printf "\rRun %d/%d  Q%d/%d  [%dm%02ds elapsed]" "$i" "$RUNS" "$qnum" "$NQUERIES" $((ELAPSED/60)) $((ELAPSED%60))
 
-        seed_sql="SET pac_seed = $i;"
+        seed_sql="SET privacy_seed = $i;"
 
         # Naive
         nsql=$(add_groupby "${NAIVE_QUERIES[$q]}" "$NGROUPS")

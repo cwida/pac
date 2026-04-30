@@ -2,13 +2,13 @@
 # description: Tests for PAC multi-privacy-unit behavior with varied PK/FK combinations
 # group: [sql]
 
-require pac
+require privacy
 
 statement ok
-PRAGMA clear_pac_metadata;
+PRAGMA clear_privacy_metadata;
 
 statement ok
-SET pac_seed = 42
+SET privacy_seed = 42
 
 statement ok
 SET pac_hash_repair = true
@@ -21,26 +21,26 @@ SET pac_mi = 0
 
 # Setup: create tables with various PK/FK configurations
 statement ok
-CREATE PU TABLE pu_a (id INTEGER, grp INTEGER, val INTEGER, PAC_KEY (id));
+CREATE PU TABLE pu_a (id INTEGER, grp INTEGER, val INTEGER, PRIVACY_KEY (id));
 
 statement ok
-CREATE PU TABLE pu_b (id INTEGER, gid INTEGER, val_b INTEGER, PAC_KEY (id));
+CREATE PU TABLE pu_b (id INTEGER, gid INTEGER, val_b INTEGER, PRIVACY_KEY (id));
 
 # composite key table (two-column PAC key)
 statement ok
-CREATE PU TABLE pu_c (a_id INTEGER, b_id INTEGER, val_c INTEGER, PAC_KEY (a_id, b_id));
+CREATE PU TABLE pu_c (a_id INTEGER, b_id INTEGER, val_c INTEGER, PRIVACY_KEY (a_id, b_id));
 
-# table with explicit PAC_KEY (rowid fallback no longer supported)
+# table with explicit PRIVACY_KEY (rowid fallback no longer supported)
 statement ok
 CREATE TABLE pu_no_pk (id INTEGER, grp INTEGER, val INTEGER);
 
 statement ok
-ALTER TABLE pu_no_pk ADD PAC_KEY (id);
+ALTER TABLE pu_no_pk ADD PRIVACY_KEY (id);
 
 statement ok
 ALTER TABLE pu_no_pk SET PU;
 
-# intermediate tables linking to privacy units via PAC_LINK
+# intermediate tables linking to privacy units via PRIVACY_LINK
 statement ok
 CREATE TABLE mid_ab (
     mid_id INTEGER,
@@ -90,25 +90,25 @@ INSERT INTO mid_no_pk SELECT i, i % 5, i * 4 FROM range(30) t(i);
 
 # Add PAC metadata for intermediate tables
 statement ok
-ALTER TABLE mid_ab ADD PAC_KEY (mid_id);
+ALTER TABLE mid_ab ADD PRIVACY_KEY (mid_id);
 
 statement ok
-ALTER TABLE mid_ab ADD PAC_LINK (a_fk) REFERENCES pu_a(id);
+ALTER TABLE mid_ab ADD PRIVACY_LINK (a_fk) REFERENCES pu_a(id);
 
 statement ok
-ALTER TABLE mid_ab ADD PAC_LINK (b_fk) REFERENCES pu_b(id);
+ALTER TABLE mid_ab ADD PRIVACY_LINK (b_fk) REFERENCES pu_b(id);
 
 statement ok
-ALTER TABLE mid_ac ADD PAC_KEY (mid_id);
+ALTER TABLE mid_ac ADD PRIVACY_KEY (mid_id);
 
 statement ok
-ALTER TABLE mid_ac ADD PAC_LINK (a_fk) REFERENCES pu_a(id);
+ALTER TABLE mid_ac ADD PRIVACY_LINK (a_fk) REFERENCES pu_a(id);
 
 statement ok
-ALTER TABLE mid_ac ADD PAC_LINK (c_fk_a, c_fk_b) REFERENCES pu_c(a_id, b_id);
+ALTER TABLE mid_ac ADD PRIVACY_LINK (c_fk_a, c_fk_b) REFERENCES pu_c(a_id, b_id);
 
 statement ok
-ALTER TABLE mid_no_pk ADD PAC_KEY (mid_id);
+ALTER TABLE mid_no_pk ADD PRIVACY_KEY (mid_id);
 
 # Basic aggregate on intermediate table joining single PU
 query I
@@ -205,16 +205,16 @@ statement ok
 INSERT INTO mid_all SELECT i, i % 10, i % 11, i % 5, i % 6, i % 5, i * 5 FROM range(30) t(i);
 
 statement ok
-ALTER TABLE mid_all ADD PAC_KEY (mid_id);
+ALTER TABLE mid_all ADD PRIVACY_KEY (mid_id);
 
 statement ok
-ALTER TABLE mid_all ADD PAC_LINK (a_fk) REFERENCES pu_a(id);
+ALTER TABLE mid_all ADD PRIVACY_LINK (a_fk) REFERENCES pu_a(id);
 
 statement ok
-ALTER TABLE mid_all ADD PAC_LINK (b_fk) REFERENCES pu_b(id);
+ALTER TABLE mid_all ADD PRIVACY_LINK (b_fk) REFERENCES pu_b(id);
 
 statement ok
-ALTER TABLE mid_all ADD PAC_LINK (c_fk_a, c_fk_b) REFERENCES pu_c(a_id, b_id);
+ALTER TABLE mid_all ADD PRIVACY_LINK (c_fk_a, c_fk_b) REFERENCES pu_c(a_id, b_id);
 
 # Four-way PU join: pu_a (single PK), pu_b (single PK), pu_c (composite PK), pu_no_pk (no PK/rowid)
 # This is the ultimate stress test - all PU types in one query

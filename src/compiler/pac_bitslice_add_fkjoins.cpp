@@ -1,11 +1,11 @@
 #include "compiler/pac_bitslice_add_fkjoins.hpp"
-#include "pac_debug.hpp"
-#include "utils/pac_helpers.hpp"
-#include "metadata/pac_compatibility_check.hpp"
+#include "privacy_debug.hpp"
+#include "utils/privacy_helpers.hpp"
+#include "metadata/privacy_compatibility_check.hpp"
 #include "compiler/pac_compiler_helpers.hpp"
 #include "query_processing/pac_plan_traversal.hpp"
-#include "metadata/pac_metadata_manager.hpp"
-#include "parser/pac_parser.hpp"
+#include "metadata/privacy_metadata_manager.hpp"
+#include "parser/privacy_parser.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
@@ -44,7 +44,7 @@ static bool TablesShareJoinSubtree(LogicalOperator *op, idx_t table_idx_a, idx_t
 // Compute the minimal set of columns needed when creating a new LogicalGet for a
 // missing FK table: PK columns, FK columns to path/PU tables, and columns
 // referenced by other tables' FKs.
-static vector<string> GetRequiredColumnsForTable(const PACCompatibilityResult &check, const string &table_name,
+static vector<string> GetRequiredColumnsForTable(const PrivacyCompatibilityResult &check, const string &table_name,
                                                  const vector<string> &fk_path, const vector<string> &privacy_units) {
 	vector<string> required_columns;
 	std::unordered_set<string> added_columns;
@@ -103,7 +103,7 @@ static vector<string> GetRequiredColumnsForTable(const PACCompatibilityResult &c
 		}
 		for (auto &other_fk_pair : other_it->second.fks) {
 			if (StringUtil::Lower(other_fk_pair.first) == table_name_lower) {
-				auto &metadata_mgr = PACMetadataManager::Get();
+				auto &metadata_mgr = PrivacyMetadataManager::Get();
 				auto *other_pac_metadata = metadata_mgr.GetTableMetadata(path_table);
 				if (other_pac_metadata) {
 					for (auto &link : other_pac_metadata->links) {
@@ -121,7 +121,7 @@ static vector<string> GetRequiredColumnsForTable(const PACCompatibilityResult &c
 			}
 		}
 	}
-#if PAC_DEBUG
+#if PRIVACY_DEBUG
 	if (!required_columns.empty()) {
 		string cols_str;
 		for (auto &col : required_columns) {
@@ -130,7 +130,8 @@ static vector<string> GetRequiredColumnsForTable(const PACCompatibilityResult &c
 			}
 			cols_str += col;
 		}
-		PAC_DEBUG_PRINT("GetRequiredColumnsForTable: Table " + table_name + " requires columns: [" + cols_str + "]");
+		PRIVACY_DEBUG_PRINT("GetRequiredColumnsForTable: Table " + table_name + " requires columns: [" + cols_str +
+		                    "]");
 	}
 #endif
 	return required_columns;
@@ -140,7 +141,7 @@ static vector<string> GetRequiredColumnsForTable(const PACCompatibilityResult &c
 // ChainJoinsFromGetMap
 // ============================================================================
 // Takes a map of table_name → LogicalGet, chains them onto a left node via CreateLogicalJoin.
-static unique_ptr<LogicalOperator> ChainJoinsFromGetMap(const PACCompatibilityResult &check, ClientContext &context,
+static unique_ptr<LogicalOperator> ChainJoinsFromGetMap(const PrivacyCompatibilityResult &check, ClientContext &context,
                                                         unique_ptr<LogicalOperator> left_node,
                                                         std::unordered_map<string, unique_ptr<LogicalGet>> &get_map,
                                                         const vector<string> &tables_to_join) {
@@ -165,7 +166,7 @@ static unique_ptr<LogicalOperator> ChainJoinsFromGetMap(const PACCompatibilityRe
 // Create LogicalGet nodes for each table in `tables_to_join`, then chain them
 // onto `existing_node` via FK-based joins.  Works for single or multiple tables.
 static unique_ptr<LogicalOperator>
-CreateGetsAndChainJoins(const PACCompatibilityResult &check, OptimizerExtensionInput &input,
+CreateGetsAndChainJoins(const PrivacyCompatibilityResult &check, OptimizerExtensionInput &input,
                         unique_ptr<LogicalOperator> &plan, unique_ptr<LogicalOperator> existing_node,
                         const vector<string> &tables_to_join, const vector<string> &fk_path,
                         const vector<string> &privacy_units) {
@@ -192,7 +193,7 @@ CreateGetsAndChainJoins(const PACCompatibilityResult &check, OptimizerExtensionI
 // in `tables_to_join` onto it.  Returns true if a join was created.
 // `skip_table` is excluded from candidates.  `skip_table_index` is an
 // additional table_index to skip (e.g. the blocked connecting table).
-static bool FindAccessibleAlternativeAndJoin(const PACCompatibilityResult &check, OptimizerExtensionInput &input,
+static bool FindAccessibleAlternativeAndJoin(const PrivacyCompatibilityResult &check, OptimizerExtensionInput &input,
                                              unique_ptr<LogicalOperator> &plan, const vector<string> &candidate_tables,
                                              const string &skip_table, idx_t skip_table_index,
                                              const vector<string> &tables_to_join, const vector<string> &fk_path,
@@ -214,10 +215,10 @@ static bool FindAccessibleAlternativeAndJoin(const PACCompatibilityResult &check
 			if (!AreTableColumnsAccessible(plan.get(), table_get.table_index)) {
 				continue;
 			}
-#if PAC_DEBUG
-			PAC_DEBUG_PRINT("FindAccessibleAlternativeAndJoin: Found accessible table " + candidate + " #" +
-			                std::to_string(table_get.table_index) + " - joining " +
-			                std::to_string(tables_to_join.size()) + " tables");
+#if PRIVACY_DEBUG
+			PRIVACY_DEBUG_PRINT("FindAccessibleAlternativeAndJoin: Found accessible table " + candidate + " #" +
+			                    std::to_string(table_get.table_index) + " - joining " +
+			                    std::to_string(tables_to_join.size()) + " tables");
 #endif
 			unique_ptr<LogicalOperator> current_node = (*table_node)->Copy(input.context);
 			auto joined = CreateGetsAndChainJoins(check, input, plan, std::move(current_node), tables_to_join, fk_path,
@@ -232,7 +233,7 @@ static bool FindAccessibleAlternativeAndJoin(const PACCompatibilityResult &check
 // ============================================================================
 // AddMissingFKJoins
 // ============================================================================
-void AddMissingFKJoins(const PACCompatibilityResult &check, OptimizerExtensionInput &input,
+void AddMissingFKJoins(const PrivacyCompatibilityResult &check, OptimizerExtensionInput &input,
                        unique_ptr<LogicalOperator> &plan, const vector<string> &gets_missing,
                        const vector<string> &gets_present, const vector<string> &fk_path,
                        const vector<string> &privacy_units, const CTETableMap &cte_map) {
@@ -359,9 +360,9 @@ void AddMissingFKJoins(const PACCompatibilityResult &check, OptimizerExtensionIn
 		    std::find(ordered_table_names.begin(), ordered_table_names.end(), fk_table_with_pu_reference) ==
 		        ordered_table_names.end()) {
 			if (connecting_table == fk_table_with_pu_reference) {
-#if PAC_DEBUG
-				PAC_DEBUG_PRINT("AddMissingFKJoins: Connecting table #" + std::to_string(connecting_table_idx) +
-				                " is already the FK table (" + fk_table_with_pu_reference + "), no join needed");
+#if PRIVACY_DEBUG
+				PRIVACY_DEBUG_PRINT("AddMissingFKJoins: Connecting table #" + std::to_string(connecting_table_idx) +
+				                    " is already the FK table (" + fk_table_with_pu_reference + "), no join needed");
 #endif
 			} else {
 				vector<unique_ptr<LogicalOperator> *> fk_nodes;
@@ -387,16 +388,16 @@ void AddMissingFKJoins(const PACCompatibilityResult &check, OptimizerExtensionIn
 
 				if (!can_use_delim_get) {
 					tables_to_join_for_instance.push_back(fk_table_with_pu_reference);
-#if PAC_DEBUG
-					PAC_DEBUG_PRINT("AddMissingFKJoins: Adding " + fk_table_with_pu_reference +
-					                " join for subquery instance #" + std::to_string(connecting_table_idx));
+#if PRIVACY_DEBUG
+					PRIVACY_DEBUG_PRINT("AddMissingFKJoins: Adding " + fk_table_with_pu_reference +
+					                    " join for subquery instance #" + std::to_string(connecting_table_idx));
 #endif
 				}
-#if PAC_DEBUG
+#if PRIVACY_DEBUG
 				else {
-					PAC_DEBUG_PRINT("AddMissingFKJoins: FK table " + fk_table_with_pu_reference +
-					                " accessible via DELIM_GET for subquery instance #" +
-					                std::to_string(connecting_table_idx));
+					PRIVACY_DEBUG_PRINT("AddMissingFKJoins: FK table " + fk_table_with_pu_reference +
+					                    " accessible via DELIM_GET for subquery instance #" +
+					                    std::to_string(connecting_table_idx));
 				}
 #endif
 			}
@@ -431,10 +432,10 @@ void AddMissingFKJoins(const PACCompatibilityResult &check, OptimizerExtensionIn
 
 					if (fk_table_idx == connecting_table_idx) {
 						if (AreTableColumnsAccessible(plan.get(), fk_table_idx)) {
-#if PAC_DEBUG
-							PAC_DEBUG_PRINT("AddMissingFKJoins: Connecting table #" +
-							                std::to_string(connecting_table_idx) +
-							                " IS the FK table - mapping to itself");
+#if PRIVACY_DEBUG
+							PRIVACY_DEBUG_PRINT("AddMissingFKJoins: Connecting table #" +
+							                    std::to_string(connecting_table_idx) +
+							                    " IS the FK table - mapping to itself");
 #endif
 							found_accessible_fk_table = true;
 							break;
@@ -444,10 +445,10 @@ void AddMissingFKJoins(const PACCompatibilityResult &check, OptimizerExtensionIn
 
 					bool shares_subtree = TablesShareJoinSubtree(plan.get(), connecting_table_idx, fk_table_idx);
 					if (shares_subtree && AreTableColumnsAccessible(plan.get(), fk_table_idx)) {
-#if PAC_DEBUG
-						PAC_DEBUG_PRINT("AddMissingFKJoins: Mapped connecting table #" +
-						                std::to_string(connecting_table_idx) + " to FK table " + present_table + " #" +
-						                std::to_string(fk_table_idx) + " for hashing (same subtree)");
+#if PRIVACY_DEBUG
+						PRIVACY_DEBUG_PRINT("AddMissingFKJoins: Mapped connecting table #" +
+						                    std::to_string(connecting_table_idx) + " to FK table " + present_table +
+						                    " #" + std::to_string(fk_table_idx) + " for hashing (same subtree)");
 #endif
 						found_accessible_fk_table = true;
 						break;
@@ -473,17 +474,17 @@ void AddMissingFKJoins(const PACCompatibilityResult &check, OptimizerExtensionIn
 		// Case 1: connecting table IS the FK table but blocked (SEMI/ANTI join)
 		if (connecting_table_name == fk_table_with_pu_reference) {
 			if (AreTableColumnsAccessible(plan.get(), connecting_table_idx)) {
-#if PAC_DEBUG
-				PAC_DEBUG_PRINT("AddMissingFKJoins: Connecting table #" + std::to_string(connecting_table_idx) + " (" +
-				                connecting_table_name +
-				                ") IS the FK table with PU reference and columns are accessible, no join needed");
+#if PRIVACY_DEBUG
+				PRIVACY_DEBUG_PRINT("AddMissingFKJoins: Connecting table #" + std::to_string(connecting_table_idx) +
+				                    " (" + connecting_table_name +
+				                    ") IS the FK table with PU reference and columns are accessible, no join needed");
 #endif
 				continue;
 			}
-#if PAC_DEBUG
-			PAC_DEBUG_PRINT("AddMissingFKJoins: Connecting table #" + std::to_string(connecting_table_idx) + " (" +
-			                connecting_table_name +
-			                ") IS the FK table but columns are NOT accessible (blocked by SEMI/ANTI join)");
+#if PRIVACY_DEBUG
+			PRIVACY_DEBUG_PRINT("AddMissingFKJoins: Connecting table #" + std::to_string(connecting_table_idx) + " (" +
+			                    connecting_table_name +
+			                    ") IS the FK table but columns are NOT accessible (blocked by SEMI/ANTI join)");
 #endif
 			// Find accessible alternative with direct FK to the blocked table
 			vector<string> candidates;
@@ -513,9 +514,9 @@ void AddMissingFKJoins(const PACCompatibilityResult &check, OptimizerExtensionIn
 			                                     DConstants::INVALID_INDEX, single_table, fk_path, privacy_units)) {
 				continue;
 			}
-#if PAC_DEBUG
-			PAC_DEBUG_PRINT("AddMissingFKJoins: No accessible alternative found for blocked FK table " +
-			                fk_table_with_pu_reference + " - skipping this connecting table instance");
+#if PRIVACY_DEBUG
+			PRIVACY_DEBUG_PRINT("AddMissingFKJoins: No accessible alternative found for blocked FK table " +
+			                    fk_table_with_pu_reference + " - skipping this connecting table instance");
 #endif
 			continue;
 		}
@@ -538,12 +539,12 @@ void AddMissingFKJoins(const PACCompatibilityResult &check, OptimizerExtensionIn
 			}
 		}
 
-#if PAC_DEBUG
-		PAC_DEBUG_PRINT("AddMissingFKJoins: No accessible FK table found, adding join chain for " +
-		                std::to_string(tables_to_add.size()) + " tables to connecting table #" +
-		                std::to_string(connecting_table_idx));
+#if PRIVACY_DEBUG
+		PRIVACY_DEBUG_PRINT("AddMissingFKJoins: No accessible FK table found, adding join chain for " +
+		                    std::to_string(tables_to_add.size()) + " tables to connecting table #" +
+		                    std::to_string(connecting_table_idx));
 		for (auto &t : tables_to_add) {
-			PAC_DEBUG_PRINT("  - " + t);
+			PRIVACY_DEBUG_PRINT("  - " + t);
 		}
 #endif
 		if (tables_to_add.empty()) {
@@ -552,10 +553,10 @@ void AddMissingFKJoins(const PACCompatibilityResult &check, OptimizerExtensionIn
 
 		// If connecting table is blocked, find an accessible alternative
 		if (!AreTableColumnsAccessible(plan.get(), connecting_table_idx)) {
-#if PAC_DEBUG
-			PAC_DEBUG_PRINT("AddMissingFKJoins: Connecting table #" + std::to_string(connecting_table_idx) + " (" +
-			                connecting_table_name +
-			                ") columns are NOT accessible - looking for accessible alternative");
+#if PRIVACY_DEBUG
+			PRIVACY_DEBUG_PRINT("AddMissingFKJoins: Connecting table #" + std::to_string(connecting_table_idx) + " (" +
+			                    connecting_table_name +
+			                    ") columns are NOT accessible - looking for accessible alternative");
 #endif
 			// Build candidate list from scanned tables that have FK paths to the PU
 			vector<string> candidates;
@@ -606,11 +607,11 @@ void AddMissingFKJoins(const PACCompatibilityResult &check, OptimizerExtensionIn
 					if (full_tables_to_add.empty()) {
 						continue;
 					}
-#if PAC_DEBUG
-					PAC_DEBUG_PRINT("AddMissingFKJoins: Found accessible table " + candidate + " #" +
-					                std::to_string(table_get.table_index) + " - adding full join chain:");
+#if PRIVACY_DEBUG
+					PRIVACY_DEBUG_PRINT("AddMissingFKJoins: Found accessible table " + candidate + " #" +
+					                    std::to_string(table_get.table_index) + " - adding full join chain:");
 					for (auto &t : full_tables_to_add) {
-						PAC_DEBUG_PRINT("  - " + t);
+						PRIVACY_DEBUG_PRINT("  - " + t);
 					}
 #endif
 					unique_ptr<LogicalOperator> current_node = (*table_node)->Copy(input.context);
@@ -627,8 +628,8 @@ void AddMissingFKJoins(const PACCompatibilityResult &check, OptimizerExtensionIn
 			if (found_alternative) {
 				continue;
 			}
-#if PAC_DEBUG
-			PAC_DEBUG_PRINT("AddMissingFKJoins: No accessible alternative found - skipping this instance");
+#if PRIVACY_DEBUG
+			PRIVACY_DEBUG_PRINT("AddMissingFKJoins: No accessible alternative found - skipping this instance");
 #endif
 			continue;
 		}

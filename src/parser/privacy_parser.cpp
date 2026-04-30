@@ -6,9 +6,9 @@
 // metadata manager, serialization, and parser helper modules.
 //
 // The heavy lifting has been refactored into separate modules:
-// - pac_metadata_manager.cpp: Metadata storage and retrieval
-// - pac_metadata_serialization.cpp: JSON serialization/deserialization
-// - pac_parser_helpers.cpp: SQL parsing and clause extraction
+// - privacy_metadata_manager.cpp: Metadata storage and retrieval
+// - privacy_metadata_serialization.cpp: JSON serialization/deserialization
+// - privacy_parser_helpers.cpp: SQL parsing and clause extraction
 //
 // Created by ila on 12/21/25.
 // Refactored on 1/22/26.
@@ -17,8 +17,8 @@
 // IMPORTANT: <regex> must be included BEFORE duckdb headers on Windows MSVC
 #include <regex>
 
-#include "parser/pac_parser.hpp"
-#include "pac_debug.hpp"
+#include "parser/privacy_parser.hpp"
+#include "privacy_debug.hpp"
 
 #include "duckdb/parser/parser.hpp"
 #include "duckdb/main/client_context.hpp"
@@ -169,15 +169,15 @@ static unique_ptr<FunctionData> PACDDLBindFunction(ClientContext &context, Table
 	// For ALTER PU TABLE, sql_to_execute is empty but table_name is set
 	// Only save to file if NOT an in-memory database
 	if (!sql_to_execute.empty() || !table_name.empty()) {
-		string metadata_path = PACMetadataManager::GetMetadataFilePath(context);
+		string metadata_path = PrivacyMetadataManager::GetMetadataFilePath(context);
 		// Don't save to file for in-memory databases
 		if (!metadata_path.empty()) {
-#if PAC_DEBUG
+#if PRIVACY_DEBUG
 			std::cerr << "[PAC DEBUG] PACDDLBindFunction: Saving metadata to: " << metadata_path << "\n";
 			std::cerr << "[PAC DEBUG] PACDDLBindFunction: table_name=" << table_name
 			          << ", sql_to_execute.empty()=" << sql_to_execute.empty() << "\n";
 #endif
-			PACMetadataManager::Get().SaveToFile(metadata_path);
+			PrivacyMetadataManager::Get().SaveToFile(metadata_path);
 		}
 	}
 
@@ -197,7 +197,7 @@ static void PACDDLExecuteFunction(ClientContext &context, TableFunctionInput &da
 }
 
 // ============================================================================
-// PACParserExtension Main Entry Points
+// PrivacyParserExtension Main Entry Points
 // ============================================================================
 
 /**
@@ -214,14 +214,14 @@ static void PACDDLExecuteFunction(ClientContext &context, TableFunctionInput &da
  * The order matters: DROP must be checked before ADD because DROP statements
  * also contain keywords like "protected" that might match ADD patterns.
  */
-ParserExtensionParseResult PACParserExtension::PACParseFunction(ParserExtensionInfo *info, const string &query) {
+ParserExtensionParseResult PrivacyParserExtension::PACParseFunction(ParserExtensionInfo *info, const string &query) {
 	// Clean up query - preserve spaces but remove semicolons, comments, and newlines
 	string clean_query = query;
 	// Remove semicolons
 	clean_query.erase(std::remove(clean_query.begin(), clean_query.end(), ';'), clean_query.end());
 	// Strip SQL line comments (-- ...) before collapsing newlines, so comment text
-	// doesn't leak into keyword detection (e.g. "-- PAC_LINKs define..." would falsely
-	// trigger PAC_LINK detection)
+	// doesn't leak into keyword detection (e.g. "-- PRIVACY_LINKs define..." would falsely
+	// trigger PRIVACY_LINK detection)
 	clean_query = std::regex_replace(clean_query, std::regex(R"(--[^\n]*)"), " ");
 	// Strip block comments (/* ... */)
 	clean_query = std::regex_replace(clean_query, std::regex(R"(/\*[\s\S]*?\*/)"), " ");
@@ -234,7 +234,7 @@ ParserExtensionParseResult PACParserExtension::PACParseFunction(ParserExtensionI
 	// Trim whitespace
 	StringUtil::Trim(clean_query);
 
-	PACTableMetadata metadata;
+	PrivacyTableMetadata metadata;
 	string stripped_sql;
 	bool is_pac_ddl = false;
 
@@ -257,12 +257,12 @@ ParserExtensionParseResult PACParserExtension::PACParseFunction(ParserExtensionI
 		string query_lower = StringUtil::Lower(clean_query);
 		// Detect "PAC KEY" / "PAC LINK" (space instead of underscore)
 		if (std::regex_search(query_lower, std::regex(R"(\bpac\s+key\b)"))) {
-			throw ParserException("Did you mean PAC_KEY (with underscore)? "
-			                      "Use PAC_KEY (col) to define the privacy unit key.");
+			throw ParserException("Did you mean PRIVACY_KEY (with underscore)? "
+			                      "Use PRIVACY_KEY (col) to define the privacy unit key.");
 		}
 		if (std::regex_search(query_lower, std::regex(R"(\bpac\s+link\b)"))) {
-			throw ParserException("Did you mean PAC_LINK (with underscore)? "
-			                      "Use PAC_LINK (col) REFERENCES table(ref_col).");
+			throw ParserException("Did you mean PRIVACY_LINK (with underscore)? "
+			                      "Use PRIVACY_LINK (col) REFERENCES table(ref_col).");
 		}
 		return ParserExtensionParseResult();
 	}
@@ -276,7 +276,7 @@ ParserExtensionParseResult PACParserExtension::PACParseFunction(ParserExtensionI
  *
  * This function:
  * 1. Validates metadata (columns exist, tables exist)
- * 2. Stores metadata in PACMetadataManager
+ * 2. Stores metadata in PrivacyMetadataManager
  * 3. Sets up a table function to execute the DDL
  *
  * For CREATE PU TABLE:
@@ -288,8 +288,8 @@ ParserExtensionParseResult PACParserExtension::PACParseFunction(ParserExtensionI
  *   - Validates columns/tables exist
  *   - Saves updated metadata to file
  */
-ParserExtensionPlanResult PACParserExtension::PACPlanFunction(ParserExtensionInfo *info, ClientContext &context,
-                                                              unique_ptr<ParserExtensionParseData> parse_data) {
+ParserExtensionPlanResult PrivacyParserExtension::PACPlanFunction(ParserExtensionInfo *info, ClientContext &context,
+                                                                  unique_ptr<ParserExtensionParseData> parse_data) {
 	auto &pac_data = dynamic_cast<PACParseData &>(*parse_data);
 
 	// Validate metadata before storing it
@@ -308,21 +308,21 @@ ParserExtensionPlanResult PACParserExtension::PACPlanFunction(ParserExtensionInf
 
 				auto &table = table_entry->Cast<TableCatalogEntry>();
 
-				// For SET PU: re-fetch metadata at plan time to pick up ADD PAC_KEY from same batch.
+				// For SET PU: re-fetch metadata at plan time to pick up ADD PRIVACY_KEY from same batch.
 				// In DuckDB's -c batch mode, all statements are parsed before any are planned, so
-				// PACMetadataManager is empty when SET PU is parsed. By plan time, ADD PAC_KEY's
+				// PrivacyMetadataManager is empty when SET PU is parsed. By plan time, ADD PRIVACY_KEY's
 				// plan function has already run and stored the key.
 				if (pac_data.metadata.is_set_pu_op) {
-					auto current = PACMetadataManager::Get().GetTableMetadata(pac_data.metadata.table_name);
+					auto current = PrivacyMetadataManager::Get().GetTableMetadata(pac_data.metadata.table_name);
 					if (current) {
 						pac_data.metadata = *current;
 						pac_data.metadata.is_privacy_unit = true;
 						pac_data.metadata.is_set_pu_op = false;
 					}
 					if (pac_data.metadata.primary_key_columns.empty()) {
-						throw CatalogException("ALTER TABLE SET PU requires a PAC_KEY. "
+						throw CatalogException("ALTER TABLE SET PU requires a PRIVACY_KEY. "
 						                       "First run: ALTER TABLE " +
-						                       pac_data.metadata.table_name + " ADD PAC_KEY (column_name)");
+						                       pac_data.metadata.table_name + " ADD PRIVACY_KEY (column_name)");
 					}
 				}
 
@@ -349,7 +349,7 @@ ParserExtensionPlanResult PACParserExtension::PACPlanFunction(ParserExtensionInf
 					// Check for cycles: a PAC table (privacy unit) cannot link to another PAC table
 					// Regular tables can link to PAC tables, but PAC tables cannot link to other PAC tables
 					if (pac_data.metadata.is_privacy_unit) {
-						auto ref_metadata = PACMetadataManager::Get().GetTableMetadata(link.referenced_table);
+						auto ref_metadata = PrivacyMetadataManager::Get().GetTableMetadata(link.referenced_table);
 						if (ref_metadata && ref_metadata->is_privacy_unit) {
 							throw CatalogException(
 							    "Cannot create PAC LINK from PAC table '" + pac_data.metadata.table_name +
@@ -376,7 +376,7 @@ ParserExtensionPlanResult PACParserExtension::PACPlanFunction(ParserExtensionInf
 					auto ref_table_entry = catalog.GetEntry(context, CatalogType::TABLE_ENTRY, DEFAULT_SCHEMA,
 					                                        link.referenced_table, OnEntryNotFound::RETURN_NULL);
 					if (ref_table_entry) {
-						auto ref_metadata = PACMetadataManager::Get().GetTableMetadata(link.referenced_table);
+						auto ref_metadata = PrivacyMetadataManager::Get().GetTableMetadata(link.referenced_table);
 						if (ref_metadata && ref_metadata->is_privacy_unit) {
 							throw CatalogException(
 							    "Cannot create PAC LINK from PAC table '" + pac_data.metadata.table_name +
@@ -389,7 +389,7 @@ ParserExtensionPlanResult PACParserExtension::PACPlanFunction(ParserExtensionInf
 		}
 
 		// Store metadata in global manager after validation
-		PACMetadataManager::Get().AddOrUpdateTable(pac_data.metadata.table_name, pac_data.metadata);
+		PrivacyMetadataManager::Get().AddOrUpdateTable(pac_data.metadata.table_name, pac_data.metadata);
 	}
 
 	// Store the SQL in thread-local storage for the bind function to execute

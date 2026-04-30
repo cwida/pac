@@ -1,8 +1,8 @@
 //
 // Test PAC Parser - JSON serialization and metadata management
 //
-#include "include/test_pac_parser.hpp"
-#include "parser/pac_parser.hpp"
+#include "include/test_privacy_parser.hpp"
+#include "parser/privacy_parser.hpp"
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -19,17 +19,17 @@ namespace duckdb {
 	} while (0)
 
 void TestPACParser::TestJSONSerialization() {
-	auto &manager = PACMetadataManager::Get();
+	auto &manager = PrivacyMetadataManager::Get();
 	manager.Clear(); // Ensure clean state at start
 
 	// Create test metadata
-	PACTableMetadata metadata("test_table");
+	PrivacyTableMetadata metadata("test_table");
 	metadata.primary_key_columns = {"id", "tenant_id"};
 	metadata.links.push_back(PACLink("user_id", "users", "id"));
 	metadata.links.push_back(PACLink("org_id", "organizations", "id"));
 	metadata.protected_columns = {"salary", "ssn", "email"};
 	// Serialize to JSON
-	string json = PACMetadataManager::Get().SerializeToJSON(metadata);
+	string json = PrivacyMetadataManager::Get().SerializeToJSON(metadata);
 	// Verify JSON contains expected fields
 	TEST_ASSERT(json.find("\"table_name\": \"test_table\"") != string::npos, "JSON should contain table_name");
 	TEST_ASSERT(json.find("\"id\"") != string::npos, "JSON should contain id");
@@ -38,7 +38,7 @@ void TestPACParser::TestJSONSerialization() {
 	TEST_ASSERT(json.find("\"users\"") != string::npos, "JSON should contain users");
 	TEST_ASSERT(json.find("\"salary\"") != string::npos, "JSON should contain salary");
 	// Deserialize from JSON
-	PACTableMetadata deserialized = PACMetadataManager::Get().DeserializeFromJSON(json);
+	PrivacyTableMetadata deserialized = PrivacyMetadataManager::Get().DeserializeFromJSON(json);
 	// Verify deserialized data matches original
 	TEST_ASSERT(deserialized.table_name == "test_table", "Deserialized table_name should match");
 	TEST_ASSERT(deserialized.primary_key_columns.size() == 2, "Deserialized should have 2 PK columns");
@@ -57,10 +57,10 @@ void TestPACParser::TestJSONSerialization() {
 }
 
 void TestPACParser::TestMetadataManager() {
-	auto &manager = PACMetadataManager::Get();
+	auto &manager = PrivacyMetadataManager::Get();
 	manager.Clear();
 	// Test adding metadata
-	PACTableMetadata metadata1("table1");
+	PrivacyTableMetadata metadata1("table1");
 	metadata1.primary_key_columns = {"id"};
 	manager.AddOrUpdateTable("table1", metadata1);
 	// Test getting metadata
@@ -73,7 +73,7 @@ void TestPACParser::TestMetadataManager() {
 	TEST_ASSERT(!manager.HasMetadata("nonexistent"), "Manager should not have nonexistent table");
 	TEST_ASSERT(manager.GetTableMetadata("nonexistent") == nullptr, "Nonexistent table should return null");
 	// Test adding another table
-	PACTableMetadata metadata2("table2");
+	PrivacyTableMetadata metadata2("table2");
 	metadata2.protected_columns = {"col1", "col2"};
 	manager.AddOrUpdateTable("table2", metadata2);
 	TEST_ASSERT(manager.HasMetadata("table2"), "Manager should have table2");
@@ -89,19 +89,19 @@ void TestPACParser::TestMetadataManager() {
 }
 
 void TestPACParser::TestFilePersistence() {
-	auto &manager = PACMetadataManager::Get();
+	auto &manager = PrivacyMetadataManager::Get();
 	manager.Clear();
 	// Create test metadata
-	PACTableMetadata metadata1("users");
+	PrivacyTableMetadata metadata1("users");
 	metadata1.primary_key_columns = {"user_id"};
 	metadata1.protected_columns = {"email", "password"};
 	manager.AddOrUpdateTable("users", metadata1);
-	PACTableMetadata metadata2("orders");
+	PrivacyTableMetadata metadata2("orders");
 	metadata2.primary_key_columns = {"order_id"};
 	metadata2.links.push_back(PACLink("user_id", "users", "user_id"));
 	manager.AddOrUpdateTable("orders", metadata2);
 	// Save to file
-	string filepath = "/tmp/test_pac_metadata_testdb_main.json";
+	string filepath = "/tmp/test_privacy_metadata_testdb_main.json";
 	manager.SaveToFile(filepath);
 	// Verify file exists and contains expected content
 	std::ifstream file(filepath);
@@ -135,22 +135,22 @@ void TestPACParser::TestFilePersistence() {
 
 void TestPACParser::TestCreatePACTableParsing() {
 	// Test basic CREATE PU TABLE
-	string sql1 = "CREATE PU TABLE users (id INTEGER, name VARCHAR, PAC_KEY (id))";
-	PACTableMetadata metadata1;
+	string sql1 = "CREATE PU TABLE users (id INTEGER, name VARCHAR, PRIVACY_KEY (id))";
+	PrivacyTableMetadata metadata1;
 	string stripped1;
-	bool result1 = PACParserExtension::ParseCreatePACTable(sql1, stripped1, metadata1);
+	bool result1 = PrivacyParserExtension::ParseCreatePACTable(sql1, stripped1, metadata1);
 	TEST_ASSERT(result1, "Parse should succeed");
 	TEST_ASSERT(metadata1.table_name == "users", "Table name should be users");
 	TEST_ASSERT(metadata1.primary_key_columns.size() == 1, "Should have 1 PK column");
 	TEST_ASSERT(metadata1.primary_key_columns[0] == "id", "PK column should be id");
 	TEST_ASSERT(stripped1.find("CREATE TABLE") != string::npos, "Stripped SQL should contain CREATE TABLE");
-	TEST_ASSERT(stripped1.find("PAC_KEY") == string::npos, "Stripped SQL should not contain PAC KEY");
-	// Test with PAC_KEY and PAC_LINK
-	string sql2 =
-	    "CREATE PU TABLE orders (id INTEGER, user_id INTEGER, PAC_KEY (id), PAC_LINK (user_id) REFERENCES users(id))";
-	PACTableMetadata metadata2;
+	TEST_ASSERT(stripped1.find("PRIVACY_KEY") == string::npos, "Stripped SQL should not contain PAC KEY");
+	// Test with PRIVACY_KEY and PRIVACY_LINK
+	string sql2 = "CREATE PU TABLE orders (id INTEGER, user_id INTEGER, PRIVACY_KEY (id), PRIVACY_LINK (user_id) "
+	              "REFERENCES users(id))";
+	PrivacyTableMetadata metadata2;
 	string stripped2;
-	bool result2 = PACParserExtension::ParseCreatePACTable(sql2, stripped2, metadata2);
+	bool result2 = PrivacyParserExtension::ParseCreatePACTable(sql2, stripped2, metadata2);
 	TEST_ASSERT(result2, "Parse should succeed");
 	TEST_ASSERT(metadata2.table_name == "orders", "Table name should be orders");
 	TEST_ASSERT(metadata2.primary_key_columns.size() == 1, "Should have 1 PK column");
@@ -162,10 +162,10 @@ void TestPACParser::TestCreatePACTableParsing() {
 	TEST_ASSERT(metadata2.links[0].referenced_columns.size() == 1, "Link should have 1 referenced column");
 	TEST_ASSERT(metadata2.links[0].referenced_columns[0] == "id", "Link referenced column should be id");
 	// Test with PROTECTED
-	string sql3 = "CREATE PU TABLE sensitive (id INTEGER, ssn VARCHAR, PAC_KEY (id), PROTECTED (ssn))";
-	PACTableMetadata metadata3;
+	string sql3 = "CREATE PU TABLE sensitive (id INTEGER, ssn VARCHAR, PRIVACY_KEY (id), PROTECTED (ssn))";
+	PrivacyTableMetadata metadata3;
 	string stripped3;
-	bool result3 = PACParserExtension::ParseCreatePACTable(sql3, stripped3, metadata3);
+	bool result3 = PrivacyParserExtension::ParseCreatePACTable(sql3, stripped3, metadata3);
 	TEST_ASSERT(result3, "Parse should succeed");
 	TEST_ASSERT(metadata3.table_name == "sensitive", "Table name should be sensitive");
 	TEST_ASSERT(metadata3.primary_key_columns.size() == 1, "Should have 1 PK column");
@@ -173,11 +173,11 @@ void TestPACParser::TestCreatePACTableParsing() {
 	TEST_ASSERT(metadata3.protected_columns[0] == "ssn", "Protected column should be ssn");
 	// Test with multiple clauses
 	string sql4 = "CREATE PU TABLE employees (emp_id INTEGER, dept_id INTEGER, salary INTEGER, "
-	              "PAC_KEY (emp_id), PAC_LINK (dept_id) REFERENCES departments(id), "
+	              "PRIVACY_KEY (emp_id), PRIVACY_LINK (dept_id) REFERENCES departments(id), "
 	              "PROTECTED (salary))";
-	PACTableMetadata metadata4;
+	PrivacyTableMetadata metadata4;
 	string stripped4;
-	bool result4 = PACParserExtension::ParseCreatePACTable(sql4, stripped4, metadata4);
+	bool result4 = PrivacyParserExtension::ParseCreatePACTable(sql4, stripped4, metadata4);
 	TEST_ASSERT(result4, "Parse should succeed");
 	TEST_ASSERT(metadata4.table_name == "employees", "Table name should be employees");
 	TEST_ASSERT(metadata4.primary_key_columns.size() == 1, "Should have 1 PK column");
@@ -186,18 +186,18 @@ void TestPACParser::TestCreatePACTableParsing() {
 }
 
 void TestPACParser::TestAlterTablePACParsing() {
-	auto &manager = PACMetadataManager::Get();
+	auto &manager = PrivacyMetadataManager::Get();
 	manager.Clear();
 	// First create a PU table with initial metadata
-	PACTableMetadata initial("products");
+	PrivacyTableMetadata initial("products");
 	initial.primary_key_columns = {"product_id"};
 	initial.is_privacy_unit = true;
 	manager.AddOrUpdateTable("products", initial);
 	// Test ALTER PU TABLE ADD PAC LINK
-	string sql1 = "ALTER PU TABLE products ADD PAC_LINK (category_id) REFERENCES categories(id)";
-	PACTableMetadata metadata1;
+	string sql1 = "ALTER PU TABLE products ADD PRIVACY_LINK (category_id) REFERENCES categories(id)";
+	PrivacyTableMetadata metadata1;
 	string stripped1;
-	bool result1 = PACParserExtension::ParseAlterTableAddPAC(sql1, stripped1, metadata1);
+	bool result1 = PrivacyParserExtension::ParseAlterTableAddPAC(sql1, stripped1, metadata1);
 	TEST_ASSERT(result1, "Parse should succeed");
 	TEST_ASSERT(metadata1.table_name == "products", "Table name should be products");
 	TEST_ASSERT(metadata1.primary_key_columns.size() == 1, "Should preserve existing PK");
@@ -206,9 +206,9 @@ void TestPACParser::TestAlterTablePACParsing() {
 	TEST_ASSERT(metadata1.links[0].local_columns[0] == "category_id", "Link local column should be category_id");
 	// Test ALTER PU TABLE ADD PROTECTED
 	string sql2 = "ALTER PU TABLE products ADD PROTECTED (price, cost)";
-	PACTableMetadata metadata2;
+	PrivacyTableMetadata metadata2;
 	string stripped2;
-	bool result2 = PACParserExtension::ParseAlterTableAddPAC(sql2, stripped2, metadata2);
+	bool result2 = PrivacyParserExtension::ParseAlterTableAddPAC(sql2, stripped2, metadata2);
 	TEST_ASSERT(result2, "Parse should succeed");
 	TEST_ASSERT(metadata2.table_name == "products", "Table name should be products");
 	TEST_ASSERT(metadata2.protected_columns.size() == 2, "Should have 2 protected columns");
@@ -216,14 +216,14 @@ void TestPACParser::TestAlterTablePACParsing() {
 }
 
 void TestPACParser::TestCompositeKeyParsing() {
-	auto &manager = PACMetadataManager::Get();
+	auto &manager = PrivacyMetadataManager::Get();
 	manager.Clear();
 
 	// Test single-column FK (should still work)
-	string sql1 = "ALTER TABLE orders ADD PAC_LINK (customer_id) REFERENCES customers(id)";
-	PACTableMetadata metadata1;
+	string sql1 = "ALTER TABLE orders ADD PRIVACY_LINK (customer_id) REFERENCES customers(id)";
+	PrivacyTableMetadata metadata1;
 	string stripped1;
-	bool result1 = PACParserExtension::ParseAlterTableAddPAC(sql1, stripped1, metadata1);
+	bool result1 = PrivacyParserExtension::ParseAlterTableAddPAC(sql1, stripped1, metadata1);
 	TEST_ASSERT(result1, "Single-column FK parse should succeed");
 	TEST_ASSERT(metadata1.table_name == "orders", "Table name should be orders");
 	TEST_ASSERT(metadata1.links.size() == 1, "Should have 1 link");
@@ -235,10 +235,10 @@ void TestPACParser::TestCompositeKeyParsing() {
 
 	// Test composite FK (two columns)
 	string sql2 =
-	    "ALTER TABLE lineitem ADD PAC_LINK (l_partkey, l_suppkey) REFERENCES partsupp(ps_partkey, ps_suppkey)";
-	PACTableMetadata metadata2;
+	    "ALTER TABLE lineitem ADD PRIVACY_LINK (l_partkey, l_suppkey) REFERENCES partsupp(ps_partkey, ps_suppkey)";
+	PrivacyTableMetadata metadata2;
 	string stripped2;
-	bool result2 = PACParserExtension::ParseAlterTableAddPAC(sql2, stripped2, metadata2);
+	bool result2 = PrivacyParserExtension::ParseAlterTableAddPAC(sql2, stripped2, metadata2);
 	TEST_ASSERT(result2, "Composite FK parse should succeed");
 	TEST_ASSERT(metadata2.table_name == "lineitem", "Table name should be lineitem");
 	TEST_ASSERT(metadata2.links.size() == 1, "Should have 1 link");
@@ -253,10 +253,10 @@ void TestPACParser::TestCompositeKeyParsing() {
 	            "Second referenced column should be ps_suppkey");
 
 	// Test composite FK with spaces (three columns)
-	string sql3 = "ALTER TABLE complex ADD PAC_LINK (col1, col2, col3) REFERENCES target(ref1, ref2, ref3)";
-	PACTableMetadata metadata3;
+	string sql3 = "ALTER TABLE complex ADD PRIVACY_LINK (col1, col2, col3) REFERENCES target(ref1, ref2, ref3)";
+	PrivacyTableMetadata metadata3;
 	string stripped3;
-	bool result3 = PACParserExtension::ParseAlterTableAddPAC(sql3, stripped3, metadata3);
+	bool result3 = PrivacyParserExtension::ParseAlterTableAddPAC(sql3, stripped3, metadata3);
 	TEST_ASSERT(result3, "Three-column composite FK parse should succeed");
 	TEST_ASSERT(metadata3.table_name == "complex", "Table name should be complex");
 	TEST_ASSERT(metadata3.links.size() == 1, "Should have 1 link");
@@ -270,11 +270,12 @@ void TestPACParser::TestCompositeKeyParsing() {
 	TEST_ASSERT(metadata3.links[0].referenced_columns[2] == "ref3", "Third referenced column should be ref3");
 
 	// Test CREATE PU TABLE with composite FK
-	string sql4 = "CREATE PU TABLE items (item_id INTEGER, part_id INTEGER, supplier_id INTEGER, "
-	              "PAC_KEY (item_id), PAC_LINK (part_id, supplier_id) REFERENCES partsupplier(ps_part, ps_supplier))";
-	PACTableMetadata metadata4;
+	string sql4 =
+	    "CREATE PU TABLE items (item_id INTEGER, part_id INTEGER, supplier_id INTEGER, "
+	    "PRIVACY_KEY (item_id), PRIVACY_LINK (part_id, supplier_id) REFERENCES partsupplier(ps_part, ps_supplier))";
+	PrivacyTableMetadata metadata4;
 	string stripped4;
-	bool result4 = PACParserExtension::ParseCreatePACTable(sql4, stripped4, metadata4);
+	bool result4 = PrivacyParserExtension::ParseCreatePACTable(sql4, stripped4, metadata4);
 	TEST_ASSERT(result4, "CREATE PU TABLE with composite FK should succeed");
 	TEST_ASSERT(metadata4.table_name == "items", "Table name should be items");
 	TEST_ASSERT(metadata4.links.size() == 1, "Should have 1 link");
@@ -284,12 +285,12 @@ void TestPACParser::TestCompositeKeyParsing() {
 	TEST_ASSERT(metadata4.links[0].local_columns[1] == "supplier_id", "Second local column should be supplier_id");
 
 	// Test serialization and deserialization of composite keys
-	PACTableMetadata serialize_test("test_composite");
+	PrivacyTableMetadata serialize_test("test_composite");
 	serialize_test.primary_key_columns = {"id"};
 	serialize_test.links.push_back(PACLink(vector<string> {"col1", "col2"}, "target", vector<string> {"ref1", "ref2"}));
 	serialize_test.protected_columns = {"sensitive"};
 
-	string json = PACMetadataManager::Get().SerializeToJSON(serialize_test);
+	string json = PrivacyMetadataManager::Get().SerializeToJSON(serialize_test);
 	TEST_ASSERT(json.find("\"local_columns\"") != string::npos, "JSON should contain local_columns array");
 	TEST_ASSERT(json.find("\"referenced_columns\"") != string::npos, "JSON should contain referenced_columns array");
 	TEST_ASSERT(json.find("\"col1\"") != string::npos, "JSON should contain col1");
@@ -297,7 +298,7 @@ void TestPACParser::TestCompositeKeyParsing() {
 	TEST_ASSERT(json.find("\"ref1\"") != string::npos, "JSON should contain ref1");
 	TEST_ASSERT(json.find("\"ref2\"") != string::npos, "JSON should contain ref2");
 
-	PACTableMetadata deserialized = PACMetadataManager::Get().DeserializeFromJSON(json);
+	PrivacyTableMetadata deserialized = PrivacyMetadataManager::Get().DeserializeFromJSON(json);
 	TEST_ASSERT(deserialized.table_name == "test_composite", "Deserialized table name should match");
 	TEST_ASSERT(deserialized.links.size() == 1, "Deserialized should have 1 link");
 	TEST_ASSERT(deserialized.links[0].local_columns.size() == 2, "Deserialized link should have 2 local columns");
@@ -316,26 +317,26 @@ void TestPACParser::TestCompositeKeyParsing() {
 void TestPACParser::TestRegexPatterns() {
 	// Test ExtractTableName with various formats
 	string sql1 = "CREATE PU TABLE users (id INTEGER)";
-	string table1 = PACParserExtension::ExtractTableName(sql1, true);
+	string table1 = PrivacyParserExtension::ExtractTableName(sql1, true);
 	TEST_ASSERT(table1 == "users", "Should extract table name from CREATE PU TABLE");
 
 	string sql2 = "CREATE TABLE IF NOT EXISTS products (id INTEGER)";
-	string table2 = PACParserExtension::ExtractTableName(sql2, true);
+	string table2 = PrivacyParserExtension::ExtractTableName(sql2, true);
 	TEST_ASSERT(table2 == "products", "Should extract table name from CREATE TABLE IF NOT EXISTS");
 
 	string sql3 = "ALTER TABLE orders ADD COLUMN status VARCHAR";
-	string table3 = PACParserExtension::ExtractTableName(sql3, false);
+	string table3 = PrivacyParserExtension::ExtractTableName(sql3, false);
 	TEST_ASSERT(table3 == "orders", "Should extract table name from ALTER TABLE");
 
 	// Test ExtractPACPrimaryKey
 	vector<string> pk_cols1;
-	bool pk_result1 = PACParserExtension::ExtractPACPrimaryKey("PAC_KEY (id)", pk_cols1);
+	bool pk_result1 = PrivacyParserExtension::ExtractPACPrimaryKey("PRIVACY_KEY (id)", pk_cols1);
 	TEST_ASSERT(pk_result1, "Should extract single PK column");
 	TEST_ASSERT(pk_cols1.size() == 1, "Should have 1 PK column");
 	TEST_ASSERT(pk_cols1[0] == "id", "PK column should be id");
 
 	vector<string> pk_cols2;
-	bool pk_result2 = PACParserExtension::ExtractPACPrimaryKey("PAC_KEY (user_id, tenant_id)", pk_cols2);
+	bool pk_result2 = PrivacyParserExtension::ExtractPACPrimaryKey("PRIVACY_KEY (user_id, tenant_id)", pk_cols2);
 	TEST_ASSERT(pk_result2, "Should extract composite PK");
 	TEST_ASSERT(pk_cols2.size() == 2, "Should have 2 PK columns");
 	TEST_ASSERT(pk_cols2[0] == "user_id", "First PK should be user_id");
@@ -343,7 +344,7 @@ void TestPACParser::TestRegexPatterns() {
 
 	// Test ExtractPACLink
 	PACLink link1;
-	bool link_result1 = PACParserExtension::ExtractPACLink("PAC_LINK (user_id) REFERENCES users(id)", link1);
+	bool link_result1 = PrivacyParserExtension::ExtractPACLink("PRIVACY_LINK (user_id) REFERENCES users(id)", link1);
 	TEST_ASSERT(link_result1, "Should extract single-column link");
 	TEST_ASSERT(link1.local_columns.size() == 1, "Link should have 1 local column");
 	TEST_ASSERT(link1.local_columns[0] == "user_id", "Local column should be user_id");
@@ -352,21 +353,22 @@ void TestPACParser::TestRegexPatterns() {
 	TEST_ASSERT(link1.referenced_columns[0] == "id", "Referenced column should be id");
 
 	PACLink link2;
-	bool link_result2 = PACParserExtension::ExtractPACLink(
-	    "PAC_LINK (part_id, supplier_id) REFERENCES partsupplier(ps_part, ps_supplier)", link2);
+	bool link_result2 = PrivacyParserExtension::ExtractPACLink(
+	    "PRIVACY_LINK (part_id, supplier_id) REFERENCES partsupplier(ps_part, ps_supplier)", link2);
 	TEST_ASSERT(link_result2, "Should extract composite link");
 	TEST_ASSERT(link2.local_columns.size() == 2, "Link should have 2 local columns");
 	TEST_ASSERT(link2.referenced_columns.size() == 2, "Link should have 2 referenced columns");
 
 	// Test ExtractProtectedColumns
 	vector<string> protected1;
-	bool protected_result1 = PACParserExtension::ExtractProtectedColumns("PROTECTED (salary)", protected1);
+	bool protected_result1 = PrivacyParserExtension::ExtractProtectedColumns("PROTECTED (salary)", protected1);
 	TEST_ASSERT(protected_result1, "Should extract single protected column");
 	TEST_ASSERT(protected1.size() == 1, "Should have 1 protected column");
 	TEST_ASSERT(protected1[0] == "salary", "Protected column should be salary");
 
 	vector<string> protected2;
-	bool protected_result2 = PACParserExtension::ExtractProtectedColumns("PROTECTED (salary, ssn, email)", protected2);
+	bool protected_result2 =
+	    PrivacyParserExtension::ExtractProtectedColumns("PROTECTED (salary, ssn, email)", protected2);
 	TEST_ASSERT(protected_result2, "Should extract multiple protected columns");
 	TEST_ASSERT(protected2.size() == 3, "Should have 3 protected columns");
 	TEST_ASSERT(protected2[0] == "salary", "First protected column should be salary");
@@ -375,20 +377,20 @@ void TestPACParser::TestRegexPatterns() {
 
 	// Test StripPACClauses
 	string sql_with_pac = "CREATE PU TABLE test (id INTEGER, user_id INTEGER, salary INTEGER, "
-	                      "PAC_KEY (id), PAC_LINK (user_id) REFERENCES users(id), PROTECTED (salary))";
-	string stripped = PACParserExtension::StripPACClauses(sql_with_pac);
-	TEST_ASSERT(stripped.find("PAC_KEY") == string::npos, "Stripped SQL should not contain PAC KEY");
-	TEST_ASSERT(stripped.find("PAC_LINK") == string::npos, "Stripped SQL should not contain PAC LINK");
+	                      "PRIVACY_KEY (id), PRIVACY_LINK (user_id) REFERENCES users(id), PROTECTED (salary))";
+	string stripped = PrivacyParserExtension::StripPACClauses(sql_with_pac);
+	TEST_ASSERT(stripped.find("PRIVACY_KEY") == string::npos, "Stripped SQL should not contain PAC KEY");
+	TEST_ASSERT(stripped.find("PRIVACY_LINK") == string::npos, "Stripped SQL should not contain PAC LINK");
 	TEST_ASSERT(stripped.find("PROTECTED") == string::npos, "Stripped SQL should not contain PROTECTED");
 	TEST_ASSERT(stripped.find("id INTEGER") != string::npos, "Stripped SQL should still contain column definitions");
 }
 
 void TestPACParser::TestDropPACConstraints() {
-	auto &manager = PACMetadataManager::Get();
+	auto &manager = PrivacyMetadataManager::Get();
 	manager.Clear();
 
 	// Setup: Create metadata with protected columns and links
-	PACTableMetadata metadata("drop_test_table");
+	PrivacyTableMetadata metadata("drop_test_table");
 	metadata.primary_key_columns = {"id"};
 	metadata.protected_columns = {"col1", "col2", "col3"};
 	metadata.links.push_back(PACLink("ref1", "ref_table", "id"));
@@ -400,7 +402,7 @@ void TestPACParser::TestDropPACConstraints() {
 	TEST_ASSERT(current->protected_columns.size() == 3, "Should have 3 protected columns initially");
 
 	// Simulate dropping col1
-	PACTableMetadata updated1 = *current;
+	PrivacyTableMetadata updated1 = *current;
 	updated1.protected_columns.erase(
 	    std::remove(updated1.protected_columns.begin(), updated1.protected_columns.end(), "col1"),
 	    updated1.protected_columns.end());
@@ -415,10 +417,10 @@ void TestPACParser::TestDropPACConstraints() {
 	                current->protected_columns.end(),
 	            "col2 should still exist");
 
-	// Test removing PAC_LINK (single column)
+	// Test removing PRIVACY_LINK (single column)
 	TEST_ASSERT(current->links.size() == 2, "Should have 2 links initially");
 
-	PACTableMetadata updated2 = *current;
+	PrivacyTableMetadata updated2 = *current;
 	updated2.links.erase(std::remove_if(updated2.links.begin(), updated2.links.end(),
 	                                    [](const PACLink &link) {
 		                                    return link.local_columns.size() == 1 && link.local_columns[0] == "ref1";
@@ -431,7 +433,7 @@ void TestPACParser::TestDropPACConstraints() {
 	TEST_ASSERT(current->links[0].local_columns.size() == 2, "Remaining link should be composite");
 
 	// Test removing composite PAC LINK
-	PACTableMetadata updated3 = *current;
+	PrivacyTableMetadata updated3 = *current;
 	updated3.links.erase(std::remove_if(updated3.links.begin(), updated3.links.end(),
 	                                    [](const PACLink &link) {
 		                                    return link.local_columns.size() == 2 && link.local_columns[0] == "key1" &&
@@ -453,19 +455,19 @@ void TestPACParser::TestDropPACConstraints() {
 }
 
 void TestPACParser::TestDropTableCleanup() {
-	auto &manager = PACMetadataManager::Get();
+	auto &manager = PrivacyMetadataManager::Get();
 	manager.Clear();
 
 	// Setup: Create tables with links
-	PACTableMetadata target_table("target_table");
+	PrivacyTableMetadata target_table("target_table");
 	target_table.primary_key_columns = {"id"};
 	manager.AddOrUpdateTable("target_table", target_table);
 
-	PACTableMetadata link_table1("link_table1");
+	PrivacyTableMetadata link_table1("link_table1");
 	link_table1.links.push_back(PACLink("target_id", "target_table", "id"));
 	manager.AddOrUpdateTable("link_table1", link_table1);
 
-	PACTableMetadata link_table2("link_table2");
+	PrivacyTableMetadata link_table2("link_table2");
 	link_table2.links.push_back(PACLink("target_id", "target_table", "id"));
 	link_table2.links.push_back(PACLink("other_id", "other_table", "id"));
 	manager.AddOrUpdateTable("link_table2", link_table2);
@@ -498,7 +500,7 @@ void TestPACParser::TestDropTableCleanup() {
 
 		if (has_link) {
 			// Remove the link
-			PACTableMetadata updated = *metadata;
+			PrivacyTableMetadata updated = *metadata;
 			updated.links.erase(
 			    std::remove_if(updated.links.begin(), updated.links.end(),
 			                   [](const PACLink &link) { return link.referenced_table == "target_table"; }),

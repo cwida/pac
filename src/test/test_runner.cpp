@@ -6,7 +6,7 @@
 #include "include/test_compiler_functions.hpp"
 #include "include/test_schema_metadata.hpp"
 #include "include/test_plan_traversal.hpp"
-#include "include/test_pac_parser.hpp"
+#include "include/test_privacy_parser.hpp"
 
 int main() {
 	std::cerr << "===========================================\n";

@@ -1,4 +1,4 @@
-#include "utils/pac_helpers.hpp"
+#include "utils/privacy_helpers.hpp"
 
 #include <sstream>
 #include <functional>
@@ -31,8 +31,8 @@
 #include <queue>
 
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
-#include "core/pac_optimizer.hpp"
-#include "parser/pac_parser.hpp"
+#include "core/privacy_optimizer.hpp"
+#include "parser/privacy_parser.hpp"
 #include "duckdb/planner/binder.hpp"
 
 using idx_set = std::unordered_set<idx_t>;
@@ -307,9 +307,9 @@ void ReplaceNode(unique_ptr<LogicalOperator> &root, unique_ptr<LogicalOperator> 
 	}
 }
 
-// Find PAC_KEY column names for the given table.
+// Find PRIVACY_KEY column names for the given table.
 // Only uses PAC metadata (no database PRIMARY KEY detection).
-// Returns empty vector when no PAC_KEY is defined.
+// Returns empty vector when no PRIVACY_KEY is defined.
 vector<string> FindPacKey(ClientContext &context, const string &table_name) {
 	Catalog &catalog = Catalog::GetCatalog(context, DatabaseManager::GetDefaultDatabase(context));
 
@@ -342,7 +342,7 @@ vector<string> FindPacKey(ClientContext &context, const string &table_name) {
 		unqualified = table_name.substr(dot_pos + 1);
 	}
 
-	auto &metadata_mgr = PACMetadataManager::Get();
+	auto &metadata_mgr = PrivacyMetadataManager::Get();
 	auto *pac_meta = metadata_mgr.GetTableMetadata(unqualified);
 	if (!pac_meta || pac_meta->primary_key_columns.empty()) {
 		return {};
@@ -371,7 +371,7 @@ vector<string> FindPacKey(ClientContext &context, const string &table_name) {
 	return {};
 }
 
-// Find PAC_LINK relationships declared on the given table.
+// Find PRIVACY_LINK relationships declared on the given table.
 // Returns a vector of (referenced_table_name, local_column_names) pairs.
 // Only uses PAC metadata (no database FOREIGN KEY detection).
 vector<std::pair<string, vector<string>>> FindPacLinks(ClientContext &context, const string &table_name) {
@@ -384,7 +384,7 @@ vector<std::pair<string, vector<string>>> FindPacLinks(ClientContext &context, c
 		unqualified_table_name = table_name.substr(dot_pos + 1);
 	}
 
-	auto &metadata_mgr = PACMetadataManager::Get();
+	auto &metadata_mgr = PrivacyMetadataManager::Get();
 	auto *pac_metadata = metadata_mgr.GetTableMetadata(unqualified_table_name);
 
 	if (pac_metadata) {
@@ -396,8 +396,8 @@ vector<std::pair<string, vector<string>>> FindPacLinks(ClientContext &context, c
 	return result;
 }
 
-// Find the referenced columns on the parent table for a specific PAC_LINK relationship.
-// Looks up PAC_LINK metadata on `table_name` that references `ref_table` and returns
+// Find the referenced columns on the parent table for a specific PRIVACY_LINK relationship.
+// Looks up PRIVACY_LINK metadata on `table_name` that references `ref_table` and returns
 // the referenced_columns from that link.
 vector<string> FindReferencedPKColumns(ClientContext &context, const string &table_name, const string &ref_table) {
 	string ref_lower = StringUtil::Lower(ref_table);
@@ -409,7 +409,7 @@ vector<string> FindReferencedPKColumns(ClientContext &context, const string &tab
 		unqualified = table_name.substr(dot_pos + 1);
 	}
 
-	auto &metadata_mgr = PACMetadataManager::Get();
+	auto &metadata_mgr = PrivacyMetadataManager::Get();
 	auto *pac_meta = metadata_mgr.GetTableMetadata(unqualified);
 	if (pac_meta) {
 		for (auto &link : pac_meta->links) {
@@ -422,8 +422,8 @@ vector<string> FindReferencedPKColumns(ClientContext &context, const string &tab
 	return {};
 }
 
-// Find PAC_LINK path(s) from any of `table_names` to any of `privacy_units`.
-// Performs a BFS over outgoing PAC_LINK edges to find the shortest path from each start
+// Find PRIVACY_LINK path(s) from any of `table_names` to any of `privacy_units`.
+// Performs a BFS over outgoing PRIVACY_LINK edges to find the shortest path from each start
 // table to any privacy unit. Returns a map from the original start table string to the path
 // (vector of table names from start to privacy unit inclusive).
 std::unordered_map<string, vector<string>> FindPacLinkPath(ClientContext &context, const vector<string> &privacy_units,
@@ -563,7 +563,7 @@ int64_t GetPacM(ClientContext &context, int64_t default_m) {
 
 bool IsPacNoiseEnabled(ClientContext &context, bool default_value) {
 	Value v;
-	context.TryGetCurrentSetting("pac_noise", v);
+	context.TryGetCurrentSetting("privacy_noise", v);
 	if (v.IsNull()) {
 		return default_value;
 	}

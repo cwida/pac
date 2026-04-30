@@ -783,7 +783,7 @@ static void RegisterPacNoisedClipMinMaxFunctions(ExtensionLoader &loader) {
 	loader.RegisterFunction(std::move(info));
 }
 
-// Public registration functions (called from pac_extension.cpp)
+// Public registration functions (called from privacy_extension.cpp)
 void RegisterPacClipMinFunctions(ExtensionLoader &loader) {
 	RegisterPacClipMinMaxCountersFunctions<false>(loader);
 }

@@ -2,13 +2,13 @@
 # description: Test pac_clip_sum and pac_noised_clip_sum aggregate functions with clipping
 # group: [sql]
 
-require pac
+require privacy
 
 statement ok
-PRAGMA clear_pac_metadata;
+PRAGMA clear_privacy_metadata;
 
 statement ok
-SET pac_seed = 42
+SET privacy_seed = 42
 
 statement ok
 SET threads = 1
@@ -199,7 +199,7 @@ statement ok
 CREATE TABLE compiler_test (id INTEGER, value INTEGER)
 
 statement ok
-ALTER TABLE compiler_test ADD PAC_KEY (id)
+ALTER TABLE compiler_test ADD PRIVACY_KEY (id)
 
 statement ok
 ALTER TABLE compiler_test SET PU

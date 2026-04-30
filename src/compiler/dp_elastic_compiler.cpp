@@ -1,7 +1,7 @@
 #include "compiler/dp_elastic_compiler.hpp"
-#include "utils/pac_helpers.hpp"
+#include "utils/privacy_helpers.hpp"
 #include "query_processing/pac_plan_traversal.hpp"
-#include "pac_debug.hpp"
+#include "privacy_debug.hpp"
 
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/common/exception.hpp"
@@ -68,7 +68,7 @@ static unique_ptr<LogicalOperator> *FindSlotForOperator(unique_ptr<LogicalOperat
 // FK chain extraction — validates linear chain structure, detects self-joins
 // ----------------------------------------------------------------------------
 
-static DPFKChain ExtractFKChain(const PACCompatibilityResult &check, const vector<LogicalGet *> &gets,
+static DPFKChain ExtractFKChain(const PrivacyCompatibilityResult &check, const vector<LogicalGet *> &gets,
                                 const vector<string> &privacy_units) {
 	(void)privacy_units;
 
@@ -103,7 +103,8 @@ static DPFKChain ExtractFKChain(const PACCompatibilityResult &check, const vecto
 	for (auto &non_pu : check.scanned_non_pu_tables) {
 		auto it = check.fk_paths.find(non_pu);
 		if (it == check.fk_paths.end()) {
-			throw InvalidInputException("dp_elastic: table '" + non_pu + "' has no PAC_LINK path to the privacy unit");
+			throw InvalidInputException("dp_elastic: table '" + non_pu +
+			                            "' has no PRIVACY_LINK path to the privacy unit");
 		}
 		if (!longest_path || it->second.size() > longest_path->size()) {
 			longest_path = &it->second;
@@ -169,7 +170,7 @@ struct DPEligibility {
 };
 
 static DPEligibility CheckDPEligibility(unique_ptr<LogicalOperator> &plan, const vector<string> &privacy_units,
-                                        const PACCompatibilityResult &check) {
+                                        const PrivacyCompatibilityResult &check) {
 	vector<LogicalGet *> gets;
 	CollectGetNodes(plan.get(), gets);
 
@@ -234,8 +235,8 @@ static vector<double> CollectMfKValues(ClientContext &context, const DPFKChain &
 	mf_values.reserve(chain.fk_cols.size());
 	for (idx_t i = 0; i + 1 < chain.tables.size(); i++) {
 		double mf_k = ComputeMfK(context, chain.tables[i], chain.fk_cols[i]);
-		PAC_DEBUG_PRINT("[DP_ELASTIC] mf_K(" + chain.tables[i] + "." + chain.fk_cols[i] +
-		                ") = " + std::to_string(mf_k));
+		PRIVACY_DEBUG_PRINT("[DP_ELASTIC] mf_K(" + chain.tables[i] + "." + chain.fk_cols[i] +
+		                    ") = " + std::to_string(mf_k));
 		mf_values.push_back(mf_k);
 	}
 	return mf_values;
@@ -283,8 +284,8 @@ static double ComputeElasticSensitivity(ClientContext &context, const DPFKChain 
 		}
 		double beta = epsilon / (2.0 * std::log(2.0 / delta));
 		double ses = ComputeSmoothElasticSensitivity(mf_values, beta);
-		PAC_DEBUG_PRINT("[DP_ELASTIC] smooth sensitivity: beta=" + std::to_string(beta) +
-		                " SES=" + std::to_string(ses));
+		PRIVACY_DEBUG_PRINT("[DP_ELASTIC] smooth sensitivity: beta=" + std::to_string(beta) +
+		                    " SES=" + std::to_string(ses));
 		return 2.0 * ses;
 	}
 
@@ -293,7 +294,7 @@ static double ComputeElasticSensitivity(ClientContext &context, const DPFKChain 
 	for (auto m : mf_values) {
 		es *= m;
 	}
-	PAC_DEBUG_PRINT("[DP_ELASTIC] global elastic sensitivity = " + std::to_string(es));
+	PRIVACY_DEBUG_PRINT("[DP_ELASTIC] global elastic sensitivity = " + std::to_string(es));
 	return es;
 }
 
@@ -413,11 +414,11 @@ static void WrapAggregateWithLaplace(OptimizerExtensionInput &input, unique_ptr<
 // Entry point
 // ----------------------------------------------------------------------------
 
-void CompileDPElasticQuery(const PACCompatibilityResult &check, OptimizerExtensionInput &input,
+void CompileDPElasticQuery(const PrivacyCompatibilityResult &check, OptimizerExtensionInput &input,
                            unique_ptr<LogicalOperator> &plan, const vector<string> &privacy_units,
                            const string &query_hash) {
 	(void)query_hash;
-	PAC_DEBUG_PRINT("[DP_ELASTIC] CompileDPElasticQuery: start");
+	PRIVACY_DEBUG_PRINT("[DP_ELASTIC] CompileDPElasticQuery: start");
 
 	double epsilon = GetDpEpsilon(input.context, 1.0);
 	if (epsilon <= 0.0 || !std::isfinite(epsilon)) {
@@ -447,7 +448,7 @@ void CompileDPElasticQuery(const PACCompatibilityResult &check, OptimizerExtensi
 	// Compute elastic sensitivity (global or smooth depending on dp_delta setting)
 	double es = ComputeElasticSensitivity(input.context, eligibility.fk_chain, epsilon);
 
-	// When pac_noise=false the compilation pipeline still runs (clipping, FK chain)
+	// When privacy_noise=false the compilation pipeline still runs (clipping, FK chain)
 	// but Laplace scale is zeroed → dp_laplace_noise returns the value unchanged.
 	// This mirrors pac_mi=0 for PAC and enables deterministic testing.
 	bool noise_enabled = IsPacNoiseEnabled(input.context, true);
@@ -459,14 +460,14 @@ void CompileDPElasticQuery(const PACCompatibilityResult &check, OptimizerExtensi
 		double sens = Sensitivity(aggr, sum_bound, es);
 		double scale = noise_enabled ? (sens / epsilon) : 0.0;
 		agg_scales.push_back(scale);
-		PAC_DEBUG_PRINT("[DP_ELASTIC] agg '" + aggr.function.name + "' sensitivity=" + std::to_string(sens) +
-		                " scale=" + std::to_string(scale));
+		PRIVACY_DEBUG_PRINT("[DP_ELASTIC] agg '" + aggr.function.name + "' sensitivity=" + std::to_string(sens) +
+		                    " scale=" + std::to_string(scale));
 	}
 
 	WrapAggregateWithLaplace(input, plan, agg, agg_scales);
 
-#if PAC_DEBUG
-	PAC_DEBUG_PRINT("=== PLAN AFTER DP_ELASTIC TRANSFORMATION ===");
+#if PRIVACY_DEBUG
+	PRIVACY_DEBUG_PRINT("=== PLAN AFTER DP_ELASTIC TRANSFORMATION ===");
 	plan->Print();
 #endif
 }

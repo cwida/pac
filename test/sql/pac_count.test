@@ -2,17 +2,17 @@
 # description: Test pac_count aggregate function
 # group: [sql]
 
-require pac
+require privacy
 
 statement ok
-PRAGMA clear_pac_metadata;
+PRAGMA clear_privacy_metadata;
 
 statement ok
 PRAGMA enable_verification
 
 # Set deterministic seed for cross-CPU reproducibility
 statement ok
-SET pac_seed = 42
+SET privacy_seed = 42
 
 statement ok
 SET pac_hash_repair = true
@@ -42,7 +42,7 @@ SELECT typeof(pac_noised_count(hash(rowid)::UBIGINT, 1)) FROM test_data
 ----
 BIGINT
 
-# Test with non-zero mi parameter (deterministic results due to pac_seed)
+# Test with non-zero mi parameter (deterministic results due to privacy_seed)
 statement ok
 SET pac_mi = 128
 

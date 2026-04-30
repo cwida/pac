@@ -2,10 +2,10 @@
 # description: Test pac_noised_avg aggregate function (decomposed to pac_noised_sum/pac_noised_count by RewritePacAvgToDiv)
 # group: [sql]
 
-require pac
+require privacy
 
 statement ok
-PRAGMA clear_pac_metadata;
+PRAGMA clear_privacy_metadata;
 
 # NOTE: enable_verification is omitted because DuckDB's verification mode
 # re-executes with a plan that skips optimizer extensions. pac_noised_avg is
@@ -14,7 +14,7 @@ PRAGMA clear_pac_metadata;
 
 # Set deterministic seed for cross-CPU reproducibility
 statement ok
-SET pac_seed = 42
+SET privacy_seed = 42
 
 statement ok
 SET pac_hash_repair = true
@@ -43,7 +43,7 @@ SELECT typeof(pac_noised_avg(hash(rowid)::UBIGINT, value::INTEGER)) FROM test_da
 ----
 DOUBLE
 
-# Test with non-zero mi parameter (deterministic results due to pac_seed)
+# Test with non-zero mi parameter (deterministic results due to privacy_seed)
 statement ok
 SET pac_mi = 128
 
@@ -211,4 +211,4 @@ DROP TABLE test_data
 
 # Cleanup PAC metadata at end of test
 statement ok
-PRAGMA clear_pac_metadata;
+PRAGMA clear_privacy_metadata;

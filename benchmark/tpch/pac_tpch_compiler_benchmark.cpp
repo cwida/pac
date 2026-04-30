@@ -183,7 +183,7 @@ static void LoadPACSchema(Connection &con, const string &db_path) {
 		db_name = db_name.substr(0, dot_pos);
 	}
 
-	string metadata_file = "pac_metadata_" + db_name + "_main.json";
+	string metadata_file = "privacy_metadata_" + db_name + "_main.json";
 	if (FileExists(metadata_file)) {
 		std::cout << "[" << Timestamp() << "] PAC schema already loaded (metadata file exists: " << metadata_file << ")" << std::endl;
 		return;
@@ -342,7 +342,7 @@ void RunTPCHCompilerBenchmark(double scale_factor, const string &scale_factor_st
 	con.Query("LOAD tpch");
 
 	// Load PAC extension
-	auto r = con.Query("LOAD pac");
+	auto r = con.Query("LOAD privacy");
 	if (r->HasError()) {
 		throw std::runtime_error("Failed to load PAC extension: " + r->GetError());
 	}
@@ -370,7 +370,7 @@ void RunTPCHCompilerBenchmark(double scale_factor, const string &scale_factor_st
     // Set seed once for deterministic noise generation
     int seed = 42;
 	// Reset seed for deterministic noise
-	con.Query("SET pac_seed = " + std::to_string(seed));
+	con.Query("SET privacy_seed = " + std::to_string(seed));
 
     // Statistics tracking
     int total_queries = 0;

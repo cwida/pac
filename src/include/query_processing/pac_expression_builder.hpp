@@ -10,7 +10,7 @@
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/planner/operator/logical_aggregate.hpp"
 #include "duckdb/planner/operator/logical_cteref.hpp"
-#include "metadata/pac_compatibility_check.hpp"
+#include "metadata/privacy_compatibility_check.hpp"
 
 namespace duckdb {
 
@@ -73,7 +73,7 @@ void ModifyAggregatesWithPacFunctions(OptimizerExtensionInput &input, LogicalAgg
 // and rewrites the top aggregate to use pac_noised_clip_* / pac_clip_* functions.
 // Skips insertion if child already groups by PU key (Q13 exception).
 void RewriteClipAggregates(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
-                           const PACCompatibilityResult &check, const vector<string> &privacy_units);
+                           const PrivacyCompatibilityResult &check, const vector<string> &privacy_units);
 
 } // namespace duckdb
 

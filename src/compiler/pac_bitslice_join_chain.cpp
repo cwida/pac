@@ -9,10 +9,10 @@
 //
 
 #include "compiler/pac_bitslice_join_chain.hpp"
-#include "pac_debug.hpp"
-#include "utils/pac_helpers.hpp"
-#include "parser/pac_parser.hpp"
-#include "metadata/pac_metadata_manager.hpp"
+#include "privacy_debug.hpp"
+#include "utils/privacy_helpers.hpp"
+#include "parser/privacy_parser.hpp"
+#include "metadata/privacy_metadata_manager.hpp"
 #include "compiler/pac_compiler_helpers.hpp"
 #include "query_processing/pac_join_builder.hpp"
 #include "query_processing/pac_plan_traversal.hpp"
@@ -59,15 +59,15 @@ static bool TablesShareJoinSubtree(LogicalOperator *op, idx_t table_idx_a, idx_t
 
 // Helper function to compute required columns for a table in the FK path
 // Returns the columns needed for joining and for the PU FK reference (for hashing)
-static vector<string> GetRequiredColumnsForTable(const PACCompatibilityResult &check, const string &table_name,
+static vector<string> GetRequiredColumnsForTable(const PrivacyCompatibilityResult &check, const string &table_name,
                                                  const vector<string> &fk_path, const vector<string> &privacy_units) {
 	vector<string> required_columns;
 	std::unordered_set<string> added_columns;
 
 	auto it = check.table_metadata.find(table_name);
 	if (it == check.table_metadata.end()) {
-#if PAC_DEBUG
-		PAC_DEBUG_PRINT("GetRequiredColumnsForTable WARNING: No metadata for table " + table_name);
+#if PRIVACY_DEBUG
+		PRIVACY_DEBUG_PRINT("GetRequiredColumnsForTable WARNING: No metadata for table " + table_name);
 #endif
 		return {}; // Empty = project all columns (fallback)
 	}
@@ -130,7 +130,7 @@ static vector<string> GetRequiredColumnsForTable(const PACCompatibilityResult &c
 				// The FK columns from the other table reference columns in our table
 				// We need to find which columns in our table they reference
 				// This info is in PAC LINK metadata (referenced_columns)
-				auto &metadata_mgr = PACMetadataManager::Get();
+				auto &metadata_mgr = PrivacyMetadataManager::Get();
 				auto *other_pac_metadata = metadata_mgr.GetTableMetadata(path_table);
 				if (other_pac_metadata) {
 					for (auto &link : other_pac_metadata->links) {
@@ -150,7 +150,7 @@ static vector<string> GetRequiredColumnsForTable(const PACCompatibilityResult &c
 		}
 	}
 
-#if PAC_DEBUG
+#if PRIVACY_DEBUG
 	if (!required_columns.empty()) {
 		string cols_str;
 		for (auto &col : required_columns) {
@@ -159,20 +159,21 @@ static vector<string> GetRequiredColumnsForTable(const PACCompatibilityResult &c
 			}
 			cols_str += col;
 		}
-		PAC_DEBUG_PRINT("GetRequiredColumnsForTable: Table " + table_name + " requires columns: [" + cols_str + "]");
+		PRIVACY_DEBUG_PRINT("GetRequiredColumnsForTable: Table " + table_name + " requires columns: [" + cols_str +
+		                    "]");
 	}
 #endif
 
 	return required_columns;
 }
 
-ConnectingTableMap EnsureFKTablesInPlan(const PACCompatibilityResult &check, OptimizerExtensionInput &input,
+ConnectingTableMap EnsureFKTablesInPlan(const PrivacyCompatibilityResult &check, OptimizerExtensionInput &input,
                                         unique_ptr<LogicalOperator> &plan, const vector<string> &gets_missing,
                                         const vector<string> &gets_present, const vector<string> &fk_path,
                                         const vector<string> &privacy_units, const CTETableMap &cte_map) {
 	ConnectingTableMap connecting_table_to_orders_table;
 
-	// Note: all PU tables must have PAC_KEY defined
+	// Note: all PU tables must have PRIVACY_KEY defined
 
 	// Check if join elimination is enabled
 	bool join_elimination = GetBooleanSetting(input.context, "pac_join_elimination", false);
@@ -360,9 +361,9 @@ ConnectingTableMap EnsureFKTablesInPlan(const PACCompatibilityResult &check, Opt
 				// The connecting table already IS the FK table - no join needed
 				// Just map it to itself for hash generation
 				connecting_table_to_orders_table[connecting_table_idx] = connecting_table_idx;
-#if PAC_DEBUG
-				PAC_DEBUG_PRINT("EnsureFKTablesInPlan: Connecting table #" + std::to_string(connecting_table_idx) +
-				                " is already the FK table (" + fk_table_with_pu_reference + "), no join needed");
+#if PRIVACY_DEBUG
+				PRIVACY_DEBUG_PRINT("EnsureFKTablesInPlan: Connecting table #" + std::to_string(connecting_table_idx) +
+				                    " is already the FK table (" + fk_table_with_pu_reference + "), no join needed");
 #endif
 			} else {
 				vector<unique_ptr<LogicalOperator> *> fk_nodes;
@@ -394,16 +395,16 @@ ConnectingTableMap EnsureFKTablesInPlan(const PACCompatibilityResult &check, Opt
 				if (!can_use_delim_get) {
 					// Need to add FK join for this subquery instance
 					tables_to_join_for_instance.push_back(fk_table_with_pu_reference);
-#if PAC_DEBUG
-					PAC_DEBUG_PRINT("EnsureFKTablesInPlan: Adding " + fk_table_with_pu_reference +
-					                " join for subquery instance #" + std::to_string(connecting_table_idx));
+#if PRIVACY_DEBUG
+					PRIVACY_DEBUG_PRINT("EnsureFKTablesInPlan: Adding " + fk_table_with_pu_reference +
+					                    " join for subquery instance #" + std::to_string(connecting_table_idx));
 #endif
 				}
-#if PAC_DEBUG
+#if PRIVACY_DEBUG
 				else {
-					PAC_DEBUG_PRINT("EnsureFKTablesInPlan: FK table " + fk_table_with_pu_reference +
-					                " accessible via DELIM_GET for subquery instance #" +
-					                std::to_string(connecting_table_idx));
+					PRIVACY_DEBUG_PRINT("EnsureFKTablesInPlan: FK table " + fk_table_with_pu_reference +
+					                    " accessible via DELIM_GET for subquery instance #" +
+					                    std::to_string(connecting_table_idx));
 				}
 #endif
 			}
@@ -474,10 +475,10 @@ ConnectingTableMap EnsureFKTablesInPlan(const PACCompatibilityResult &check, Opt
 						if (fk_table_idx == connecting_table_idx) {
 							if (AreTableColumnsAccessible(plan.get(), fk_table_idx)) {
 								connecting_table_to_orders_table[connecting_table_idx] = fk_table_idx;
-#if PAC_DEBUG
-								PAC_DEBUG_PRINT("EnsureFKTablesInPlan: Connecting table #" +
-								                std::to_string(connecting_table_idx) +
-								                " IS the FK table - mapping to itself");
+#if PRIVACY_DEBUG
+								PRIVACY_DEBUG_PRINT("EnsureFKTablesInPlan: Connecting table #" +
+								                    std::to_string(connecting_table_idx) +
+								                    " IS the FK table - mapping to itself");
 #endif
 								found_accessible_fk_table = true;
 								break;
@@ -493,20 +494,20 @@ ConnectingTableMap EnsureFKTablesInPlan(const PACCompatibilityResult &check, Opt
 						if (shares_subtree && AreTableColumnsAccessible(plan.get(), fk_table_idx)) {
 							// Map connecting table to this FK table instance
 							connecting_table_to_orders_table[connecting_table_idx] = fk_table_idx;
-#if PAC_DEBUG
-							PAC_DEBUG_PRINT("EnsureFKTablesInPlan: Mapped connecting table #" +
-							                std::to_string(connecting_table_idx) + " to FK table " + present_table +
-							                " #" + std::to_string(fk_table_idx) + " for hashing (same subtree)");
+#if PRIVACY_DEBUG
+							PRIVACY_DEBUG_PRINT("EnsureFKTablesInPlan: Mapped connecting table #" +
+							                    std::to_string(connecting_table_idx) + " to FK table " + present_table +
+							                    " #" + std::to_string(fk_table_idx) + " for hashing (same subtree)");
 #endif
 							found_accessible_fk_table = true;
 							break;
 						}
-#if PAC_DEBUG
+#if PRIVACY_DEBUG
 						else {
-							PAC_DEBUG_PRINT("EnsureFKTablesInPlan: FK table " + present_table + " #" +
-							                std::to_string(fk_table_idx) +
-							                " is NOT in same subtree as connecting table #" +
-							                std::to_string(connecting_table_idx));
+							PRIVACY_DEBUG_PRINT("EnsureFKTablesInPlan: FK table " + present_table + " #" +
+							                    std::to_string(fk_table_idx) +
+							                    " is NOT in same subtree as connecting table #" +
+							                    std::to_string(connecting_table_idx));
 						}
 #endif
 					}
@@ -539,18 +540,18 @@ ConnectingTableMap EnsureFKTablesInPlan(const PACCompatibilityResult &check, Opt
 					if (AreTableColumnsAccessible(plan.get(), connecting_table_idx)) {
 						// Columns are accessible - no join needed
 						connecting_table_to_orders_table[connecting_table_idx] = connecting_table_idx;
-#if PAC_DEBUG
-						PAC_DEBUG_PRINT(
+#if PRIVACY_DEBUG
+						PRIVACY_DEBUG_PRINT(
 						    "EnsureFKTablesInPlan: Connecting table #" + std::to_string(connecting_table_idx) + " (" +
 						    connecting_table_name +
 						    ") IS the FK table with PU reference and columns are accessible, no join needed");
 #endif
 						continue; // Skip to next connecting table instance
 					}
-#if PAC_DEBUG
-					PAC_DEBUG_PRINT("EnsureFKTablesInPlan: Connecting table #" + std::to_string(connecting_table_idx) +
-					                " (" + connecting_table_name +
-					                ") IS the FK table but columns are NOT accessible (blocked by SEMI/ANTI join)");
+#if PRIVACY_DEBUG
+					PRIVACY_DEBUG_PRINT("EnsureFKTablesInPlan: Connecting table #" +
+					                    std::to_string(connecting_table_idx) + " (" + connecting_table_name +
+					                    ") IS the FK table but columns are NOT accessible (blocked by SEMI/ANTI join)");
 #endif
 					// Columns are NOT accessible - we need to find an accessible table that has
 					// a PAC LINK (FK) to the blocked FK table, and add a join from there.
@@ -595,11 +596,11 @@ ConnectingTableMap EnsureFKTablesInPlan(const PACCompatibilityResult &check, Opt
 							if (AreTableColumnsAccessible(plan.get(), table_get.table_index)) {
 								// Found an accessible table with FK to the blocked FK table
 								// Add a join from this table to the FK table
-#if PAC_DEBUG
-								PAC_DEBUG_PRINT("EnsureFKTablesInPlan: Found accessible table " + present_table + " #" +
-								                std::to_string(table_get.table_index) +
-								                " with FK to blocked table - adding join to " +
-								                fk_table_with_pu_reference);
+#if PRIVACY_DEBUG
+								PRIVACY_DEBUG_PRINT("EnsureFKTablesInPlan: Found accessible table " + present_table +
+								                    " #" + std::to_string(table_get.table_index) +
+								                    " with FK to blocked table - adding join to " +
+								                    fk_table_with_pu_reference);
 #endif
 								unique_ptr<LogicalOperator> current_node = (*table_node)->Copy(input.context);
 								auto local_idx = binder.GenerateTableIndex();
@@ -636,9 +637,9 @@ ConnectingTableMap EnsureFKTablesInPlan(const PACCompatibilityResult &check, Opt
 					// If still not found, this connecting table instance simply cannot be used
 					// for PAC transformation - skip it (don't throw an exception, as other
 					// code paths may handle this aggregate differently)
-#if PAC_DEBUG
-					PAC_DEBUG_PRINT("EnsureFKTablesInPlan: No accessible alternative found for blocked FK table " +
-					                fk_table_with_pu_reference + " - skipping this connecting table instance");
+#if PRIVACY_DEBUG
+					PRIVACY_DEBUG_PRINT("EnsureFKTablesInPlan: No accessible alternative found for blocked FK table " +
+					                    fk_table_with_pu_reference + " - skipping this connecting table instance");
 #endif
 					continue;
 				}
@@ -661,12 +662,12 @@ ConnectingTableMap EnsureFKTablesInPlan(const PACCompatibilityResult &check, Opt
 					}
 				}
 
-#if PAC_DEBUG
-				PAC_DEBUG_PRINT("EnsureFKTablesInPlan: No accessible FK table found, adding join chain for " +
-				                std::to_string(tables_to_add.size()) + " tables to connecting table #" +
-				                std::to_string(connecting_table_idx));
+#if PRIVACY_DEBUG
+				PRIVACY_DEBUG_PRINT("EnsureFKTablesInPlan: No accessible FK table found, adding join chain for " +
+				                    std::to_string(tables_to_add.size()) + " tables to connecting table #" +
+				                    std::to_string(connecting_table_idx));
 				for (auto &t : tables_to_add) {
-					PAC_DEBUG_PRINT("  - " + t);
+					PRIVACY_DEBUG_PRINT("  - " + t);
 				}
 #endif
 
@@ -680,10 +681,10 @@ ConnectingTableMap EnsureFKTablesInPlan(const PACCompatibilityResult &check, Opt
 				// any columns we add via joins won't be able to propagate to the aggregate.
 				// In that case, we need to find an accessible table and add the FULL join chain there.
 				if (!AreTableColumnsAccessible(plan.get(), connecting_table_idx)) {
-#if PAC_DEBUG
-					PAC_DEBUG_PRINT("EnsureFKTablesInPlan: Connecting table #" + std::to_string(connecting_table_idx) +
-					                " (" + connecting_table_name +
-					                ") columns are NOT accessible - looking for accessible alternative");
+#if PRIVACY_DEBUG
+					PRIVACY_DEBUG_PRINT("EnsureFKTablesInPlan: Connecting table #" +
+					                    std::to_string(connecting_table_idx) + " (" + connecting_table_name +
+					                    ") columns are NOT accessible - looking for accessible alternative");
 #endif
 					// Find an accessible table in the FK path and add the full join chain from there
 					bool found_accessible_alternative = false;
@@ -740,11 +741,12 @@ ConnectingTableMap EnsureFKTablesInPlan(const PACCompatibilityResult &check, Opt
 									continue;
 								}
 
-#if PAC_DEBUG
-								PAC_DEBUG_PRINT("EnsureFKTablesInPlan: Found accessible table " + scanned_table + " #" +
-								                std::to_string(table_get.table_index) + " - adding full join chain:");
+#if PRIVACY_DEBUG
+								PRIVACY_DEBUG_PRINT("EnsureFKTablesInPlan: Found accessible table " + scanned_table +
+								                    " #" + std::to_string(table_get.table_index) +
+								                    " - adding full join chain:");
 								for (auto &t : full_tables_to_add) {
-									PAC_DEBUG_PRINT("  - " + t);
+									PRIVACY_DEBUG_PRINT("  - " + t);
 								}
 #endif
 								// Create the full join chain
@@ -792,8 +794,9 @@ ConnectingTableMap EnsureFKTablesInPlan(const PACCompatibilityResult &check, Opt
 						continue; // Move to next connecting table instance
 					}
 
-#if PAC_DEBUG
-					PAC_DEBUG_PRINT("EnsureFKTablesInPlan: No accessible alternative found - skipping this instance");
+#if PRIVACY_DEBUG
+					PRIVACY_DEBUG_PRINT(
+					    "EnsureFKTablesInPlan: No accessible alternative found - skipping this instance");
 #endif
 					continue;
 				}

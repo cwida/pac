@@ -1,7 +1,7 @@
-#include "metadata/pac_compatibility_check.hpp"
-#include "pac_debug.hpp"
-#include "utils/pac_helpers.hpp"
-#include "parser/pac_parser.hpp"
+#include "metadata/privacy_compatibility_check.hpp"
+#include "privacy_debug.hpp"
+#include "utils/privacy_helpers.hpp"
+#include "parser/privacy_parser.hpp"
 #include "query_processing/pac_plan_traversal.hpp"
 
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
@@ -19,7 +19,7 @@
 
 #include <algorithm>
 #include "compiler/pac_compiler_helpers.hpp"
-#include "core/pac_optimizer.hpp"
+#include "core/privacy_optimizer.hpp"
 #include <queue>
 #include <unordered_map>
 #include <unordered_set>
@@ -156,7 +156,8 @@ static void GetScannedTablesInScope(const LogicalOperator &op, std::unordered_se
 // Helper: Check if PAC aggregates in a subtree are properly joined with PU/FK path tables
 // This recursively checks each aggregate scope and validates PAC aggregates
 // Returns true if PAC aggregates were found in the query
-static bool CheckPacAggregatesHaveProperJoins(const LogicalOperator &op, const PACCompatibilityResult &compat_result,
+static bool CheckPacAggregatesHaveProperJoins(const LogicalOperator &op,
+                                              const PrivacyCompatibilityResult &compat_result,
                                               const vector<string> &all_pu_tables) {
 	bool found_pac_aggregate = false;
 
@@ -745,9 +746,9 @@ static bool DetectCycleInFKGraph(ClientContext &context, const vector<string> &s
 	return false;
 }
 
-PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, ClientContext &context,
-                                            PACOptimizerInfo *optimizer_info) {
-	PACCompatibilityResult result;
+PrivacyCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, ClientContext &context,
+                                                PACOptimizerInfo *optimizer_info) {
+	PrivacyCompatibilityResult result;
 
 	// If a replan/compilation is already in progress by the optimizer extension, skip compatibility checks
 	// to avoid re-entrant behavior and infinite loops.
@@ -770,7 +771,7 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 	// Discover tables with PROTECTED columns in PAC metadata
 	// Note: Tables with protected columns are NOT automatically privacy units anymore.
 	// A table is a privacy unit only if it has is_privacy_unit = true (via CREATE PU TABLE or ALTER TABLE SET PAC)
-	auto &metadata_mgr = PACMetadataManager::Get();
+	auto &metadata_mgr = PrivacyMetadataManager::Get();
 	vector<string> tables_with_protected_columns;
 	for (auto &kv : scan_counts) {
 		if (kv.second > 0) {
@@ -802,7 +803,7 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 		std::sort(result.scanned_non_pu_tables.begin(), result.scanned_non_pu_tables.end());
 	}
 
-	// Also check tables reachable via PAC_LINKs for protected columns
+	// Also check tables reachable via PRIVACY_LINKs for protected columns
 	// (need to find protected columns in tables that may not be directly scanned)
 	{
 		std::unordered_set<string> visited;
@@ -815,7 +816,7 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 			string current = to_check.front();
 			to_check.pop();
 
-			// Get outgoing PAC_LINKs
+			// Get outgoing PRIVACY_LINKs
 			auto fks = FindPacLinks(context, current);
 			for (auto &fk : fks) {
 				string ref_table = fk.first;
@@ -855,7 +856,7 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 		}
 	}
 
-	// --- Populate per-table metadata (PAC_KEYs and PAC_LINKs) for scanned tables ---
+	// --- Populate per-table metadata (PRIVACY_KEYs and PRIVACY_LINKs) for scanned tables ---
 	for (auto &name : scanned_tables) {
 		ColumnMetadata md;
 		md.table_name = name;
@@ -864,7 +865,7 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 		result.table_metadata[name] = std::move(md);
 	}
 
-	// Compute PAC_LINK paths from scanned tables to any privacy unit (transitive)
+	// Compute PRIVACY_LINK paths from scanned tables to any privacy unit (transitive)
 	auto fk_paths = FindPacLinkPath(context, all_privacy_units, scanned_tables);
 
 	// Populate metadata for tables in FK paths that aren't scanned
@@ -896,9 +897,9 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 		}
 	}
 
-	// Infer PKs for PU tables from incoming PAC_LINK references.
-	// If a PU table has no PK from DB constraints or PAC_KEY, check if any
-	// other table has a PAC_LINK that REFERENCES this PU table. The
+	// Infer PKs for PU tables from incoming PRIVACY_LINK references.
+	// If a PU table has no PK from DB constraints or PRIVACY_KEY, check if any
+	// other table has a PRIVACY_LINK that REFERENCES this PU table. The
 	// link.referenced_columns identify the key columns of the PU.
 	for (auto &pu_table : result.scanned_pu_tables) {
 		auto pu_it = result.table_metadata.find(pu_table);
@@ -964,19 +965,19 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 				for (auto &fk_col : fk_pair.second) {
 					result.protected_columns[table_lower].insert(StringUtil::Lower(fk_col));
 				}
-#if PAC_DEBUG
-				PAC_DEBUG_PRINT("Source2: table=" + table_name + " FK to " + ref_table +
-				                " reaches PU. Protected FK cols on " + table_lower);
+#if PRIVACY_DEBUG
+				PRIVACY_DEBUG_PRINT("Source2: table=" + table_name + " FK to " + ref_table +
+				                    " reaches PU. Protected FK cols on " + table_lower);
 #endif
 				// Also protect the referenced columns on the parent table.
-				// E.g., PAC_LINK (l_orderkey) REFERENCES orders(o_orderkey):
+				// E.g., PRIVACY_LINK (l_orderkey) REFERENCES orders(o_orderkey):
 				// l_orderkey is protected above; o_orderkey must also be protected
 				// because it's a key along the PAC link chain.
 				auto ref_pk_cols = FindReferencedPKColumns(context, table_name, ref_table);
 				for (auto &pk_col : ref_pk_cols) {
 					result.protected_columns[ref_lower].insert(StringUtil::Lower(pk_col));
-#if PAC_DEBUG
-					PAC_DEBUG_PRINT("Source2: also protecting referenced col " + ref_lower + "." + pk_col);
+#if PRIVACY_DEBUG
+					PRIVACY_DEBUG_PRINT("Source2: also protecting referenced col " + ref_lower + "." + pk_col);
 #endif
 				}
 			}
@@ -996,17 +997,18 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 	// Determine if we have tables linked to privacy units
 	bool has_fk_linked_tables = !result.fk_paths.empty();
 
-#if PAC_DEBUG
-	PAC_DEBUG_PRINT("PAC compatibility check: scanned_pu_tables = " + std::to_string(result.scanned_pu_tables.size()));
-	PAC_DEBUG_PRINT("PAC compatibility check: tables_with_protected_columns = " +
-	                std::to_string(tables_with_protected_columns.size()));
-	PAC_DEBUG_PRINT("PAC compatibility check: fk_paths = " + std::to_string(result.fk_paths.size()));
+#if PRIVACY_DEBUG
+	PRIVACY_DEBUG_PRINT("PAC compatibility check: scanned_pu_tables = " +
+	                    std::to_string(result.scanned_pu_tables.size()));
+	PRIVACY_DEBUG_PRINT("PAC compatibility check: tables_with_protected_columns = " +
+	                    std::to_string(tables_with_protected_columns.size()));
+	PRIVACY_DEBUG_PRINT("PAC compatibility check: fk_paths = " + std::to_string(result.fk_paths.size()));
 	for (auto &kv : result.fk_paths) {
 		string path_str = kv.first + " -> ";
 		for (auto &p : kv.second) {
 			path_str += p + " -> ";
 		}
-		PAC_DEBUG_PRINT("  path: " + path_str);
+		PRIVACY_DEBUG_PRINT("  path: " + path_str);
 	}
 #endif
 
@@ -1103,11 +1105,11 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 		// If the query already has PAC aggregates with proper joins, don't trigger rewrite
 		// The query is already using PAC functions correctly, so allow it as-is
 		if (has_pac_aggregates) {
-#if PAC_DEBUG
-			PAC_DEBUG_PRINT("PAC compatibility check: Query has PAC aggregates with proper joins - allowing as-is");
-			PAC_DEBUG_PRINT("=== QUERY PLAN (PAC aggregates with joins) ===");
+#if PRIVACY_DEBUG
+			PRIVACY_DEBUG_PRINT("PAC compatibility check: Query has PAC aggregates with proper joins - allowing as-is");
+			PRIVACY_DEBUG_PRINT("=== QUERY PLAN (PAC aggregates with joins) ===");
 			plan->Print();
-			PAC_DEBUG_PRINT("=== END QUERY PLAN ===");
+			PRIVACY_DEBUG_PRINT("=== END QUERY PLAN ===");
 #endif
 			// Return empty result to skip PAC compilation
 			result.eligible_for_rewrite = false;

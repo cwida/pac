@@ -1,6 +1,6 @@
 #define DUCKDB_EXTENSION_MAIN
 
-#include "pac_extension.hpp"
+#include "privacy_extension.hpp"
 #include "duckdb.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/function/scalar_function.hpp"
@@ -14,7 +14,7 @@
 #include "duckdb/common/types/string_type.hpp"
 #include "duckdb/common/vector_operations/unary_executor.hpp"
 #include "duckdb/common/types.hpp"
-#include "core/pac_optimizer.hpp"
+#include "core/privacy_optimizer.hpp"
 #include "aggregates/pac_aggregate.hpp"
 #include "aggregates/pac_count.hpp"
 #include "aggregates/pac_sum.hpp"
@@ -23,34 +23,34 @@
 #include "aggregates/pac_clip_min_max.hpp"
 #include "aggregates/dp_laplace_noise.hpp"
 #include "categorical/pac_categorical.hpp"
-#include "parser/pac_parser.hpp"
+#include "parser/privacy_parser.hpp"
 #include "diff/pac_utility_diff.hpp"
 #include "query_processing/pac_topk_rewriter.hpp"
 #include "query_processing/pac_avg_rewriter.hpp"
-#include "pac_debug.hpp"
+#include "privacy_debug.hpp"
 
 namespace duckdb {
 
 // Pragma function to save PAC metadata to file
-static void SavePACMetadataPragma(ClientContext &context, const FunctionParameters &parameters) {
+static void SavePrivacyMetadataPragma(ClientContext &context, const FunctionParameters &parameters) {
 	auto filepath = parameters.values[0].ToString();
-	PACMetadataManager::Get().SaveToFile(filepath);
+	PrivacyMetadataManager::Get().SaveToFile(filepath);
 }
 
 // Pragma function to load PAC metadata from file
-static void LoadPACMetadataPragma(ClientContext &context, const FunctionParameters &parameters) {
+static void LoadPrivacyMetadataPragma(ClientContext &context, const FunctionParameters &parameters) {
 	auto filepath = parameters.values[0].ToString();
-	PACMetadataManager::Get().LoadFromFile(filepath);
+	PrivacyMetadataManager::Get().LoadFromFile(filepath);
 }
 
 // Pragma function to clear all PAC metadata (in-memory and file)
-static void ClearPACMetadataPragma(ClientContext &context, const FunctionParameters &parameters) {
+static void ClearPrivacyMetadataPragma(ClientContext &context, const FunctionParameters &parameters) {
 	// Clear in-memory metadata
-	PACMetadataManager::Get().Clear();
+	PrivacyMetadataManager::Get().Clear();
 
 	// Try to delete the metadata file if it exists
 	try {
-		string filepath = PACMetadataManager::GetMetadataFilePath(context);
+		string filepath = PrivacyMetadataManager::GetMetadataFilePath(context);
 		if (!filepath.empty()) {
 			// Check if file exists
 			std::ifstream file_check(filepath);
@@ -77,7 +77,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	auto &db = loader.GetDatabaseInstance();
 	try {
 		// Clear any existing metadata first (in case extension is reloaded)
-		PACMetadataManager::Get().Clear();
+		PrivacyMetadataManager::Get().Clear();
 
 		// Get all attached database paths and try to load metadata from the first one's directory
 		auto paths = db.GetDatabaseManager().GetAttachedDatabasePaths();
@@ -111,7 +111,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 			// Build metadata path with db and schema names
 			string metadata_path;
-			string filename = "pac_metadata_" + db_name + "_" + schema_name + ".json";
+			string filename = "privacy_metadata_" + db_name + "_" + schema_name + ".json";
 
 			if (last_slash != string::npos) {
 				metadata_path = db_path.substr(0, last_slash + 1) + filename;
@@ -119,7 +119,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 				metadata_path = filename;
 			}
 
-#if PAC_DEBUG
+#if PRIVACY_DEBUG
 			std::cerr << "[PAC DEBUG] LoadInternal: Checking for metadata at: " << metadata_path << "\n";
 #endif
 
@@ -127,30 +127,30 @@ static void LoadInternal(ExtensionLoader &loader) {
 			std::ifstream test_file(metadata_path);
 			if (test_file.good()) {
 				test_file.close();
-				PACMetadataManager::Get().LoadFromFile(metadata_path);
-#if PAC_DEBUG
+				PrivacyMetadataManager::Get().LoadFromFile(metadata_path);
+#if PRIVACY_DEBUG
 				std::cerr << "[PAC DEBUG] LoadInternal: Successfully loaded metadata from " << metadata_path << "\n";
-				std::cerr << "[PAC DEBUG] LoadInternal: Loaded " << PACMetadataManager::Get().GetAllTableNames().size()
-				          << " tables"
+				std::cerr << "[PAC DEBUG] LoadInternal: Loaded "
+				          << PrivacyMetadataManager::Get().GetAllTableNames().size() << " tables"
 				          << "\n";
 #endif
 			} else {
-#if PAC_DEBUG
+#if PRIVACY_DEBUG
 				std::cerr << "[PAC DEBUG] LoadInternal: Metadata file not found at " << metadata_path << "\n";
 #endif
 			}
 		} else {
-#if PAC_DEBUG
+#if PRIVACY_DEBUG
 			std::cerr << "[PAC DEBUG] LoadInternal: No database paths available (in-memory DB?)"
 			          << "\n";
 #endif
 		}
 	} catch (const std::exception &e) {
-#if PAC_DEBUG
+#if PRIVACY_DEBUG
 		std::cerr << "[PAC DEBUG] LoadInternal: Failed to load metadata: " << e.what() << "\n";
 #endif
 	} catch (...) {
-#if PAC_DEBUG
+#if PRIVACY_DEBUG
 		std::cerr << "[PAC DEBUG] LoadInternal: Failed to load metadata (unknown exception)"
 		          << "\n";
 #endif
@@ -220,9 +220,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	    "If unset, global elastic sensitivity is used instead (pure ε-DP).",
 	    LogicalType::DOUBLE, Value(LogicalType::DOUBLE));
 	// Set deterministic RNG seed for PAC functions (useful for tests)
-	db.config.AddExtensionOption("pac_seed", "RNG seed for reproducible noised results", LogicalType::BIGINT);
+	db.config.AddExtensionOption("privacy_seed", "RNG seed for reproducible noised results", LogicalType::BIGINT);
 	// Enable/disable PAC noise application (useful for testing, since noise affects result determinism)
-	db.config.AddExtensionOption("pac_noise", "Enable/disable PAC noise application (set to false for debugging)",
+	db.config.AddExtensionOption("privacy_noise", "Enable/disable PAC noise application (set to false for debugging)",
 	                             LogicalType::BOOLEAN);
 	// Correction factor: multiplies sum/avg/count results; reduces NULL probability for all aggregates
 	db.config.AddExtensionOption("pac_correction", "Correction factor multiplied into aggregate results (default: 1.0)",
@@ -236,7 +236,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// Uses a sigmoid P(keep) = 1/(1+exp(-3*(z - threshold))) for smooth probabilistic NULLing.
 	// This is safe post-processing of the already-noised output (data processing inequality).
 	// Default: NULL (disabled). Set to e.g. 4.0 to enable (~20% expected relative error cutoff).
-	db.config.AddExtensionOption("pac_utility_threshold",
+	db.config.AddExtensionOption("privacy_min_group_count",
 	                             "Z-score threshold for utility NULLing: NULL cells with |value|/noise_std < threshold "
 	                             "(default: NULL = disabled, set to e.g. 4 to enable)",
 	                             LogicalType::DOUBLE, Value(LogicalType::DOUBLE));
@@ -343,31 +343,32 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RegisterDpLaplaceNoiseFunction(loader);
 
 	// Register PAC parser extension
-	ParserExtension::Register(db.config, PACParserExtension());
+	ParserExtension::Register(db.config, PrivacyParserExtension());
 
 	// Register PAC metadata management pragmas
-	auto save_pac_metadata_pragma =
-	    PragmaFunction::PragmaCall("save_pac_metadata", SavePACMetadataPragma, {LogicalType::VARCHAR});
-	loader.RegisterFunction(save_pac_metadata_pragma);
+	auto save_privacy_metadata_pragma =
+	    PragmaFunction::PragmaCall("save_privacy_metadata", SavePrivacyMetadataPragma, {LogicalType::VARCHAR});
+	loader.RegisterFunction(save_privacy_metadata_pragma);
 
-	auto load_pac_metadata_pragma =
-	    PragmaFunction::PragmaCall("load_pac_metadata", LoadPACMetadataPragma, {LogicalType::VARCHAR});
-	loader.RegisterFunction(load_pac_metadata_pragma);
+	auto load_privacy_metadata_pragma =
+	    PragmaFunction::PragmaCall("load_privacy_metadata", LoadPrivacyMetadataPragma, {LogicalType::VARCHAR});
+	loader.RegisterFunction(load_privacy_metadata_pragma);
 
-	auto clear_pac_metadata_pragma = PragmaFunction::PragmaCall("clear_pac_metadata", ClearPACMetadataPragma, {});
-	loader.RegisterFunction(clear_pac_metadata_pragma);
+	auto clear_privacy_metadata_pragma =
+	    PragmaFunction::PragmaCall("clear_privacy_metadata", ClearPrivacyMetadataPragma, {});
+	loader.RegisterFunction(clear_privacy_metadata_pragma);
 }
 
-void PacExtension::Load(ExtensionLoader &loader) {
+void PrivacyExtension::Load(ExtensionLoader &loader) {
 	LoadInternal(loader);
 }
-string PacExtension::Name() {
-	return "pac";
+string PrivacyExtension::Name() {
+	return "privacy";
 }
 
-string PacExtension::Version() const {
-#ifdef EXT_VERSION_PAC
-	return EXT_VERSION_PAC;
+string PrivacyExtension::Version() const {
+#ifdef EXT_VERSION_PRIVACY
+	return EXT_VERSION_PRIVACY;
 #else
 	return "";
 #endif

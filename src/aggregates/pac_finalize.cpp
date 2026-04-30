@@ -19,7 +19,7 @@ static void PacFinalizeFunction(DataChunk &args, ExpressionState &state, Vector 
 	double mi = GetPacMiFromSetting(context);
 
 	Value pac_seed_val;
-	uint64_t seed = (context.TryGetCurrentSetting("pac_seed", pac_seed_val) && !pac_seed_val.IsNull())
+	uint64_t seed = (context.TryGetCurrentSetting("privacy_seed", pac_seed_val) && !pac_seed_val.IsNull())
 	                    ? uint64_t(pac_seed_val.GetValue<int64_t>())
 	                    : 42;
 	if (mi != 0.0) {

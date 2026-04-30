@@ -12,7 +12,7 @@
 namespace duckdb {
 
 FKToPUResult GetFKColumnsToPU(const string &table_name, const vector<string> &privacy_units,
-                              const PACCompatibilityResult &check) {
+                              const PrivacyCompatibilityResult &check) {
 	auto it = check.table_metadata.find(table_name);
 	if (it != check.table_metadata.end()) {
 		for (auto &fk : it->second.fks) {
@@ -29,7 +29,7 @@ FKToPUResult GetFKColumnsToPU(const string &table_name, const vector<string> &pr
 AccessibleFKTableResult FindAccessibleFKTable(unique_ptr<LogicalOperator> &plan, LogicalOperator *search_root,
                                               const vector<string> &candidate_tables,
                                               const vector<string> &privacy_units,
-                                              const PACCompatibilityResult &check) {
+                                              const PrivacyCompatibilityResult &check) {
 	AccessibleFKTableResult result;
 
 	for (auto &table_name : candidate_tables) {

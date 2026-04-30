@@ -49,8 +49,8 @@ Once the PU (or its FK proxy) is reachable from every aggregate:
 
 1. **Find all aggregates** that have the PU table (or FK-linked table) in their subtree
 2. **For each PU table**, compute a hash from the PU's key columns or FK columns:
-   - Single PAC_KEY: `pac_hash(hash(key_col))`
-   - Composite PAC_KEY: `pac_hash(hash(key1) XOR hash(key2) XOR ...)` — XOR combines multiple column hashes into one, then pac_hash repairs it to 32 bits
+   - Single PRIVACY_KEY: `pac_hash(hash(key_col))`
+   - Composite PRIVACY_KEY: `pac_hash(hash(key1) XOR hash(key2) XOR ...)` — XOR combines multiple column hashes into one, then pac_hash repairs it to 32 bits
    - FK proxy: `pac_hash(hash(fk_col))` (e.g., `pac_hash(hash(o_custkey))`)
 3. **Insert a projection** above the hash source scan that computes the hash as an extra column
 4. **Propagate** the hash column through all intermediate operators (projections, joins, filters) between the hash source and the aggregate
@@ -121,7 +121,7 @@ Non-materialized CTEs are inlined by DuckDB before the PAC optimizer runs, so th
 
 The compiler handles the pattern where an inner aggregate groups by PU key and an outer aggregate aggregates over those results (e.g., TPC-H Q13: inner counts orders per customer, outer counts how many customers have each order count):
 
-1. **Detect PU-key grouping**: when filtering which aggregates to transform, the compiler checks if an inner aggregate's GROUP BY keys contain the PU's PAC_KEY columns or PAC_LINK columns referencing a PU. This is done by inspecting the column bindings in the aggregate's group expressions and tracing them back to their source table scans.
+1. **Detect PU-key grouping**: when filtering which aggregates to transform, the compiler checks if an inner aggregate's GROUP BY keys contain the PU's PRIVACY_KEY columns or PRIVACY_LINK columns referencing a PU. This is done by inspecting the column bindings in the aggregate's group expressions and tracing them back to their source table scans.
 2. When detected, the **inner aggregate is skipped** (it's already partitioned by PU key, so no noise needed there — each group corresponds to a single PU)
 3. The **outer aggregate is noised** instead, using the inner aggregate's PU key group column as the hash input. The compiler locates the inner aggregate, finds the column binding for the PU key in its output, and uses that as the hash source for the outer aggregate.
 4. This means the hash for the outer aggregate comes from the inner aggregate's GROUP BY output rather than from a table scan — the inner aggregate preserves PU identity in its grouping columns.

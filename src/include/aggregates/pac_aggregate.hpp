@@ -177,13 +177,13 @@ inline double GetPacMiFromSetting(ClientContext &ctx) {
 }
 
 // Bind data used by PAC aggregates to carry `mi` and `correction` parameters.
-// Reads seed from pac_seed setting (or uses query-id if not set) and computes query_hash.
+// Reads seed from privacy_seed setting (or uses query-id if not set) and computes query_hash.
 // query_hash is XOR'd with per-row key_hash inside pac_hash() (centralized) and used as
 // the counter selector for PacNoisySampleFrom64Counters in finalize functions.
 struct PacBindData : public FunctionData {
 	double mi;                // mutual information parameter from pac_mi setting (controls noise/NULL probability)
 	double correction;        // correction factor: multiplies sum/avg/count results, reduces NULL prob for min/max
-	uint64_t seed;            // RNG seed: pac_seed setting value, or query-id if not set
+	uint64_t seed;            // RNG seed: privacy_seed setting value, or query-id if not set
 	uint64_t query_hash;      // derived from seed: used inside pac_hash() for XOR and as counter selector
 	double scale_divisor;     // for DECIMAL pac_avg: divide result by 10^scale (default 1.0)
 	bool hash_repair;         // if true, pac_hash() repairs hash to exactly 32 bits set
@@ -199,7 +199,7 @@ struct PacBindData : public FunctionData {
 	mutable uint64_t suspicious_count;    // groups with [29..35] zero bits AND all-same-value
 	mutable uint64_t nonsuspicious_count; // groups that are not suspicious
 
-	// Primary constructor - reads seed from pac_seed setting, or uses query-id if not set.
+	// Primary constructor - reads seed from privacy_seed setting, or uses query-id if not set.
 	// All aggregates in the same query get the same seed and query_hash.
 	explicit PacBindData(ClientContext &ctx, double mi_val, double correction_val = 1.0, double scale_div = 1.0,
 	                     bool hash_repair_val = false)
@@ -208,11 +208,11 @@ struct PacBindData : public FunctionData {
 	      nonsuspicious_count(0) {
 		// Read utility threshold: if set (non-null), enables probabilistic NULLing of low-SNR cells
 		Value ut_val;
-		if (ctx.TryGetCurrentSetting("pac_utility_threshold", ut_val) && !ut_val.IsNull()) {
+		if (ctx.TryGetCurrentSetting("privacy_min_group_count", ut_val) && !ut_val.IsNull()) {
 			utility_threshold = ut_val.GetValue<double>();
 		}
 		Value pac_seed_val;
-		if (ctx.TryGetCurrentSetting("pac_seed", pac_seed_val) && !pac_seed_val.IsNull()) {
+		if (ctx.TryGetCurrentSetting("privacy_seed", pac_seed_val) && !pac_seed_val.IsNull()) {
 			seed = uint64_t(pac_seed_val.GetValue<int64_t>());
 		} else {
 			seed = 42;

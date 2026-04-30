@@ -457,7 +457,7 @@ static bool ReadAllBytes(int fd, void *buf, size_t n) {
 		con.Query("LOAD icu");
 		con.Query("INSTALL tpch");
 		con.Query("LOAD tpch");
-		auto r = con.Query("LOAD pac");
+		auto r = con.Query("LOAD privacy");
 		if (r->HasError()) {
 			_exit(2);
 		}
@@ -1348,7 +1348,7 @@ int RunSQLStormBenchmark(const string &queries_dir, const string &out_csv, doubl
 				setup_con.Query("LOAD icu");
 				setup_con.Query("INSTALL tpch");
 				setup_con.Query("LOAD tpch");
-				auto r = setup_con.Query("LOAD pac");
+				auto r = setup_con.Query("LOAD privacy");
 				if (r->HasError()) {
 					throw std::runtime_error("Failed to load PAC extension: " + r->GetError());
 				}
@@ -1368,9 +1368,9 @@ int RunSQLStormBenchmark(const string &queries_dir, const string &out_csv, doubl
 				}
 
 				// Clear PAC metadata for baseline pass
-				auto r_clear = setup_con.Query("PRAGMA clear_pac_metadata;");
+				auto r_clear = setup_con.Query("PRAGMA clear_privacy_metadata;");
 				if (r_clear->HasError()) {
-					Log("clear_pac_metadata error: " + r_clear->GetError());
+					Log("clear_privacy_metadata error: " + r_clear->GetError());
 				}
 				setup_con.Query("CHECKPOINT");
 				Log("Cleared PAC metadata for baseline pass");
@@ -1392,7 +1392,7 @@ int RunSQLStormBenchmark(const string &queries_dir, const string &out_csv, doubl
 				setup_con.Query("LOAD icu");
 				setup_con.Query("INSTALL tpch");
 				setup_con.Query("LOAD tpch");
-				auto r = setup_con.Query("LOAD pac");
+				auto r = setup_con.Query("LOAD privacy");
 				if (r->HasError()) {
 					throw std::runtime_error("Failed to load PAC extension: " + r->GetError());
 				}
@@ -1532,7 +1532,7 @@ int RunSQLStormBenchmark(const string &queries_dir, const string &out_csv, doubl
 				so_con.Query("SET temp_directory='/tmp/duckdb_temp'");
 				so_con.Query("INSTALL icu");
 				so_con.Query("LOAD icu");
-				auto r = so_con.Query("LOAD pac");
+				auto r = so_con.Query("LOAD privacy");
 				if (r->HasError()) {
 					throw std::runtime_error("Failed to load PAC extension: " + r->GetError());
 				}
@@ -1640,9 +1640,9 @@ int RunSQLStormBenchmark(const string &queries_dir, const string &out_csv, doubl
 				}
 
 				// Clear PAC metadata for baseline pass
-				auto r_clear = so_con.Query("PRAGMA clear_pac_metadata;");
+				auto r_clear = so_con.Query("PRAGMA clear_privacy_metadata;");
 				if (r_clear->HasError()) {
-					Log("clear_pac_metadata error: " + r_clear->GetError());
+					Log("clear_privacy_metadata error: " + r_clear->GetError());
 				}
 				so_con.Query("CHECKPOINT");
 				Log("Cleared PAC metadata for baseline pass");
@@ -1663,7 +1663,7 @@ int RunSQLStormBenchmark(const string &queries_dir, const string &out_csv, doubl
 				so_con.Query("SET temp_directory='/tmp/duckdb_temp'");
 				so_con.Query("INSTALL icu");
 				so_con.Query("LOAD icu");
-				auto r = so_con.Query("LOAD pac");
+				auto r = so_con.Query("LOAD privacy");
 				if (r->HasError()) {
 					throw std::runtime_error("Failed to load PAC extension: " + r->GetError());
 				}

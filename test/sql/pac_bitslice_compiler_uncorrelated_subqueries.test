@@ -2,13 +2,13 @@
 # description: Test bitslice compiler with complex queries involving subqueries, joins, and projections (TPC-H Q7 and Q13 patterns)
 # group: [sql]
 
-require pac
+require privacy
 
 statement ok
-PRAGMA clear_pac_metadata;
+PRAGMA clear_privacy_metadata;
 
 statement ok
-SET pac_seed = 42
+SET privacy_seed = 42
 
 statement ok
 SET pac_hash_repair = true
@@ -19,7 +19,7 @@ SET threads = 1
 statement ok
 SET pac_mi = 0
 
-# Create TPC-H-like schema with PAC_KEY/PAC_LINK metadata
+# Create TPC-H-like schema with PRIVACY_KEY/PRIVACY_LINK metadata
 # This tests the compiler's ability to handle:
 # - Multiple joins across several tables
 # - Projections with date functions and arithmetic
@@ -49,7 +49,7 @@ CREATE PU TABLE customer(
     c_custkey INTEGER,
     c_name VARCHAR,
     c_nationkey INTEGER,
-    PAC_KEY (c_custkey)
+    PRIVACY_KEY (c_custkey)
 );
 
 statement ok
@@ -132,28 +132,28 @@ INSERT INTO lineitem VALUES
 
 # Add PAC metadata for nation (standalone, key only)
 statement ok
-ALTER TABLE nation ADD PAC_KEY (n_nationkey);
+ALTER TABLE nation ADD PRIVACY_KEY (n_nationkey);
 
 # Add PAC metadata for supplier (standalone, key only)
 statement ok
-ALTER TABLE supplier ADD PAC_KEY (s_suppkey);
+ALTER TABLE supplier ADD PRIVACY_KEY (s_suppkey);
 
 # Add PAC metadata for orders (linked to customer)
 statement ok
-ALTER TABLE orders ADD PAC_KEY (o_orderkey);
+ALTER TABLE orders ADD PRIVACY_KEY (o_orderkey);
 
 statement ok
-ALTER TABLE orders ADD PAC_LINK (o_custkey) REFERENCES customer(c_custkey);
+ALTER TABLE orders ADD PRIVACY_LINK (o_custkey) REFERENCES customer(c_custkey);
 
 # Add PAC metadata for lineitem (linked to orders and supplier)
 statement ok
-ALTER TABLE lineitem ADD PAC_KEY (l_orderkey, l_linenumber);
+ALTER TABLE lineitem ADD PRIVACY_KEY (l_orderkey, l_linenumber);
 
 statement ok
-ALTER TABLE lineitem ADD PAC_LINK (l_orderkey) REFERENCES orders(o_orderkey);
+ALTER TABLE lineitem ADD PRIVACY_LINK (l_orderkey) REFERENCES orders(o_orderkey);
 
 statement ok
-ALTER TABLE lineitem ADD PAC_LINK (l_suppkey) REFERENCES supplier(s_suppkey);
+ALTER TABLE lineitem ADD PRIVACY_LINK (l_suppkey) REFERENCES supplier(s_suppkey);
 
 # Test 1: TPC-H Q7-style query
 # Tests: Multiple joins, date filtering, projections with date_part, arithmetic expressions, GROUP BY, ORDER BY
@@ -411,12 +411,12 @@ statement ok
 DROP TABLE nation;
 
 statement ok
-PRAGMA clear_pac_metadata;
+PRAGMA clear_privacy_metadata;
 
 # ============================================================
 # Test 6: Q13-style query on tables WITHOUT PRIMARY KEY constraints
 # Reproduces the sf30 / dbgen setup where tables have no SQL PK/FK
-# and PU key must be inferred from PAC_LINK referenced_columns.
+# and PU key must be inferred from PRIVACY_LINK referenced_columns.
 # ============================================================
 
 # Create tables without any PK or FK constraints (like dbgen output)
@@ -461,16 +461,16 @@ INSERT INTO orders_nopk VALUES
     (11, 1, '1995-12-01', 'urgent'),
     (12, 8, '1996-02-17', 'regular');
 
-# Add PAC_KEY and set as PU
+# Add PRIVACY_KEY and set as PU
 statement ok
-ALTER TABLE customer_nopk ADD PAC_KEY (c_custkey);
+ALTER TABLE customer_nopk ADD PRIVACY_KEY (c_custkey);
 
 statement ok
 ALTER TABLE customer_nopk SET PU;
 
-# Link orders to customer via PAC_LINK (this is how sf30 metadata works)
+# Link orders to customer via PRIVACY_LINK (this is how sf30 metadata works)
 statement ok
-ALTER TABLE orders_nopk ADD PAC_LINK (o_custkey) REFERENCES customer_nopk(c_custkey);
+ALTER TABLE orders_nopk ADD PRIVACY_LINK (o_custkey) REFERENCES customer_nopk(c_custkey);
 
 # Q13-style nested aggregate: inner groups by PU key, outer should get noised
 query II

@@ -33,7 +33,7 @@ struct PACLink {
 };
 
 // PAC metadata for a single table
-struct PACTableMetadata {
+struct PrivacyTableMetadata {
 	string table_name;
 	vector<string> primary_key_columns;
 	vector<PACLink> links;
@@ -43,21 +43,21 @@ struct PACTableMetadata {
 	bool derived_pu = false;        // True if created via CTAS from a PU or derived_pu table
 	bool is_set_pu_op = false;      // Transient: SET PU op needs plan-time key validation (not serialized)
 
-	PACTableMetadata() = default;
-	explicit PACTableMetadata(string name) : table_name(std::move(name)) {
+	PrivacyTableMetadata() = default;
+	explicit PrivacyTableMetadata(string name) : table_name(std::move(name)) {
 	}
 };
 
-// Forward declaration - full definition in pac_metadata_manager.hpp
-class PACMetadataManager;
+// Forward declaration - full definition in privacy_metadata_manager.hpp
+class PrivacyMetadataManager;
 
 // Parse data for PAC parser extension
 struct PACParseData : public ParserExtensionParseData {
 	string stripped_sql;
-	PACTableMetadata metadata;
+	PrivacyTableMetadata metadata;
 	bool is_pac_ddl;
 
-	PACParseData(string sql, PACTableMetadata meta, bool is_pac)
+	PACParseData(string sql, PrivacyTableMetadata meta, bool is_pac)
 	    : stripped_sql(std::move(sql)), metadata(std::move(meta)), is_pac_ddl(is_pac) {
 	}
 
@@ -71,9 +71,9 @@ struct PACParseData : public ParserExtensionParseData {
 };
 
 // PAC Parser Extension - handles CREATE PU TABLE and ALTER TABLE ... ADD PAC ...
-class PACParserExtension : public ParserExtension {
+class PrivacyParserExtension : public ParserExtension {
 public:
-	PACParserExtension() {
+	PrivacyParserExtension() {
 		parse_function = PACParseFunction;
 		plan_function = PACPlanFunction;
 	}
@@ -83,13 +83,13 @@ public:
 	                                                 unique_ptr<ParserExtensionParseData> parse_data);
 
 	// Parse CREATE PU TABLE syntax
-	static bool ParseCreatePACTable(const string &query, string &stripped_sql, PACTableMetadata &metadata);
+	static bool ParseCreatePACTable(const string &query, string &stripped_sql, PrivacyTableMetadata &metadata);
 
 	// Parse ALTER TABLE ... ADD PAC ... syntax
-	static bool ParseAlterTableAddPAC(const string &query, string &stripped_sql, PACTableMetadata &metadata);
+	static bool ParseAlterTableAddPAC(const string &query, string &stripped_sql, PrivacyTableMetadata &metadata);
 
 	// Parse ALTER PU TABLE ... DROP PAC LINK/PROTECTED ... syntax
-	static bool ParseAlterTableDropPAC(const string &query, string &stripped_sql, PACTableMetadata &metadata);
+	static bool ParseAlterTableDropPAC(const string &query, string &stripped_sql, PrivacyTableMetadata &metadata);
 
 	// Extract PAC PRIMARY KEY from CREATE statement
 	static bool ExtractPACPrimaryKey(const string &clause, vector<string> &pk_columns);
@@ -109,7 +109,7 @@ public:
 
 } // namespace duckdb
 
-// Include PACMetadataManager full definition (placed after namespace to avoid circular dependencies)
-#include "metadata/pac_metadata_manager.hpp"
+// Include PrivacyMetadataManager full definition (placed after namespace to avoid circular dependencies)
+#include "metadata/privacy_metadata_manager.hpp"
 
 #endif // PAC_PARSER_HPP

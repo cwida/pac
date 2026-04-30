@@ -9,7 +9,7 @@
 //
 
 #include "query_processing/pac_subquery_handler.hpp"
-#include "pac_debug.hpp"
+#include "privacy_debug.hpp"
 #include "query_processing/pac_expression_builder.hpp"
 #include "query_processing/pac_plan_traversal.hpp"
 #include "duckdb/planner/operator/logical_join.hpp"
@@ -182,15 +182,16 @@ static void UpdateDelimGetsInSubtree(LogicalOperator *op, const LogicalType &sou
 	}
 	if (op->type == LogicalOperatorType::LOGICAL_DELIM_GET) {
 		auto &dg = op->Cast<LogicalDelimGet>();
-#if PAC_DEBUG
-		PAC_DEBUG_PRINT("AddBindingToDelimJoin: Updating DELIM_GET #" + std::to_string(dg.table_index) +
-		                " chunk_types before=" + std::to_string(dg.chunk_types.size()));
+#if PRIVACY_DEBUG
+		PRIVACY_DEBUG_PRINT("AddBindingToDelimJoin: Updating DELIM_GET #" + std::to_string(dg.table_index) +
+		                    " chunk_types before=" + std::to_string(dg.chunk_types.size()));
 #endif
 		dg.chunk_types.push_back(source_type);
 		op->ResolveOperatorTypes();
-#if PAC_DEBUG
-		PAC_DEBUG_PRINT("AddBindingToDelimJoin: DELIM_GET #" + std::to_string(dg.table_index) + " chunk_types after=" +
-		                std::to_string(dg.chunk_types.size()) + " types after=" + std::to_string(dg.types.size()));
+#if PRIVACY_DEBUG
+		PRIVACY_DEBUG_PRINT("AddBindingToDelimJoin: DELIM_GET #" + std::to_string(dg.table_index) +
+		                    " chunk_types after=" + std::to_string(dg.chunk_types.size()) +
+		                    " types after=" + std::to_string(dg.types.size()));
 #endif
 	}
 	for (auto &child : op->children) {
@@ -208,18 +209,19 @@ DelimColumnResult AddBindingToDelimJoin(unique_ptr<LogicalOperator> &plan, idx_t
 
 	auto *delim_join = FindDelimJoinForSource(plan.get(), source_table_index, target_agg);
 	if (!delim_join) {
-#if PAC_DEBUG
-		PAC_DEBUG_PRINT("AddBindingToDelimJoin: No DELIM_JOIN found for source #" + std::to_string(source_table_index));
+#if PRIVACY_DEBUG
+		PRIVACY_DEBUG_PRINT("AddBindingToDelimJoin: No DELIM_JOIN found for source #" +
+		                    std::to_string(source_table_index));
 #endif
 		return invalid_result;
 	}
 
-#if PAC_DEBUG
-	PAC_DEBUG_PRINT("AddBindingToDelimJoin: Found DELIM_JOIN, source_table_index=" +
-	                std::to_string(source_table_index) + " binding=[" + std::to_string(source_binding.table_index) +
-	                "." + std::to_string(source_binding.column_index) + "]");
-	PAC_DEBUG_PRINT("AddBindingToDelimJoin: Left child type=" +
-	                std::to_string(static_cast<int>(delim_join->children[0]->type)));
+#if PRIVACY_DEBUG
+	PRIVACY_DEBUG_PRINT("AddBindingToDelimJoin: Found DELIM_JOIN, source_table_index=" +
+	                    std::to_string(source_table_index) + " binding=[" + std::to_string(source_binding.table_index) +
+	                    "." + std::to_string(source_binding.column_index) + "]");
+	PRIVACY_DEBUG_PRINT("AddBindingToDelimJoin: Left child type=" +
+	                    std::to_string(static_cast<int>(delim_join->children[0]->type)));
 #endif
 
 	// Trace the binding through the left child of DELIM_JOIN
@@ -228,27 +230,27 @@ DelimColumnResult AddBindingToDelimJoin(unique_ptr<LogicalOperator> &plan, idx_t
 	    EnsureBindingFlowsThrough(left_child, source_table_index, source_binding, source_type);
 
 	if (output_binding.table_index == DConstants::INVALID_INDEX) {
-#if PAC_DEBUG
-		PAC_DEBUG_PRINT("AddBindingToDelimJoin: EnsureBindingFlowsThrough failed");
+#if PRIVACY_DEBUG
+		PRIVACY_DEBUG_PRINT("AddBindingToDelimJoin: EnsureBindingFlowsThrough failed");
 #endif
 		return invalid_result;
 	}
 
-#if PAC_DEBUG
-	PAC_DEBUG_PRINT("AddBindingToDelimJoin: output_binding=[" + std::to_string(output_binding.table_index) + "." +
-	                std::to_string(output_binding.column_index) + "]");
-	PAC_DEBUG_PRINT("AddBindingToDelimJoin: duplicate_eliminated_columns.size()=" +
-	                std::to_string(delim_join->duplicate_eliminated_columns.size()));
+#if PRIVACY_DEBUG
+	PRIVACY_DEBUG_PRINT("AddBindingToDelimJoin: output_binding=[" + std::to_string(output_binding.table_index) + "." +
+	                    std::to_string(output_binding.column_index) + "]");
+	PRIVACY_DEBUG_PRINT("AddBindingToDelimJoin: duplicate_eliminated_columns.size()=" +
+	                    std::to_string(delim_join->duplicate_eliminated_columns.size()));
 	for (idx_t i = 0; i < delim_join->duplicate_eliminated_columns.size(); i++) {
 		auto &dec = delim_join->duplicate_eliminated_columns[i];
-		PAC_DEBUG_PRINT("AddBindingToDelimJoin: existing dup_elim[" + std::to_string(i) + "] = " + dec->ToString() +
-		                " type=" + dec->return_type.ToString());
+		PRIVACY_DEBUG_PRINT("AddBindingToDelimJoin: existing dup_elim[" + std::to_string(i) + "] = " + dec->ToString() +
+		                    " type=" + dec->return_type.ToString());
 	}
 	// Dump DELIM_JOIN conditions
 	auto &dj = delim_join->Cast<LogicalComparisonJoin>();
 	for (idx_t i = 0; i < dj.conditions.size(); i++) {
-		PAC_DEBUG_PRINT("AddBindingToDelimJoin: condition[" + std::to_string(i) +
-		                "] left=" + dj.conditions[i].left->ToString() + " right=" + dj.conditions[i].right->ToString());
+		PRIVACY_DEBUG_PRINT("AddBindingToDelimJoin: condition[" + std::to_string(i) + "] left=" +
+		                    dj.conditions[i].left->ToString() + " right=" + dj.conditions[i].right->ToString());
 	}
 #endif
 
@@ -268,10 +270,10 @@ DelimColumnResult AddBindingToDelimJoin(unique_ptr<LogicalOperator> &plan, idx_t
 		return invalid_result;
 	}
 
-#if PAC_DEBUG
-	PAC_DEBUG_PRINT("AddBindingToDelimJoin: DELIM_GET #" + std::to_string(delim_get->table_index) + " now has " +
-	                std::to_string(delim_get->chunk_types.size()) + " chunk_types, " +
-	                std::to_string(delim_get->types.size()) + " types");
+#if PRIVACY_DEBUG
+	PRIVACY_DEBUG_PRINT("AddBindingToDelimJoin: DELIM_GET #" + std::to_string(delim_get->table_index) + " now has " +
+	                    std::to_string(delim_get->chunk_types.size()) + " chunk_types, " +
+	                    std::to_string(delim_get->types.size()) + " types");
 #endif
 
 	DelimColumnResult result;

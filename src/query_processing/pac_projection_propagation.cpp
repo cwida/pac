@@ -3,8 +3,8 @@
 //
 
 #include "query_processing/pac_projection_propagation.hpp"
-#include "pac_debug.hpp"
-#include "utils/pac_helpers.hpp"
+#include "privacy_debug.hpp"
+#include "utils/privacy_helpers.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/planner/operator/logical_aggregate.hpp"
 #include "duckdb/planner/operator/logical_projection.hpp"
@@ -106,9 +106,9 @@ ColumnBinding PropagateSingleBinding(LogicalOperator &plan_root, idx_t source_ta
 
 	vector<PathEntry> path_ops;
 	if (!FindDirectPathToSource(target_agg, source_table_index, path_ops, true)) {
-#if PAC_DEBUG
-		PAC_DEBUG_PRINT("PropagateSingleBinding: No direct path from aggregate to source #" +
-		                std::to_string(source_table_index));
+#if PRIVACY_DEBUG
+		PRIVACY_DEBUG_PRINT("PropagateSingleBinding: No direct path from aggregate to source #" +
+		                    std::to_string(source_table_index));
 #endif
 		return invalid;
 	}
@@ -182,9 +182,10 @@ ColumnBinding PropagateSingleBinding(LogicalOperator &plan_root, idx_t source_ta
 
 			// Verify binding is in the output (joins pass through child bindings)
 			if (!BindingInOutput(join, current)) {
-#if PAC_DEBUG
-				PAC_DEBUG_PRINT("PropagateSingleBinding: WARNING - binding [" + std::to_string(current.table_index) +
-				                "." + std::to_string(current.column_index) + "] not found in join output");
+#if PRIVACY_DEBUG
+				PRIVACY_DEBUG_PRINT("PropagateSingleBinding: WARNING - binding [" +
+				                    std::to_string(current.table_index) + "." + std::to_string(current.column_index) +
+				                    "] not found in join output");
 #endif
 			}
 			// Binding identity preserved through joins

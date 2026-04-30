@@ -2,19 +2,19 @@
 // Created by ila on 12/12/25.
 //
 
-#include "core/pac_optimizer.hpp"
+#include "core/privacy_optimizer.hpp"
 #include "aggregates/pac_aggregate.hpp"
-#include "pac_debug.hpp"
+#include "privacy_debug.hpp"
 #include <string>
 #include <algorithm>
 
-#include "utils/pac_helpers.hpp"
+#include "utils/privacy_helpers.hpp"
 // Include PAC bitslice compiler
 #include "compiler/pac_bitslice_compiler.hpp"
 // Include elastic-sensitivity DP compiler
 #include "compiler/dp_elastic_compiler.hpp"
 // Include PAC parser for metadata management
-#include "parser/pac_parser.hpp"
+#include "parser/privacy_parser.hpp"
 // Include utility diff
 #include "diff/pac_utility_diff.hpp"
 // Include derived_pu rewriter (counter conversion + pac_finalize injection)
@@ -29,8 +29,8 @@
 #include "duckdb/planner/operator/logical_create_table.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/planner/operator/logical_insert.hpp"
-#include "metadata/pac_metadata_manager.hpp"
-#include "metadata/pac_compatibility_check.hpp"
+#include "metadata/privacy_metadata_manager.hpp"
+#include "metadata/privacy_compatibility_check.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/main/client_context_state.hpp"
 #include "duckdb/main/prepared_statement_data.hpp"
@@ -61,11 +61,11 @@ void PACDropTableRule::PACDropTableRuleFunction(OptimizerExtensionInput &input, 
 	string table_name = drop_info.name;
 
 	// Check if this table has PAC metadata
-	auto &metadata_mgr = PACMetadataManager::Get();
+	auto &metadata_mgr = PrivacyMetadataManager::Get();
 	if (!metadata_mgr.HasMetadata(table_name)) {
 		return; // No metadata for this table, nothing to clean up
 	}
-#if PAC_DEBUG
+#if PRIVACY_DEBUG
 	std::cerr << "[PAC DEBUG] DROP TABLE detected for table with PAC metadata: " << table_name << "\n";
 #endif
 	// Check if any other tables have PAC LINKs pointing to this table
@@ -96,7 +96,7 @@ void PACDropTableRule::PACDropTableRuleFunction(OptimizerExtensionInput &input, 
 		}
 
 		// Make a copy and remove links
-		PACTableMetadata updated_metadata = *other_metadata;
+		PrivacyTableMetadata updated_metadata = *other_metadata;
 		updated_metadata.links.erase(std::remove_if(updated_metadata.links.begin(), updated_metadata.links.end(),
 		                                            [&table_name](const PACLink &link) {
 			                                            return StringUtil::Lower(link.referenced_table) ==
@@ -106,7 +106,7 @@ void PACDropTableRule::PACDropTableRuleFunction(OptimizerExtensionInput &input, 
 
 		// Update the metadata
 		metadata_mgr.AddOrUpdateTable(other_table, updated_metadata);
-#if PAC_DEBUG
+#if PRIVACY_DEBUG
 		std::cerr << "[PAC DEBUG] Removed PAC LINKs from table '" << other_table << "' that referenced dropped table '"
 		          << table_name << "'"
 		          << "\n";
@@ -114,14 +114,14 @@ void PACDropTableRule::PACDropTableRuleFunction(OptimizerExtensionInput &input, 
 	}
 	// Remove metadata for the dropped table
 	metadata_mgr.RemoveTable(table_name);
-#if PAC_DEBUG
+#if PRIVACY_DEBUG
 	std::cerr << "[PAC DEBUG] Removed PAC metadata for dropped table: " << table_name << "\n";
 #endif
 	// Save updated metadata to file
-	string metadata_path = PACMetadataManager::GetMetadataFilePath(input.context);
+	string metadata_path = PrivacyMetadataManager::GetMetadataFilePath(input.context);
 	if (!metadata_path.empty()) {
 		metadata_mgr.SaveToFile(metadata_path);
-#if PAC_DEBUG
+#if PRIVACY_DEBUG
 		std::cerr << "[PAC DEBUG] Saved updated PAC metadata after DROP TABLE"
 		          << "\n";
 #endif
@@ -133,7 +133,7 @@ void PACDropTableRule::PACDropTableRuleFunction(OptimizerExtensionInput &input, 
 // ============================================================================
 
 // When a CTAS sources from a PU or derived_pu table, mark the new table as
-// derived_pu and propagate PAC_KEY columns. derived_pu tables behave as:
+// derived_pu and propagate PRIVACY_KEY columns. derived_pu tables behave as:
 //   - SELECT: untouched (no PAC check/noise)
 //   - INSERT/UPDATE containing aggregation: PAC noise injected
 //
@@ -143,7 +143,7 @@ static void PropagateCTASMetadata(unique_ptr<LogicalOperator> &outer_plan, uniqu
                                   OptimizerExtensionInput &input) {
 	auto &create_table = outer_plan->Cast<LogicalCreateTable>();
 	string new_table = create_table.info->Base().table;
-	auto &mgr = PACMetadataManager::Get();
+	auto &mgr = PrivacyMetadataManager::Get();
 	if (mgr.HasMetadata(new_table)) {
 		return;
 	}
@@ -153,7 +153,7 @@ static void PropagateCTASMetadata(unique_ptr<LogicalOperator> &outer_plan, uniqu
 	// aggregated — protected columns should not be propagated to the result table).
 	std::stack<LogicalOperator *> stack;
 	stack.push(select_plan.get());
-	const PACTableMetadata *source_meta = nullptr;
+	const PrivacyTableMetadata *source_meta = nullptr;
 	LogicalGet *source_get = nullptr;
 	bool has_aggregate = false;
 
@@ -222,8 +222,8 @@ static void PropagateCTASMetadata(unique_ptr<LogicalOperator> &outer_plan, uniqu
 		dest_idx++;
 	}
 
-	// Map source PAC_KEY and protected columns to destination names
-	PACTableMetadata prop(new_table);
+	// Map source PRIVACY_KEY and protected columns to destination names
+	PrivacyTableMetadata prop(new_table);
 	prop.derived_pu = true;
 
 	for (auto &pk : source_meta->primary_key_columns) {
@@ -270,7 +270,7 @@ static void PropagateCTASMetadata(unique_ptr<LogicalOperator> &outer_plan, uniqu
 
 	mgr.AddOrUpdateTable(new_table, prop);
 
-	string path = PACMetadataManager::GetMetadataFilePath(input.context);
+	string path = PrivacyMetadataManager::GetMetadataFilePath(input.context);
 	if (!path.empty()) {
 		mgr.SaveToFile(path);
 	}
@@ -330,7 +330,7 @@ void PACRewriteRule::PACPreOptimizeFunction(OptimizerExtensionInput &input, uniq
 		return;
 	}
 	// Propagate CTAS metadata even when pac_rewrite is disabled, so that
-	// tables created via CTAS (e.g. IVM delta tables) inherit PAC_KEY and
+	// tables created via CTAS (e.g. IVM delta tables) inherit PRIVACY_KEY and
 	// PROTECTED columns from their source tables.
 	bool pac_ctas_enabled = GetBooleanSetting(input.context, "pac_ctas", true);
 	if (pac_ctas_enabled && plan->type == LogicalOperatorType::LOGICAL_CREATE_TABLE && !plan->children.empty()) {
@@ -359,7 +359,7 @@ void PACRewriteRule::PACPreOptimizeFunction(OptimizerExtensionInput &input, uniq
 	// Run the PAC compatibility checks only if the plan is a projection, order by, or aggregate (i.e., a SELECT query)
 	// For EXPLAIN/EXPLAIN_ANALYZE, look at the child operator to decide whether to rewrite
 	LogicalOperator *check_plan = plan.get();
-	PAC_DEBUG_PRINT("[PAC TRACE] plan->type = " + std::to_string((int)plan->type));
+	PRIVACY_DEBUG_PRINT("[PAC TRACE] plan->type = " + std::to_string((int)plan->type));
 	if (plan->type == LogicalOperatorType::LOGICAL_EXPLAIN && !plan->children.empty()) {
 		check_plan = plan->children[0].get();
 	}
@@ -368,8 +368,8 @@ void PACRewriteRule::PACPreOptimizeFunction(OptimizerExtensionInput &input, uniq
 	if ((check_plan->type == LogicalOperatorType::LOGICAL_INSERT ||
 	     check_plan->type == LogicalOperatorType::LOGICAL_CREATE_TABLE) &&
 	    !check_plan->children.empty()) {
-		PAC_DEBUG_PRINT("[PAC TRACE] DML wrapper detected, drilling to child: " +
-		                std::to_string((int)check_plan->children[0]->type));
+		PRIVACY_DEBUG_PRINT("[PAC TRACE] DML wrapper detected, drilling to child: " +
+		                    std::to_string((int)check_plan->children[0]->type));
 		check_plan = check_plan->children[0].get();
 	}
 	// TODO: why this particular collection of operators? Maybe check against DDL or DML
@@ -378,14 +378,14 @@ void PACRewriteRule::PACPreOptimizeFunction(OptimizerExtensionInput &input, uniq
 	if (check_plan->type == LogicalOperatorType::LOGICAL_DISTINCT && !check_plan->children.empty()) {
 		check_plan = check_plan->children[0].get();
 	}
-	PAC_DEBUG_PRINT("[PAC TRACE] check_plan->type = " + std::to_string((int)check_plan->type));
+	PRIVACY_DEBUG_PRINT("[PAC TRACE] check_plan->type = " + std::to_string((int)check_plan->type));
 	if (check_plan->type != LogicalOperatorType::LOGICAL_PROJECTION &&
 	    check_plan->type != LogicalOperatorType::LOGICAL_ORDER_BY &&
 	    check_plan->type != LogicalOperatorType::LOGICAL_TOP_N &&
 	    check_plan->type != LogicalOperatorType::LOGICAL_LIMIT &&
 	    check_plan->type != LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY &&
 	    check_plan->type != LogicalOperatorType::LOGICAL_MATERIALIZED_CTE) {
-		PAC_DEBUG_PRINT("[PAC TRACE] check_plan type NOT in allowed list, returning early");
+		PRIVACY_DEBUG_PRINT("[PAC TRACE] check_plan type NOT in allowed list, returning early");
 		return;
 	}
 	// For EXPLAIN queries, we need to operate on the child plan
@@ -411,28 +411,28 @@ void PACRewriteRule::PACPreOptimizeFunction(OptimizerExtensionInput &input, uniq
 	unique_ptr<LogicalOperator> &target_plan = is_dml_wrapper ? outer_plan->children[0] : outer_plan;
 
 	// Delegate compatibility checks (including detecting PAC table presence and internal sample scans)
-	PACCompatibilityResult check = PACRewriteQueryCheck(target_plan, input.context, pac_info);
+	PrivacyCompatibilityResult check = PACRewriteQueryCheck(target_plan, input.context, pac_info);
 
 	// For DML wrappers (INSERT/CTAS, including CTE-wrapped), check if any scanned tables are derived_pu.
 	// derived_pu tables are transparent to SELECT but trigger PAC noise on DML aggregates.
-	PAC_DEBUG_PRINT("[PAC TRACE] is_dml_wrapper=" + std::to_string(is_dml_wrapper) + " is_cte_dml=" +
-	                std::to_string(is_cte_dml) + " fk_paths.empty=" + std::to_string(check.fk_paths.empty()) +
-	                " scanned_pu_tables.empty=" + std::to_string(check.scanned_pu_tables.empty()));
+	PRIVACY_DEBUG_PRINT("[PAC TRACE] is_dml_wrapper=" + std::to_string(is_dml_wrapper) + " is_cte_dml=" +
+	                    std::to_string(is_cte_dml) + " fk_paths.empty=" + std::to_string(check.fk_paths.empty()) +
+	                    " scanned_pu_tables.empty=" + std::to_string(check.scanned_pu_tables.empty()));
 	if ((is_dml_wrapper || is_cte_dml) && check.fk_paths.empty() && check.scanned_pu_tables.empty() &&
 	    PlanHasAggregate(*target_plan)) {
-		auto &mgr = PACMetadataManager::Get();
+		auto &mgr = PrivacyMetadataManager::Get();
 		std::unordered_map<string, idx_t> scan_counts;
 		CountScans(*target_plan, scan_counts);
-		PAC_DEBUG_PRINT("[PAC TRACE] CountScans found " + std::to_string(scan_counts.size()) + " tables:");
+		PRIVACY_DEBUG_PRINT("[PAC TRACE] CountScans found " + std::to_string(scan_counts.size()) + " tables:");
 		for (auto &kv : scan_counts) {
 			auto *meta = mgr.GetTableMetadata(kv.first);
-			PAC_DEBUG_PRINT("[PAC TRACE]   " + kv.first + " count=" + std::to_string(kv.second) +
-			                " has_meta=" + std::to_string(meta != nullptr) +
-			                " derived_pu=" + std::to_string(meta ? meta->derived_pu : false));
+			PRIVACY_DEBUG_PRINT("[PAC TRACE]   " + kv.first + " count=" + std::to_string(kv.second) +
+			                    " has_meta=" + std::to_string(meta != nullptr) +
+			                    " derived_pu=" + std::to_string(meta ? meta->derived_pu : false));
 			if (kv.second > 0 && meta && meta->derived_pu) {
 				check.scanned_pu_tables.push_back(kv.first);
 				check.eligible_for_rewrite = true;
-				// Populate table_metadata so the compiler knows the PAC_KEY
+				// Populate table_metadata so the compiler knows the PRIVACY_KEY
 				ColumnMetadata cm;
 				cm.table_name = kv.first;
 				cm.pks = meta->primary_key_columns;
@@ -477,13 +477,13 @@ void PACRewriteRule::PACPreOptimizeFunction(OptimizerExtensionInput &input, uniq
 	string normalized = NormalizeQueryForHash(current_query);
 	string query_hash = HashStringToHex(normalized);
 	vector<string> privacy_units = std::move(discovered_pus);
-#if PAC_DEBUG
+#if PRIVACY_DEBUG
 	for (auto &pu : privacy_units) {
 		auto it = check.table_metadata.find(pu);
 		if (it != check.table_metadata.end() && !it->second.pks.empty()) {
-			PAC_DEBUG_PRINT("Discovered primary key columns for privacy unit '" + pu + "':");
+			PRIVACY_DEBUG_PRINT("Discovered primary key columns for privacy unit '" + pu + "':");
 			for (const auto &col : it->second.pks) {
-				PAC_DEBUG_PRINT(col);
+				PRIVACY_DEBUG_PRINT(col);
 			}
 		}
 	}
@@ -519,13 +519,13 @@ void PACRewriteRule::PACPreOptimizeFunction(OptimizerExtensionInput &input, uniq
 		bool apply_noise = IsPacNoiseEnabled(input.context, true);
 		string privacy_mode = GetPrivacyMode(input.context);
 		// dp_elastic always runs its pipeline so clipping, FK chain, and sensitivity
-		// are exercised even when pac_noise=false. The compiler zeroes scales internally.
+		// are exercised even when privacy_noise=false. The compiler zeroes scales internally.
 		bool should_compile = apply_noise || privacy_mode == "dp_elastic";
 		if (should_compile) {
-#if PAC_DEBUG
-			PAC_DEBUG_PRINT("Query requires PAC Compilation for privacy units:");
+#if PRIVACY_DEBUG
+			PRIVACY_DEBUG_PRINT("Query requires PAC Compilation for privacy units:");
 			for (const auto &pu_name : privacy_units) {
-				PAC_DEBUG_PRINT("  " + pu_name);
+				PRIVACY_DEBUG_PRINT("  " + pu_name);
 			}
 #endif
 			// set replan flag for duration of compilation
@@ -550,13 +550,13 @@ void PACRewriteRule::PACPreOptimizeFunction(OptimizerExtensionInput &input, uniq
 					target_table = insert.table.name;
 				}
 				if (!target_table.empty()) {
-					auto &mgr = PACMetadataManager::Get();
+					auto &mgr = PrivacyMetadataManager::Get();
 					auto *meta = mgr.GetTableMetadata(target_table);
-					PAC_DEBUG_PRINT("[PAC TRACE] DML target='" + target_table +
-					                "' has_meta=" + std::to_string(meta != nullptr) +
-					                " derived_pu=" + std::to_string(meta ? meta->derived_pu : false));
+					PRIVACY_DEBUG_PRINT("[PAC TRACE] DML target='" + target_table +
+					                    "' has_meta=" + std::to_string(meta != nullptr) +
+					                    " derived_pu=" + std::to_string(meta ? meta->derived_pu : false));
 					if (meta && meta->derived_pu) {
-						PAC_DEBUG_PRINT("[PAC TRACE] Converting to counters for derived_pu table");
+						PRIVACY_DEBUG_PRINT("[PAC TRACE] Converting to counters for derived_pu table");
 						ConvertDerivedPuToCounters(input, target_plan);
 						// Resolve types so parent operators reflect the counter conversion
 						target_plan->ResolveOperatorTypes();
@@ -628,13 +628,13 @@ void PACDerivedReadRule::PACDerivedReadFunction(OptimizerExtensionInput &input, 
 	if (!HasDerivedPuCounterGets(plan.get())) {
 		return;
 	}
-	PAC_DEBUG_PRINT("[PAC DERIVED READ] === PLAN BEFORE pac_finalize injection ===");
-#if PAC_DEBUG
+	PRIVACY_DEBUG_PRINT("[PAC DERIVED READ] === PLAN BEFORE pac_finalize injection ===");
+#if PRIVACY_DEBUG
 	plan->Print();
 #endif
 	InjectPacFinalizeForDerivedPu(input, plan);
-	PAC_DEBUG_PRINT("[PAC DERIVED READ] === PLAN AFTER pac_finalize injection ===");
-#if PAC_DEBUG
+	PRIVACY_DEBUG_PRINT("[PAC DERIVED READ] === PLAN AFTER pac_finalize injection ===");
+#if PRIVACY_DEBUG
 	plan->Print();
 #endif
 }

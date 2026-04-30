@@ -2,14 +2,14 @@
 # description: Test pac_min and pac_max aggregate functions
 # group: [sql]
 
-require pac
+require privacy
 
 statement ok
-PRAGMA clear_pac_metadata;
+PRAGMA clear_privacy_metadata;
 
 # Set deterministic seed for cross-CPU reproducibility
 statement ok
-SET pac_seed = 42
+SET privacy_seed = 42
 
 statement ok
 SET pac_hash_repair = true
@@ -90,7 +90,7 @@ SELECT pac_noised_max(pac_hash(hash('key' || i::varchar)), i::integer) FROM rang
 ----
 48
 
-# Test pac_max with non-zero mi parameter (deterministic results due to pac_seed)
+# Test pac_max with non-zero mi parameter (deterministic results due to privacy_seed)
 statement ok
 SET pac_mi = 128
 
@@ -488,4 +488,4 @@ detected absence of sample diversity
 
 # Cleanup PAC metadata at end of test
 statement ok
-PRAGMA clear_pac_metadata;
+PRAGMA clear_privacy_metadata;

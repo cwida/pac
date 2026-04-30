@@ -6,7 +6,7 @@
 #include "../../duckdb/src/include/duckdb/planner/expression_iterator.hpp"
 #include <set>
 
-#include "../include/utils/pac_helpers.hpp"
+#include "../include/utils/privacy_helpers.hpp"
 #include "../include/compiler/pac_compiler_helpers.hpp"
 #include "../../duckdb/src/include/duckdb/planner/operator/logical_projection.hpp"
 #include "../../duckdb/src/include/duckdb/planner/operator/logical_dummy_scan.hpp"

@@ -48,13 +48,13 @@ The benchmark:
 2. Installs and loads the TPC-H extension
 3. Loads the PAC extension
 4. Creates TPC-H data if the database doesn't exist
-5. Loads PAC schema from `pac_tpch_schema.sql` (adds PAC_LINK and PROTECTED annotations)
+5. Loads PAC schema from `pac_tpch_schema.sql` (adds PRIVACY_LINK and PROTECTED annotations)
 
 ## PAC Schema
 
 The `pac_tpch_schema.sql` file defines:
-- `PAC_KEY` for privacy unit tables
-- `PAC_LINK` relationships between tables
+- `PRIVACY_KEY` for privacy unit tables
+- `PRIVACY_LINK` relationships between tables
 - `PROTECTED` columns that require aggregate access
 
 This allows the PAC compiler to automatically transform standard TPC-H queries into privacy-preserving versions.

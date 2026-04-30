@@ -2,13 +2,13 @@
 # description: Test derived table creation (CTAS) and INSERT behavior with PAC noise
 # group: [sql]
 
-require pac
+require privacy
 
 statement ok
-PRAGMA clear_pac_metadata;
+PRAGMA clear_privacy_metadata;
 
 statement ok
-SET pac_seed = 42
+SET privacy_seed = 42
 
 statement ok
 SET pac_hash_repair = true
@@ -21,11 +21,11 @@ SET pac_mi = 0
 
 # ============================================================================
 # Test 1: CTAS from PU table propagates metadata
-# Tests: PAC_KEY and PROTECTED columns are propagated to the new table
+# Tests: PRIVACY_KEY and PROTECTED columns are propagated to the new table
 # ============================================================================
 
 statement ok
-CREATE PU TABLE ctas_source (id INT, grp INT, value INT, PAC_KEY(id), PROTECTED(value));
+CREATE PU TABLE ctas_source (id INT, grp INT, value INT, PRIVACY_KEY(id), PROTECTED(value));
 
 statement ok
 INSERT INTO ctas_source VALUES (1, 1, 10), (2, 2, 20);
@@ -34,7 +34,7 @@ INSERT INTO ctas_source VALUES (1, 1, 10), (2, 2, 20);
 statement ok
 SET pac_check = false;
 
-# CTAS should propagate protected(value) and PAC_KEY(id) from ctas_source
+# CTAS should propagate protected(value) and PRIVACY_KEY(id) from ctas_source
 statement ok
 CREATE TABLE ctas_copy AS SELECT * FROM ctas_source LIMIT 0;
 
@@ -65,7 +65,7 @@ DROP TABLE ctas_source;
 # ============================================================================
 
 statement ok
-CREATE PU TABLE ctas_rename_src (id INT, grp INT, value INT, PAC_KEY(id), PROTECTED(value));
+CREATE PU TABLE ctas_rename_src (id INT, grp INT, value INT, PRIVACY_KEY(id), PROTECTED(value));
 
 statement ok
 INSERT INTO ctas_rename_src VALUES (1, 1, 10), (2, 2, 20);
@@ -105,7 +105,7 @@ DROP TABLE ctas_rename_src;
 # ============================================================================
 
 statement ok
-CREATE PU TABLE ctas_agg_src (id INT, grp INT, value INT, PAC_KEY(id), PROTECTED(value));
+CREATE PU TABLE ctas_agg_src (id INT, grp INT, value INT, PRIVACY_KEY(id), PROTECTED(value));
 
 statement ok
 INSERT INTO ctas_agg_src VALUES (1, 1, 10), (2, 1, 20), (3, 2, 30), (4, 2, 40);
@@ -134,7 +134,7 @@ DROP TABLE ctas_agg_src;
 # ============================================================================
 
 statement ok
-CREATE PU TABLE scores (id INT, grp INT, value INT, PAC_KEY(id), PROTECTED(value));
+CREATE PU TABLE scores (id INT, grp INT, value INT, PRIVACY_KEY(id), PROTECTED(value));
 
 statement ok
 INSERT INTO scores VALUES (1, 1, 10), (2, 1, 20), (3, 2, 30), (4, 2, 40);
@@ -168,7 +168,7 @@ DROP TABLE scores;
 # ============================================================================
 
 statement ok
-CREATE PU TABLE items (id INT, cat INT, price INT, PAC_KEY(id), PROTECTED(price));
+CREATE PU TABLE items (id INT, cat INT, price INT, PRIVACY_KEY(id), PROTECTED(price));
 
 statement ok
 INSERT INTO items VALUES (1, 1, 100), (2, 1, 200), (3, 2, 300);
@@ -196,7 +196,7 @@ DROP TABLE items;
 # ============================================================================
 
 statement ok
-CREATE PU TABLE flt_src (id INT, grp INT, val INT, PAC_KEY(id), PROTECTED(val));
+CREATE PU TABLE flt_src (id INT, grp INT, val INT, PRIVACY_KEY(id), PROTECTED(val));
 
 statement ok
 INSERT INTO flt_src VALUES (1,1,10),(2,1,20),(3,2,100),(4,2,200);
@@ -222,7 +222,7 @@ DROP TABLE flt_src;
 # ============================================================================
 
 statement ok
-CREATE PU TABLE ord_src (id INT, grp INT, val INT, PAC_KEY(id), PROTECTED(val));
+CREATE PU TABLE ord_src (id INT, grp INT, val INT, PRIVACY_KEY(id), PROTECTED(val));
 
 statement ok
 INSERT INTO ord_src VALUES (1,1,100),(2,1,200),(3,2,10),(4,2,20),(5,3,50);
@@ -248,7 +248,7 @@ DROP TABLE ord_src;
 # ============================================================================
 
 statement ok
-CREATE PU TABLE multi_src (id INT, grp INT, val INT, PAC_KEY(id), PROTECTED(val));
+CREATE PU TABLE multi_src (id INT, grp INT, val INT, PRIVACY_KEY(id), PROTECTED(val));
 
 statement ok
 INSERT INTO multi_src VALUES (1,1,10),(2,1,20),(3,2,30),(4,2,40);
@@ -284,7 +284,7 @@ DROP TABLE multi_src;
 # ============================================================================
 
 statement ok
-CREATE PU TABLE acc_src (id INT, grp INT, val INT, PAC_KEY(id), PROTECTED(val));
+CREATE PU TABLE acc_src (id INT, grp INT, val INT, PRIVACY_KEY(id), PROTECTED(val));
 
 statement ok
 INSERT INTO acc_src VALUES (1,1,10),(2,1,20),(3,2,30);
@@ -322,7 +322,7 @@ DROP TABLE acc_src;
 # ============================================================================
 
 statement ok
-CREATE PU TABLE agg2_src (id INT, grp INT, val INT, PAC_KEY(id), PROTECTED(val));
+CREATE PU TABLE agg2_src (id INT, grp INT, val INT, PRIVACY_KEY(id), PROTECTED(val));
 
 statement ok
 INSERT INTO agg2_src VALUES (1,1,10),(2,1,20),(3,2,30),(4,2,40);
@@ -348,7 +348,7 @@ DROP TABLE agg2_src;
 # ============================================================================
 
 statement ok
-CREATE PU TABLE arith_src (id INT, grp INT, val INT, PAC_KEY(id), PROTECTED(val));
+CREATE PU TABLE arith_src (id INT, grp INT, val INT, PRIVACY_KEY(id), PROTECTED(val));
 
 statement ok
 INSERT INTO arith_src VALUES (1,1,10),(2,1,20),(3,2,30),(4,2,40);
@@ -375,7 +375,7 @@ DROP TABLE arith_src;
 # ============================================================================
 
 statement ok
-CREATE PU TABLE chain_src (id INT, grp INT, val INT, PAC_KEY(id), PROTECTED(val));
+CREATE PU TABLE chain_src (id INT, grp INT, val INT, PRIVACY_KEY(id), PROTECTED(val));
 
 statement ok
 INSERT INTO chain_src VALUES (1,1,10),(2,1,20),(3,2,30);
@@ -419,7 +419,7 @@ DROP TABLE chain_src;
 # ============================================================================
 
 statement ok
-CREATE PU TABLE btw_src (id INT, grp INT, val INT, PAC_KEY(id), PROTECTED(val));
+CREATE PU TABLE btw_src (id INT, grp INT, val INT, PRIVACY_KEY(id), PROTECTED(val));
 
 statement ok
 INSERT INTO btw_src VALUES (1,1,10),(2,1,20),(3,2,100),(4,2,200),(5,3,5);
@@ -445,7 +445,7 @@ DROP TABLE btw_src;
 # ============================================================================
 
 statement ok
-CREATE PU TABLE dist_src (id INT, grp INT, val INT, PAC_KEY(id), PROTECTED(val));
+CREATE PU TABLE dist_src (id INT, grp INT, val INT, PRIVACY_KEY(id), PROTECTED(val));
 
 statement ok
 INSERT INTO dist_src VALUES (1,1,10),(2,1,20),(3,2,30),(4,2,40);
@@ -471,7 +471,7 @@ DROP TABLE dist_src;
 # ============================================================================
 
 statement ok
-CREATE PU TABLE gb_src (id INT, grp INT, val INT, PAC_KEY(id), PROTECTED(val));
+CREATE PU TABLE gb_src (id INT, grp INT, val INT, PRIVACY_KEY(id), PROTECTED(val));
 
 statement ok
 INSERT INTO gb_src VALUES (1,1,10),(2,1,20),(3,2,30),(4,2,40);
@@ -497,7 +497,7 @@ DROP TABLE gb_src;
 # ============================================================================
 
 statement ok
-CREATE PU TABLE case_src (id INT, grp INT, val INT, PAC_KEY(id), PROTECTED(val));
+CREATE PU TABLE case_src (id INT, grp INT, val INT, PRIVACY_KEY(id), PROTECTED(val));
 
 statement ok
 INSERT INTO case_src VALUES (1,1,10),(2,1,20),(3,2,100),(4,2,200);
@@ -524,7 +524,7 @@ DROP TABLE case_src;
 # ============================================================================
 
 statement ok
-CREATE PU TABLE agg3_src (id INT, grp INT, val INT, PAC_KEY(id), PROTECTED(val));
+CREATE PU TABLE agg3_src (id INT, grp INT, val INT, PRIVACY_KEY(id), PROTECTED(val));
 
 statement ok
 INSERT INTO agg3_src VALUES (1,1,10),(2,1,20),(3,2,100),(4,2,200);
@@ -557,7 +557,7 @@ DROP TABLE agg3_src;
 # ============================================================================
 
 statement ok
-CREATE PU TABLE join_src (id INT, grp INT, val INT, PAC_KEY(id), PROTECTED(val));
+CREATE PU TABLE join_src (id INT, grp INT, val INT, PRIVACY_KEY(id), PROTECTED(val));
 
 statement ok
 INSERT INTO join_src VALUES (1,1,10),(2,1,20),(3,2,100),(4,2,200),(5,3,50);
@@ -597,7 +597,7 @@ DROP TABLE join_src;
 # ============================================================================
 
 statement ok
-CREATE PU TABLE sub_src (id INT, grp INT, val INT, PAC_KEY(id), PROTECTED(val));
+CREATE PU TABLE sub_src (id INT, grp INT, val INT, PRIVACY_KEY(id), PROTECTED(val));
 
 statement ok
 INSERT INTO sub_src VALUES (1,1,10),(2,1,20),(3,2,100),(4,2,200),(5,3,50);
@@ -623,7 +623,7 @@ DROP TABLE sub_src;
 # ============================================================================
 
 statement ok
-CREATE PU TABLE union_src (id INT, grp INT, val INT, PAC_KEY(id), PROTECTED(val));
+CREATE PU TABLE union_src (id INT, grp INT, val INT, PRIVACY_KEY(id), PROTECTED(val));
 
 statement ok
 INSERT INTO union_src VALUES (1,1,10),(2,1,20),(3,2,30);
@@ -655,7 +655,7 @@ DROP TABLE union_src;
 # ============================================================================
 
 statement ok
-CREATE PU TABLE del_src (id INT, grp INT, val INT, PAC_KEY(id), PROTECTED(val));
+CREATE PU TABLE del_src (id INT, grp INT, val INT, PRIVACY_KEY(id), PROTECTED(val));
 
 statement ok
 INSERT INTO del_src VALUES (1,1,10),(2,1,20),(3,2,100),(4,2,200),(5,3,5);
@@ -685,7 +685,7 @@ DROP TABLE del_src;
 # ============================================================================
 
 statement ok
-CREATE PU TABLE in_src (id INT, grp INT, val INT, PAC_KEY(id), PROTECTED(val));
+CREATE PU TABLE in_src (id INT, grp INT, val INT, PRIVACY_KEY(id), PROTECTED(val));
 
 statement ok
 INSERT INTO in_src VALUES (1,1,10),(2,1,20),(3,2,100),(4,2,200);
@@ -712,7 +712,7 @@ DROP TABLE in_src;
 # ============================================================================
 
 statement ok
-CREATE PU TABLE ins_src (id INT, grp INT, val INT, PAC_KEY(id), PROTECTED(val));
+CREATE PU TABLE ins_src (id INT, grp INT, val INT, PRIVACY_KEY(id), PROTECTED(val));
 
 statement ok
 INSERT INTO ins_src VALUES (1,1,10),(2,1,20),(3,2,100),(4,2,200);
@@ -753,7 +753,7 @@ DROP TABLE ins_src;
 # ============================================================================
 
 statement ok
-CREATE PU TABLE neq_src (id INT, grp INT, val INT, PAC_KEY(id), PROTECTED(val));
+CREATE PU TABLE neq_src (id INT, grp INT, val INT, PRIVACY_KEY(id), PROTECTED(val));
 
 statement ok
 INSERT INTO neq_src VALUES (1,1,10),(2,1,20),(3,2,100),(4,2,200),(5,3,5);
@@ -780,7 +780,7 @@ DROP TABLE neq_src;
 # ============================================================================
 
 statement ok
-CREATE PU TABLE nif_src (id INT, grp INT, val INT, PAC_KEY(id), PROTECTED(val));
+CREATE PU TABLE nif_src (id INT, grp INT, val INT, PRIVACY_KEY(id), PROTECTED(val));
 
 statement ok
 INSERT INTO nif_src VALUES (1,1,10),(2,1,20),(3,2,100),(4,2,200),(5,3,5);
@@ -803,4 +803,4 @@ DROP TABLE nif_src;
 
 # Cleanup
 statement ok
-PRAGMA clear_pac_metadata;
+PRAGMA clear_privacy_metadata;

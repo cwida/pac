@@ -11,7 +11,7 @@
 #include "duckdb/planner/operator/logical_aggregate.hpp"
 #include "duckdb/planner/operator/logical_projection.hpp"
 #include "duckdb/planner/operator/logical_materialized_cte.hpp"
-#include "metadata/pac_compatibility_check.hpp"
+#include "metadata/privacy_compatibility_check.hpp"
 
 #include <unordered_map>
 #include <unordered_set>
@@ -98,21 +98,21 @@ vector<LogicalAggregate *> FilterTargetAggregates(const vector<LogicalAggregate 
 // Extended version of FilterTargetAggregates that handles the edge case where inner aggregate
 // groups by PU key (PAC key/PK of Privacy Unit or FK referencing it).
 // In this case, the inner aggregate is skipped and the outer aggregate is noised instead.
-// @param check - PACCompatibilityResult containing table metadata (PKs, FKs)
+// @param check - PrivacyCompatibilityResult containing table metadata (PKs, FKs)
 // @param privacy_units - List of privacy unit table names
 vector<LogicalAggregate *> FilterTargetAggregatesWithPUKeyCheck(const vector<LogicalAggregate *> &all_aggregates,
                                                                 const vector<string> &target_table_names,
-                                                                const PACCompatibilityResult &check,
+                                                                const PrivacyCompatibilityResult &check,
                                                                 const vector<string> &privacy_units,
                                                                 const CTETableMap &cte_map = {});
 
 // Check if an aggregate's GROUP BY keys contain the PU's primary key columns or FK columns
 // referencing a PU. This is used to detect the edge case where inner aggregate groups by PU key.
 // @param agg - The aggregate to check
-// @param check - PACCompatibilityResult containing table metadata
+// @param check - PrivacyCompatibilityResult containing table metadata
 // @param privacy_units - List of privacy unit table names
 // @return true if the aggregate groups by PU key (PK or FK to PU)
-bool AggregateGroupsByPUKey(LogicalAggregate *agg, const PACCompatibilityResult &check,
+bool AggregateGroupsByPUKey(LogicalAggregate *agg, const PrivacyCompatibilityResult &check,
                             const vector<string> &privacy_units);
 
 // Find the first aggregate in a subtree (depth-first).
@@ -134,11 +134,12 @@ bool AreTableColumnsAccessible(LogicalOperator *from_op, idx_t table_index);
 // This is used for the PU-key passthrough pattern where inner aggregate groups by PU key and outer aggregate
 // needs to use that group column as the hash input.
 // @param target_agg - The outer aggregate that was selected for transformation
-// @param check - PACCompatibilityResult containing table metadata
+// @param check - PrivacyCompatibilityResult containing table metadata
 // @param privacy_units - List of privacy unit table names
 // @param out_pk_binding - Output: the column binding of the PU key in the inner aggregate's output
 // @return The inner aggregate that groups by PU key, or nullptr if not found
-LogicalAggregate *FindInnerAggregateWithPUKeyGroup(LogicalAggregate *target_agg, const PACCompatibilityResult &check,
+LogicalAggregate *FindInnerAggregateWithPUKeyGroup(LogicalAggregate *target_agg,
+                                                   const PrivacyCompatibilityResult &check,
                                                    const vector<string> &privacy_units, ColumnBinding &out_pk_binding);
 
 } // namespace duckdb

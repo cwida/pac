@@ -1,15 +1,15 @@
-# name: test/sql/pac_compatible.test
+# name: test/sql/privacy_compatible.test
 # description: test the PAC (Privacy-Aware Compilation) extension via PAC pragmas
 # group: [sql]
 
-require pac
+require privacy
 
 # Start fresh by clearing any existing PAC metadata
 statement ok
-PRAGMA clear_pac_metadata;
+PRAGMA clear_privacy_metadata;
 
 statement ok
-SET pac_seed = 42
+SET privacy_seed = 42
 
 statement ok
 SET pac_hash_repair = true
@@ -29,7 +29,7 @@ INSERT INTO t1 VALUES (1, 10), (2, 20), (3, 30), (3 , 40);
 
 # Mark table as PAC privacy unit
 statement ok
-ALTER TABLE t1 ADD PAC_KEY (a);
+ALTER TABLE t1 ADD PRIVACY_KEY (a);
 
 statement ok
 ALTER TABLE t1 SET PU;
@@ -52,13 +52,13 @@ SELECT AVG(b) FROM t1;
 ----
 30.0
 
-# Not PAC-compatible: GROUP BY on PAC_KEY column
+# Not PAC-compatible: GROUP BY on PRIVACY_KEY column
 statement error
 SELECT a, SUM(b) FROM t1 GROUP BY a ORDER BY a;
 ----
 PAC rewrite: protected column 't1.a' can only be accessed inside aggregate functions
 
-# Not PAC-compatible: projecting PAC_KEY column directly
+# Not PAC-compatible: projecting PRIVACY_KEY column directly
 statement error
 SELECT a FROM t1;
 ----
@@ -103,7 +103,7 @@ SELECT t2.y, SUM(t1.b) FROM t1 INNER JOIN t2 ON t1.a = t2.x GROUP BY t2.y ORDER 
 100	0
 200	40
 
-# Not PAC-compatible: projecting PAC_KEY in window function
+# Not PAC-compatible: projecting PRIVACY_KEY in window function
 statement error
 SELECT a, SUM(b) OVER (PARTITION BY a) FROM t1;
 ----
@@ -166,9 +166,9 @@ DROP TABLE t3;
 statement ok
 SET pac_conservative_mode = true;
 
-# Create a privacy unit table (customers) and a fact table (sales) linked via PAC_LINK
+# Create a privacy unit table (customers) and a fact table (sales) linked via PRIVACY_LINK
 statement ok
-CREATE PU TABLE customers(id INTEGER, name VARCHAR, PAC_KEY (id));
+CREATE PU TABLE customers(id INTEGER, name VARCHAR, PRIVACY_KEY (id));
 
 statement ok
 INSERT INTO customers VALUES (1, 'Alice'), (2, 'Bob');
@@ -183,7 +183,7 @@ statement ok
 ALTER TABLE sales ADD PROTECTED (amount, quantity);
 
 statement ok
-ALTER TABLE sales ADD PAC_LINK (customer_id) REFERENCES customers(id);
+ALTER TABLE sales ADD PRIVACY_LINK (customer_id) REFERENCES customers(id);
 
 # PAC-compatible: protected column inside SUM aggregate
 query I
@@ -262,27 +262,27 @@ DROP TABLE products;
 
 # Create PU tables
 statement ok
-CREATE PU TABLE cycle_a (id INTEGER, b_id INTEGER, value_a INTEGER, PAC_KEY (id), PROTECTED (value_a));
+CREATE PU TABLE cycle_a (id INTEGER, b_id INTEGER, value_a INTEGER, PRIVACY_KEY (id), PROTECTED (value_a));
 
 statement ok
-CREATE PU TABLE cycle_b (id INTEGER, c_id INTEGER, value_b INTEGER, PAC_KEY (id), PROTECTED (value_b));
+CREATE PU TABLE cycle_b (id INTEGER, c_id INTEGER, value_b INTEGER, PRIVACY_KEY (id), PROTECTED (value_b));
 
 statement ok
-CREATE PU TABLE cycle_c (id INTEGER, a_id INTEGER, value_c INTEGER, PAC_KEY (id), PROTECTED (value_c));
+CREATE PU TABLE cycle_c (id INTEGER, a_id INTEGER, value_c INTEGER, PRIVACY_KEY (id), PROTECTED (value_c));
 
-# Attempting to add PAC_LINK from PAC table to PAC table should fail
+# Attempting to add PRIVACY_LINK from PAC table to PAC table should fail
 statement error
-ALTER PU TABLE cycle_a ADD PAC_LINK (b_id) REFERENCES cycle_b(id);
+ALTER PU TABLE cycle_a ADD PRIVACY_LINK (b_id) REFERENCES cycle_b(id);
 ----
 Cannot create PAC LINK from PAC table 'cycle_a' to PAC table 'cycle_b'. PAC tables cannot link to other PAC tables (cycles not supported).
 
 statement error
-ALTER PU TABLE cycle_b ADD PAC_LINK (c_id) REFERENCES cycle_c(id);
+ALTER PU TABLE cycle_b ADD PRIVACY_LINK (c_id) REFERENCES cycle_c(id);
 ----
 Cannot create PAC LINK from PAC table 'cycle_b' to PAC table 'cycle_c'. PAC tables cannot link to other PAC tables (cycles not supported).
 
 statement error
-ALTER PU TABLE cycle_c ADD PAC_LINK (a_id) REFERENCES cycle_a(id);
+ALTER PU TABLE cycle_c ADD PRIVACY_LINK (a_id) REFERENCES cycle_a(id);
 ----
 Cannot create PAC LINK from PAC table 'cycle_c' to PAC table 'cycle_a'. PAC tables cannot link to other PAC tables (cycles not supported).
 
@@ -307,7 +307,7 @@ CREATE PU TABLE pac_users (
     user_id INTEGER,
     name VARCHAR,
     salary INTEGER,
-    PAC_KEY (user_id),
+    PRIVACY_KEY (user_id),
     PROTECTED (salary)
 );
 
@@ -388,14 +388,14 @@ SELECT id, value FROM convertible_table ORDER BY id;
 2	200
 3	300
 
-# Add PAC_KEY and mark as privacy unit
+# Add PRIVACY_KEY and mark as privacy unit
 statement ok
-ALTER TABLE convertible_table ADD PAC_KEY (id);
+ALTER TABLE convertible_table ADD PRIVACY_KEY (id);
 
 statement ok
 ALTER TABLE convertible_table SET PU;
 
-# After SET PU - PAC_KEY column is protected
+# After SET PU - PRIVACY_KEY column is protected
 statement error
 SELECT id, value FROM convertible_table;
 ----
@@ -432,7 +432,7 @@ statement ok
 CREATE PU TABLE drop_test_pu (
     id INTEGER,
     data INTEGER,
-    PAC_KEY (id),
+    PRIVACY_KEY (id),
     PROTECTED (data)
 );
 
@@ -441,7 +441,7 @@ CREATE TABLE drop_test_linked (
     id INTEGER,
     pu_id INTEGER,
     value INTEGER,
-    PAC_LINK (pu_id) REFERENCES drop_test_pu(id)
+    PRIVACY_LINK (pu_id) REFERENCES drop_test_pu(id)
 );
 
 statement ok
@@ -461,7 +461,7 @@ statement ok
 DROP TABLE drop_test_pu;
 
 # After dropping the PU, the linked table should no longer trigger PAC compilation
-# (the PAC_LINK should have been cleaned up)
+# (the PRIVACY_LINK should have been cleaned up)
 query III
 SELECT * FROM drop_test_linked ORDER BY id;
 ----
@@ -477,7 +477,7 @@ statement ok
 CREATE PU TABLE drop_test_self (
     id INTEGER,
     secret INTEGER,
-    PAC_KEY (id),
+    PRIVACY_KEY (id),
     PROTECTED (secret)
 );
 
@@ -524,7 +524,7 @@ statement ok
 CREATE PU TABLE test_pu_main (
     id INTEGER,
     name VARCHAR,
-    PAC_KEY (id)
+    PRIVACY_KEY (id)
 );
 
 statement ok
@@ -533,7 +533,7 @@ CREATE TABLE test_linked_protected (
     pu_id INTEGER,
     public_val INTEGER,
     secret_val INTEGER,
-    PAC_LINK (pu_id) REFERENCES test_pu_main(id),
+    PRIVACY_LINK (pu_id) REFERENCES test_pu_main(id),
     PROTECTED (secret_val)
 );
 
@@ -575,13 +575,13 @@ DROP TABLE regular_with_protected;
 # ============================================================================
 
 statement ok
-PRAGMA clear_pac_metadata;
+PRAGMA clear_privacy_metadata;
 
 statement ok
 SET pac_conservative_mode = true;
 
 statement ok
-CREATE PU TABLE d_customers(id INTEGER, name VARCHAR, PAC_KEY (id));
+CREATE PU TABLE d_customers(id INTEGER, name VARCHAR, PRIVACY_KEY (id));
 
 statement ok
 INSERT INTO d_customers VALUES (1, 'Alice'), (2, 'Bob'), (3, 'Charlie');
@@ -596,7 +596,7 @@ statement ok
 ALTER TABLE d_sales ADD PROTECTED (amount, quantity);
 
 statement ok
-ALTER TABLE d_sales ADD PAC_LINK (customer_id) REFERENCES d_customers(id);
+ALTER TABLE d_sales ADD PRIVACY_LINK (customer_id) REFERENCES d_customers(id);
 
 # Not PAC-compatible: SELECT DISTINCT on protected column (even without aggregate, protected check fires first)
 statement error

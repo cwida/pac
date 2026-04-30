@@ -1,14 +1,14 @@
-# name: test/sql/pac_dp_elastic.test
+# name: test/sql/dp_elastic.test
 # description: Elastic-sensitivity DP mode — Phase A: plumbing only
 # group: [sql]
 
-require pac
+require privacy
 
 statement ok
-PRAGMA clear_pac_metadata;
+PRAGMA clear_privacy_metadata;
 
 statement ok
-SET pac_seed = 42;
+SET privacy_seed = 42;
 
 statement ok
 SET threads = 1;
@@ -74,7 +74,7 @@ statement ok
 INSERT INTO u SELECT i, 'r' || (i % 5) FROM range(100) t(i);
 
 statement ok
-ALTER TABLE u ADD PAC_KEY (id);
+ALTER TABLE u ADD PRIVACY_KEY (id);
 
 statement ok
 ALTER TABLE u SET PU;
@@ -125,7 +125,7 @@ statement ok
 INSERT INTO orders SELECT i % 100, (i % 7)*1.0 FROM range(500) t(i);
 
 statement ok
-ALTER TABLE orders ADD PAC_LINK (uid) REFERENCES u(id);
+ALTER TABLE orders ADD PRIVACY_LINK (uid) REFERENCES u(id);
 
 # ---------------------------------------------------------------------------
 # Phase C: SUM with dp_sum_bound clipping on a single PU table
@@ -175,7 +175,7 @@ statement ok
 INSERT INTO signed_u SELECT i, CASE WHEN i % 2 = 0 THEN 1000 ELSE -1000 END FROM range(100) t(i);
 
 statement ok
-ALTER TABLE signed_u ADD PAC_KEY (id);
+ALTER TABLE signed_u ADD PRIVACY_KEY (id);
 
 statement ok
 ALTER TABLE signed_u SET PU;
@@ -242,7 +242,7 @@ statement ok
 INSERT INTO reviews SELECT i % 100, i % 5 FROM range(200) t(i);
 
 statement ok
-ALTER TABLE reviews ADD PAC_LINK (uid) REFERENCES u(id);
+ALTER TABLE reviews ADD PRIVACY_LINK (uid) REFERENCES u(id);
 
 statement error
 SELECT COUNT(*) FROM u JOIN orders ON u.id = orders.uid JOIN reviews ON u.id = reviews.uid;
@@ -261,7 +261,7 @@ statement ok
 INSERT INTO customers2 SELECT i FROM range(50) t(i);
 
 statement ok
-ALTER TABLE customers2 ADD PAC_KEY (cust_id);
+ALTER TABLE customers2 ADD PRIVACY_KEY (cust_id);
 
 statement ok
 ALTER TABLE customers2 SET PU;
@@ -273,10 +273,10 @@ statement ok
 INSERT INTO customer_orders SELECT i, i % 50 FROM range(250) t(i);
 
 statement ok
-ALTER TABLE customer_orders ADD PAC_KEY (ord_id);
+ALTER TABLE customer_orders ADD PRIVACY_KEY (ord_id);
 
 statement ok
-ALTER TABLE customer_orders ADD PAC_LINK (cust_id) REFERENCES customers2(cust_id);
+ALTER TABLE customer_orders ADD PRIVACY_LINK (cust_id) REFERENCES customers2(cust_id);
 
 statement ok
 CREATE TABLE order_lines (line_id BIGINT, ord_id BIGINT, price DOUBLE);
@@ -285,10 +285,10 @@ statement ok
 INSERT INTO order_lines SELECT i, i % 250, (i % 5) * 1.0 FROM range(750) t(i);
 
 statement ok
-ALTER TABLE order_lines ADD PAC_KEY (line_id);
+ALTER TABLE order_lines ADD PRIVACY_KEY (line_id);
 
 statement ok
-ALTER TABLE order_lines ADD PAC_LINK (ord_id) REFERENCES customer_orders(ord_id);
+ALTER TABLE order_lines ADD PRIVACY_LINK (ord_id) REFERENCES customer_orders(ord_id);
 
 statement ok
 SET dp_epsilon = 1.0;
@@ -347,13 +347,13 @@ SET pac_diffcols = NULL;
 SET dp_epsilon = 1.0;
 
 # ---------------------------------------------------------------------------
-# Deterministic tests — pac_noise = false (zero Laplace scale, exact results)
+# Deterministic tests — privacy_noise = false (zero Laplace scale, exact results)
 # Mirrors pac_mi = 0 in PAC mode: compilation pipeline runs (clipping, FK chain,
 # sensitivity) but Laplace scale is forced to 0 → output is the exact aggregate.
 # ---------------------------------------------------------------------------
 
 statement ok
-SET pac_noise = false;
+SET privacy_noise = false;
 
 # Exact COUNT
 query I
@@ -449,7 +449,7 @@ JOIN order_lines ON customer_orders.ord_id = order_lines.ord_id;
 ----
 1500.0
 
-# pac_diffcols with pac_noise=false: exact match → error% = 0
+# pac_diffcols with privacy_noise=false: exact match → error% = 0
 statement ok
 SET pac_diffcols = '0';
 RESET dp_sum_bound;
@@ -463,5 +463,5 @@ statement ok
 SET pac_diffcols = NULL;
 
 statement ok
-SET pac_noise = true;
+SET privacy_noise = true;
 

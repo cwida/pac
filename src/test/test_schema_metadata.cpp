@@ -4,9 +4,9 @@
 
 #include "duckdb.hpp"
 #include "duckdb/main/connection.hpp"
-#include "../include/utils/pac_helpers.hpp"
+#include "../include/utils/privacy_helpers.hpp"
 #include "include/test_schema_metadata.hpp"
-#include "parser/pac_parser.hpp"
+#include "parser/privacy_parser.hpp"
 
 namespace duckdb {
 
@@ -36,7 +36,7 @@ int RunSchemaMetadataTests() {
 	Connection con(db);
 	con.BeginTransaction();
 
-	auto &manager = PACMetadataManager::Get();
+	auto &manager = PrivacyMetadataManager::Get();
 	manager.Clear();
 
 	int failures = 0;
@@ -57,7 +57,7 @@ int RunSchemaMetadataTests() {
 		// Test 2: single-column primary key (via PAC metadata)
 		con.Query("CREATE TABLE IF NOT EXISTS t_single_pk(id INTEGER, val INTEGER);");
 		{
-			PACTableMetadata meta("t_single_pk");
+			PrivacyTableMetadata meta("t_single_pk");
 			meta.primary_key_columns = {"id"};
 			manager.AddOrUpdateTable("t_single_pk", meta);
 		}
@@ -73,7 +73,7 @@ int RunSchemaMetadataTests() {
 		// Test 3: multi-column primary key (via PAC metadata)
 		con.Query("CREATE TABLE IF NOT EXISTS t_multi_pk(a INTEGER, b INTEGER, c INTEGER);");
 		{
-			PACTableMetadata meta("t_multi_pk");
+			PrivacyTableMetadata meta("t_multi_pk");
 			meta.primary_key_columns = {"a", "b"};
 			manager.AddOrUpdateTable("t_multi_pk", meta);
 		}
@@ -90,7 +90,7 @@ int RunSchemaMetadataTests() {
 		con.Query("CREATE SCHEMA IF NOT EXISTS myschema;");
 		con.Query("CREATE TABLE IF NOT EXISTS myschema.t_schema_pk(x INTEGER, y INTEGER);");
 		{
-			PACTableMetadata meta("t_schema_pk");
+			PrivacyTableMetadata meta("t_schema_pk");
 			meta.primary_key_columns = {"x"};
 			manager.AddOrUpdateTable("t_schema_pk", meta);
 		}
@@ -106,7 +106,7 @@ int RunSchemaMetadataTests() {
 		// Test 5: string (TEXT) primary key should be ignored
 		con.Query("CREATE TABLE IF NOT EXISTS t_string_pk(id TEXT, val INTEGER);");
 		{
-			PACTableMetadata meta("t_string_pk");
+			PrivacyTableMetadata meta("t_string_pk");
 			meta.primary_key_columns = {"id"};
 			manager.AddOrUpdateTable("t_string_pk", meta);
 		}
@@ -121,7 +121,7 @@ int RunSchemaMetadataTests() {
 		// Test 6: composite primary key with mixed types should be treated as no PK
 		con.Query("CREATE TABLE IF NOT EXISTS t_mixed_pk(a INTEGER, b TEXT);");
 		{
-			PACTableMetadata meta("t_mixed_pk");
+			PrivacyTableMetadata meta("t_mixed_pk");
 			meta.primary_key_columns = {"a", "b"};
 			manager.AddOrUpdateTable("t_mixed_pk", meta);
 		}
@@ -135,23 +135,23 @@ int RunSchemaMetadataTests() {
 
 		std::cerr << "\n=== Testing FindPacLinkPath ===\n";
 
-		// Test 7: transitive FK detection via PAC_LINK (t_a -> t_b -> t_c)
+		// Test 7: transitive FK detection via PRIVACY_LINK (t_a -> t_b -> t_c)
 		con.Query("CREATE TABLE IF NOT EXISTS t_c(id INTEGER, val INTEGER);");
 		con.Query("CREATE TABLE IF NOT EXISTS t_b(id INTEGER, cid INTEGER);");
 		con.Query("CREATE TABLE IF NOT EXISTS t_a(id INTEGER, bid INTEGER);");
 		con.Query("CREATE TABLE IF NOT EXISTS t_unrelated(x INTEGER);");
 		{
-			PACTableMetadata meta_c("t_c");
+			PrivacyTableMetadata meta_c("t_c");
 			meta_c.primary_key_columns = {"id"};
 			meta_c.is_privacy_unit = true;
 			manager.AddOrUpdateTable("t_c", meta_c);
 
-			PACTableMetadata meta_b("t_b");
+			PrivacyTableMetadata meta_b("t_b");
 			meta_b.primary_key_columns = {"id"};
 			meta_b.links.push_back(PACLink("cid", "t_c", "id"));
 			manager.AddOrUpdateTable("t_b", meta_b);
 
-			PACTableMetadata meta_a("t_a");
+			PrivacyTableMetadata meta_a("t_a");
 			meta_a.primary_key_columns = {"id"};
 			meta_a.links.push_back(PACLink("bid", "t_b", "id"));
 			manager.AddOrUpdateTable("t_a", meta_a);
@@ -208,28 +208,28 @@ int RunSchemaMetadataTests() {
 			std::cerr << "PASS: no path for t_unrelated\n";
 		}
 
-		// Test 8: long FK chain via PAC_LINK
+		// Test 8: long FK chain via PRIVACY_LINK
 		con.Query("CREATE TABLE IF NOT EXISTS t_c_long(id INTEGER);");
 		con.Query("CREATE TABLE IF NOT EXISTS t_long_2(id INTEGER, cid INTEGER);");
 		con.Query("CREATE TABLE IF NOT EXISTS t_long_1(id INTEGER, n2 INTEGER);");
 		con.Query("CREATE TABLE IF NOT EXISTS t_long_0(id INTEGER, n1 INTEGER);");
 		{
-			PACTableMetadata meta_cl("t_c_long");
+			PrivacyTableMetadata meta_cl("t_c_long");
 			meta_cl.primary_key_columns = {"id"};
 			meta_cl.is_privacy_unit = true;
 			manager.AddOrUpdateTable("t_c_long", meta_cl);
 
-			PACTableMetadata meta_l2("t_long_2");
+			PrivacyTableMetadata meta_l2("t_long_2");
 			meta_l2.primary_key_columns = {"id"};
 			meta_l2.links.push_back(PACLink("cid", "t_c_long", "id"));
 			manager.AddOrUpdateTable("t_long_2", meta_l2);
 
-			PACTableMetadata meta_l1("t_long_1");
+			PrivacyTableMetadata meta_l1("t_long_1");
 			meta_l1.primary_key_columns = {"id"};
 			meta_l1.links.push_back(PACLink("n2", "t_long_2", "id"));
 			manager.AddOrUpdateTable("t_long_1", meta_l1);
 
-			PACTableMetadata meta_l0("t_long_0");
+			PrivacyTableMetadata meta_l0("t_long_0");
 			meta_l0.primary_key_columns = {"id"};
 			meta_l0.links.push_back(PACLink("n1", "t_long_1", "id"));
 			manager.AddOrUpdateTable("t_long_0", meta_l0);

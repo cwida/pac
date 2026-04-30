@@ -12,7 +12,7 @@ This folder contains detailed documentation for the PAC DuckDB extension.
 | [pac/query_operators.md](pac/query_operators.md)     | Query operators |
 | [pac/runtime_checks.md](pac/runtime_checks.md)       | Runtime checks |
 | [pac/ptracking.md](pac/ptracking.md)                 | Persistent secret p-tracking |
-| [pac/pac_parser.md](pac/syntax.md)                   | PAC parser |
+| [pac/privacy_parser.md](pac/syntax.md)                   | PAC parser |
 | [pac/functions.md](pac/functions.md)                 | PAC functions |
 | [test/README.md](test/README.md)                     | Running SQL and C++ tests |
 | [benchmark/README.md](benchmark/README.md)           | Benchmark overview |

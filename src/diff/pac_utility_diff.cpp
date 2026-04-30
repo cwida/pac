@@ -10,8 +10,8 @@
 
 #include "diff/pac_utility_diff.hpp"
 #include "diff/pac_utility_summary.hpp"
-#include "pac_debug.hpp"
-#include "utils/pac_helpers.hpp"
+#include "privacy_debug.hpp"
+#include "utils/privacy_helpers.hpp"
 
 #include "duckdb/planner/binder.hpp"
 #include "duckdb/optimizer/optimizer.hpp"
@@ -183,8 +183,8 @@ void ApplyUtilityDiff(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 		num_key_cols = DetectNumKeyCols(ref_plan.get(), num_cols);
 	}
 
-#if PAC_DEBUG
-	PAC_DEBUG_PRINT("ApplyUtilityDiff: num_key_cols=" + std::to_string(num_key_cols));
+#if PRIVACY_DEBUG
+	PRIVACY_DEBUG_PRINT("ApplyUtilityDiff: num_key_cols=" + std::to_string(num_key_cols));
 #endif
 
 	if (num_key_cols >= num_cols) {
@@ -193,11 +193,11 @@ void ApplyUtilityDiff(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 		                            "); at least one measure column is required");
 	}
 
-#if PAC_DEBUG
-	PAC_DEBUG_PRINT("ApplyUtilityDiff: " + std::to_string(num_cols) + " columns:");
+#if PRIVACY_DEBUG
+	PRIVACY_DEBUG_PRINT("ApplyUtilityDiff: " + std::to_string(num_cols) + " columns:");
 	for (idx_t i = 0; i < num_cols; i++) {
-		PAC_DEBUG_PRINT("  [" + std::to_string(i) + "] " + col_names[i] + " : " + col_types[i].ToString() +
-		                (i < num_key_cols ? " (KEY)" : (IsNumericType(col_types[i]) ? " (NUMERIC)" : "")));
+		PRIVACY_DEBUG_PRINT("  [" + std::to_string(i) + "] " + col_names[i] + " : " + col_types[i].ToString() +
+		                    (i < num_key_cols ? " (KEY)" : (IsNumericType(col_types[i]) ? " (NUMERIC)" : "")));
 	}
 #endif
 
@@ -451,8 +451,8 @@ void ApplyUtilityDiff(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 	summary->children.push_back(std::move(plan));
 	plan = std::move(summary);
 
-#if PAC_DEBUG
-	PAC_DEBUG_PRINT("ApplyUtilityDiff: plan rewrite complete");
+#if PRIVACY_DEBUG
+	PRIVACY_DEBUG_PRINT("ApplyUtilityDiff: plan rewrite complete");
 #endif
 }
 

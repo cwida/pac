@@ -31,7 +31,7 @@ cd /path/to/pac
 ./build/release/test/unittest --test-dir . [sql] -R pac
 
 # Run a specific test file
-./build/release/test/unittest --test-dir . [sql] test/sql/pac_parser.test
+./build/release/test/unittest --test-dir . [sql] test/sql/privacy_parser.test
 
 # Verbose output
 ./build/release/test/unittest --test-dir . [sql] -R pac -V
@@ -59,7 +59,7 @@ SQL tests use a simple format:
 require pac
 
 statement ok
-CREATE PU TABLE test (id INTEGER, PAC_KEY (id));
+CREATE PU TABLE test (id INTEGER, PRIVACY_KEY (id));
 
 query I
 SELECT COUNT(*) FROM test;
@@ -106,7 +106,7 @@ make debug
 | File | Description |
 |------|-------------|
 | `src/test/test_runner.cpp` | Main test runner |
-| `src/test/test_pac_parser.cpp` | Parser tests |
+| `src/test/test_privacy_parser.cpp` | Parser tests |
 | `src/test/test_schema_metadata.cpp` | Schema metadata tests |
 | `src/test/test_plan_traversal.cpp` | Plan traversal tests |
 | `src/test/test_compiler_functions.cpp` | Compiler function tests |
@@ -130,7 +130,7 @@ make debug
 ./build/debug/duckdb
 
 # Manually run the failing SQL
-D CREATE PU TABLE test (id INTEGER, PAC_KEY (id));
+D CREATE PU TABLE test (id INTEGER, PRIVACY_KEY (id));
 D SELECT COUNT(*) FROM test;
 ```
 
@@ -151,7 +151,7 @@ gdb --args ./build/debug/test/unittest --test-dir . [sql] test/sql/failing_test.
 ```
 test/
 └── sql/
-    ├── pac_parser.test              # Parser and syntax tests
+    ├── privacy_parser.test              # Parser and syntax tests
     ├── pac_bitslice_compiler.test   # Compiler tests
     ├── pac_sum.test                 # pac_sum aggregate tests
     ├── pac_count.test               # pac_count aggregate tests

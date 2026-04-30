@@ -14,7 +14,7 @@
 #include "duckdb.hpp"
 #include "duckdb/optimizer/optimizer_extension.hpp"
 #include "duckdb/planner/logical_operator.hpp"
-#include "metadata/pac_compatibility_check.hpp"
+#include "metadata/privacy_compatibility_check.hpp"
 
 namespace duckdb {
 
@@ -22,7 +22,7 @@ namespace duckdb {
 // This reduces the number of parameters passed between functions
 struct BitsliceCompilerContext {
 	// Reference to the compatibility check result
-	const PACCompatibilityResult &check;
+	const PrivacyCompatibilityResult &check;
 	// Optimizer extension input (contains context and optimizer)
 	OptimizerExtensionInput &input;
 	// The plan being modified
@@ -41,7 +41,7 @@ struct BitsliceCompilerContext {
 	std::unordered_map<idx_t, idx_t> connecting_table_to_fk_table;
 	bool join_elimination;
 
-	BitsliceCompilerContext(const PACCompatibilityResult &check, OptimizerExtensionInput &input,
+	BitsliceCompilerContext(const PrivacyCompatibilityResult &check, OptimizerExtensionInput &input,
 	                        unique_ptr<LogicalOperator> &plan, const vector<string> &privacy_units,
 	                        const vector<string> &fk_path, const vector<string> &gets_present,
 	                        const vector<string> &gets_missing)
@@ -65,10 +65,10 @@ struct BitsliceWithPUContext {
 	OptimizerExtensionInput &input;
 	unique_ptr<LogicalOperator> &plan;
 	const vector<string> &pu_table_names;
-	const PACCompatibilityResult &check;
+	const PrivacyCompatibilityResult &check;
 
 	BitsliceWithPUContext(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
-	                      const vector<string> &pu_table_names, const PACCompatibilityResult &check)
+	                      const vector<string> &pu_table_names, const PrivacyCompatibilityResult &check)
 	    : input(input), plan(plan), pu_table_names(pu_table_names), check(check) {
 	}
 

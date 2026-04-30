@@ -6,7 +6,7 @@
 
 #include "query_processing/pac_avg_rewriter.hpp"
 #include "query_processing/pac_expression_builder.hpp"
-#include "pac_debug.hpp"
+#include "privacy_debug.hpp"
 
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
@@ -151,14 +151,14 @@ static void CollectAggregates(LogicalOperator &op, vector<reference<LogicalAggre
 }
 
 void RewritePacAvgToDiv(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan) {
-	PAC_DEBUG_PRINT("[AVG] RewritePacAvgToDiv: start");
+	PRIVACY_DEBUG_PRINT("[AVG] RewritePacAvgToDiv: start");
 	vector<reference<LogicalAggregate>> aggs;
 	CollectAggregates(*plan, aggs);
-	PAC_DEBUG_PRINT("[AVG] RewritePacAvgToDiv: found " + to_string(aggs.size()) + " aggregates");
+	PRIVACY_DEBUG_PRINT("[AVG] RewritePacAvgToDiv: found " + to_string(aggs.size()) + " aggregates");
 	for (auto &agg_ref : aggs) {
 		RewritePacAvgAggregate(input, plan, agg_ref.get());
 	}
-	PAC_DEBUG_PRINT("[AVG] RewritePacAvgToDiv: done");
+	PRIVACY_DEBUG_PRINT("[AVG] RewritePacAvgToDiv: done");
 }
 
 } // namespace duckdb

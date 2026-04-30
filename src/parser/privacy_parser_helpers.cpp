@@ -3,19 +3,19 @@
 //
 // This file implements SQL parsing and clause extraction for PAC statements.
 // It handles parsing of CREATE PU TABLE and ALTER PU TABLE statements,
-// extracting PAC-specific clauses (PAC_KEY, PAC_LINK, PROTECTED), and
+// extracting PAC-specific clauses (PRIVACY_KEY, PRIVACY_LINK, PROTECTED), and
 // stripping these clauses to produce valid SQL for DuckDB's standard parser.
 //
-// Created by refactoring pac_parser.cpp on 1/22/26.
+// Created by refactoring privacy_parser.cpp on 1/22/26.
 //
 
 // IMPORTANT: <regex> must be included BEFORE duckdb headers on Windows MSVC
 // because DuckDB defines its own std namespace that conflicts with <regex>
 #include <regex>
 
-#include "parser/pac_parser.hpp"
-#include "parser/pac_parser_helpers.hpp"
-#include "pac_debug.hpp"
+#include "parser/privacy_parser.hpp"
+#include "parser/privacy_parser_helpers.hpp"
+#include "privacy_debug.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
@@ -36,7 +36,7 @@ namespace duckdb {
  *   - CREATE TABLE IF NOT EXISTS table_name ...
  *   - ALTER TABLE table_name ...
  */
-string PACParserExtension::ExtractTableName(const string &sql, bool is_create) {
+string PrivacyParserExtension::ExtractTableName(const string &sql, bool is_create) {
 	if (is_create) {
 		// Match: CREATE [PU] TABLE [IF NOT EXISTS] table_name
 		std::regex create_regex(R"(create\s+(?:pu\s+)?table\s+(?:if\s+not\s+exists\s+)?([a-zA-Z_][a-zA-Z0-9_]*))");
@@ -62,15 +62,15 @@ string PACParserExtension::ExtractTableName(const string &sql, bool is_create) {
 // ============================================================================
 
 /**
- * ExtractPACPrimaryKey: Parses PAC_KEY clause
+ * ExtractPACPrimaryKey: Parses PRIVACY_KEY clause
  *
- * Syntax: PAC_KEY (col1, col2, ...)
+ * Syntax: PRIVACY_KEY (col1, col2, ...)
  *
  * Supports composite keys (multiple columns).
  */
-bool PACParserExtension::ExtractPACPrimaryKey(const string &clause, vector<string> &pk_columns) {
-	// Match: PAC_KEY (col1, col2, ...)
-	std::regex pk_regex(R"(pac_key\s*\(\s*([^)]+)\s*\))");
+bool PrivacyParserExtension::ExtractPACPrimaryKey(const string &clause, vector<string> &pk_columns) {
+	// Match: PRIVACY_KEY (col1, col2, ...)
+	std::regex pk_regex(R"(privacy_key\s*\(\s*([^)]+)\s*\))");
 	std::smatch match;
 	string clause_lower = StringUtil::Lower(clause);
 
@@ -90,18 +90,18 @@ bool PACParserExtension::ExtractPACPrimaryKey(const string &clause, vector<strin
 }
 
 /**
- * ExtractPACLink: Parses PAC_LINK clause
+ * ExtractPACLink: Parses PRIVACY_LINK clause
  *
- * Syntax: PAC_LINK (local_col1, local_col2, ...) REFERENCES table(ref_col1, ref_col2, ...)
+ * Syntax: PRIVACY_LINK (local_col1, local_col2, ...) REFERENCES table(ref_col1, ref_col2, ...)
  *
  * This defines a foreign key relationship for PAC. The number of local columns
  * must match the number of referenced columns (composite key support).
  */
-bool PACParserExtension::ExtractPACLink(const string &clause, PACLink &link) {
-	// Match: PAC_LINK (col1, col2, ...) REFERENCES table_name(ref_col1, ref_col2, ...)
+bool PrivacyParserExtension::ExtractPACLink(const string &clause, PACLink &link) {
+	// Match: PRIVACY_LINK (col1, col2, ...) REFERENCES table_name(ref_col1, ref_col2, ...)
 	// Support both single and composite foreign keys
 	std::regex link_regex(
-	    R"(pac_link\s*\(\s*([^)]+)\s*\)\s+references\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(\s*([^)]+)\s*\))");
+	    R"(privacy_link\s*\(\s*([^)]+)\s*\)\s+references\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(\s*([^)]+)\s*\))");
 	std::smatch match;
 	string clause_lower = StringUtil::Lower(clause);
 
@@ -146,7 +146,7 @@ bool PACParserExtension::ExtractPACLink(const string &clause, PACLink &link) {
  *
  * Protected columns are those that contain sensitive data and need PAC protection.
  */
-bool PACParserExtension::ExtractProtectedColumns(const string &clause, vector<string> &protected_cols) {
+bool PrivacyParserExtension::ExtractProtectedColumns(const string &clause, vector<string> &protected_cols) {
 	// Match: PROTECTED (col1, col2, ...)
 	// Use word boundary to avoid matching 'protected' as part of identifiers
 	std::regex protected_regex(R"(\bprotected\s*\(\s*([^)]+)\s*\))");
@@ -174,22 +174,22 @@ bool PACParserExtension::ExtractProtectedColumns(const string &clause, vector<st
  * We remove PAC clauses and execute the "clean" SQL, while storing PAC metadata separately.
  *
  * Removed clauses:
- *   - PAC_KEY (...)
- *   - PAC_LINK (...) REFERENCES table(...)
+ *   - PRIVACY_KEY (...)
+ *   - PRIVACY_LINK (...) REFERENCES table(...)
  *   - PROTECTED (...)
  */
-string PACParserExtension::StripPACClauses(const string &sql) {
+string PrivacyParserExtension::StripPACClauses(const string &sql) {
 	string result = sql;
 
-	// Remove PAC_KEY clauses (case-insensitive)
-	result =
-	    std::regex_replace(result, std::regex(R"(,?\s*PAC_KEY\s*\([^)]*\)\s*,?)", std::regex_constants::icase), " ");
+	// Remove PRIVACY_KEY clauses (case-insensitive)
+	result = std::regex_replace(result, std::regex(R"(,?\s*PRIVACY_KEY\s*\([^)]*\)\s*,?)", std::regex_constants::icase),
+	                            " ");
 
-	// Remove PAC_LINK clauses (case-insensitive)
-	// The "PAC_LINK" and "REFERENCES" keywords ensure we match the right thing
+	// Remove PRIVACY_LINK clauses (case-insensitive)
+	// The "PRIVACY_LINK" and "REFERENCES" keywords ensure we match the right thing
 	result = std::regex_replace(
 	    result,
-	    std::regex(R"(,?\s*PAC_LINK\s*\([^)]*\)\s+REFERENCES\s+[a-zA-Z_][a-zA-Z0-9_]*\s*\([^)]*\)\s*,?)",
+	    std::regex(R"(,?\s*PRIVACY_LINK\s*\([^)]*\)\s+REFERENCES\s+[a-zA-Z_][a-zA-Z0-9_]*\s*\([^)]*\)\s*,?)",
 	               std::regex_constants::icase),
 	    " ");
 
@@ -219,8 +219,8 @@ string PACParserExtension::StripPACClauses(const string &sql) {
  *   CREATE PU TABLE table_name (
  *     col1 INTEGER,
  *     col2 VARCHAR,
- *     PAC_KEY (col1),
- *     PAC_LINK (col2) REFERENCES other_table(other_col),
+ *     PRIVACY_KEY (col1),
+ *     PRIVACY_LINK (col2) REFERENCES other_table(other_col),
  *     PROTECTED (col1, col2)
  *   );
  *
@@ -228,7 +228,8 @@ string PACParserExtension::StripPACClauses(const string &sql) {
  *   - stripped_sql: SQL with PAC clauses removed
  *   - metadata: Extracted PAC metadata (keys, links, protected columns)
  */
-bool PACParserExtension::ParseCreatePACTable(const string &query, string &stripped_sql, PACTableMetadata &metadata) {
+bool PrivacyParserExtension::ParseCreatePACTable(const string &query, string &stripped_sql,
+                                                 PrivacyTableMetadata &metadata) {
 	string query_lower = StringUtil::Lower(query);
 
 	// Check if this is a CREATE PU TABLE statement
@@ -247,8 +248,8 @@ bool PACParserExtension::ParseCreatePACTable(const string &query, string &stripp
 
 	// Check if any PAC clauses exist
 	// Use regex to avoid matching as part of identifiers
-	bool has_pac_clauses = std::regex_search(query_lower, std::regex(R"(\bpac_key\s*\()")) ||
-	                       std::regex_search(query_lower, std::regex(R"(\bpac_link\s*\()")) ||
+	bool has_pac_clauses = std::regex_search(query_lower, std::regex(R"(\bprivacy_key\s*\()")) ||
+	                       std::regex_search(query_lower, std::regex(R"(\bprivacy_link\s*\()")) ||
 	                       std::regex_search(query_lower, std::regex(R"(\bprotected\s*\()"));
 
 	if (!has_pac_clauses && !is_create_pu_table) {
@@ -263,8 +264,8 @@ bool PACParserExtension::ParseCreatePACTable(const string &query, string &stripp
 	// Extract PAC clauses
 	ExtractPACPrimaryKey(query, metadata.primary_key_columns);
 
-	// Extract all PAC_LINK clauses
-	std::regex link_regex(R"(pac_link\s*\([^)]+\)\s+references\s+[a-zA-Z_][a-zA-Z0-9_]*\s*\([^)]+\))");
+	// Extract all PRIVACY_LINK clauses
+	std::regex link_regex(R"(privacy_link\s*\([^)]+\)\s+references\s+[a-zA-Z_][a-zA-Z0-9_]*\s*\([^)]+\))");
 	auto begin = std::sregex_iterator(query_lower.begin(), query_lower.end(), link_regex);
 	auto end = std::sregex_iterator();
 	for (auto it = begin; it != end; ++it) {
@@ -274,12 +275,12 @@ bool PACParserExtension::ParseCreatePACTable(const string &query, string &stripp
 		}
 	}
 
-	// Check for PAC_LINK without REFERENCES (common syntax mistake)
-	// e.g. "PAC_LINK(col, table, ref)" instead of "PAC_LINK(col) REFERENCES table(ref)"
-	if (std::regex_search(query_lower, std::regex(R"(\bpac_link\s*\()")) && metadata.links.empty()) {
+	// Check for PRIVACY_LINK without REFERENCES (common syntax mistake)
+	// e.g. "PRIVACY_LINK(col, table, ref)" instead of "PRIVACY_LINK(col) REFERENCES table(ref)"
+	if (std::regex_search(query_lower, std::regex(R"(\bprivacy_link\s*\()")) && metadata.links.empty()) {
 		throw ParserException(
-		    "Invalid PAC_LINK syntax. Use PAC_LINK (col) REFERENCES table(ref_col). "
-		    "Example: CREATE TABLE t (id INT, fk INT, PAC_LINK (fk) REFERENCES other_table(id), PROTECTED (id))");
+		    "Invalid PRIVACY_LINK syntax. Use PRIVACY_LINK (col) REFERENCES table(ref_col). "
+		    "Example: CREATE TABLE t (id INT, fk INT, PRIVACY_LINK (fk) REFERENCES other_table(id), PROTECTED (id))");
 	}
 
 	// Extract protected columns
@@ -290,18 +291,18 @@ bool PACParserExtension::ParseCreatePACTable(const string &query, string &stripp
 	if (std::regex_search(query_lower, std::regex(R"(\bprotected\b)")) && metadata.protected_columns.empty()) {
 		throw ParserException(
 		    "Invalid PROTECTED syntax. Use PROTECTED (col1, col2, ...) as a separate clause, not inline after a column "
-		    "type. Example: CREATE PU TABLE t (id INT, val INT, PAC_KEY (id), PROTECTED (val))");
+		    "type. Example: CREATE PU TABLE t (id INT, val INT, PRIVACY_KEY (id), PROTECTED (val))");
 	}
 
-	// Validate: CREATE PU TABLE must have PAC_KEY
+	// Validate: CREATE PU TABLE must have PRIVACY_KEY
 	if (is_create_pu_table) {
 		if (metadata.primary_key_columns.empty()) {
 			// Check for common typo: "PAC KEY" with space instead of underscore
 			if (std::regex_search(query_lower, std::regex(R"(\bpac\s+key\b)"))) {
-				throw ParserException("Did you mean PAC_KEY (with underscore)? "
-				                      "Use PAC_KEY (col) to define the privacy unit key.");
+				throw ParserException("Did you mean PRIVACY_KEY (with underscore)? "
+				                      "Use PRIVACY_KEY (col) to define the privacy unit key.");
 			}
-			throw ParserException("CREATE PU TABLE requires a PAC_KEY clause to identify the privacy unit");
+			throw ParserException("CREATE PU TABLE requires a PRIVACY_KEY clause to identify the privacy unit");
 		}
 	}
 
@@ -317,8 +318,8 @@ bool PACParserExtension::ParseCreatePACTable(const string &query, string &stripp
  * ParseAlterTableAddPAC: Parses ALTER [PU] TABLE ... ADD ... statement
  *
  * Syntax:
- *   ALTER [PU] TABLE table_name ADD PAC_KEY (col1);
- *   ALTER [PU] TABLE table_name ADD PAC_LINK (col1) REFERENCES other(col2);
+ *   ALTER [PU] TABLE table_name ADD PRIVACY_KEY (col1);
+ *   ALTER [PU] TABLE table_name ADD PRIVACY_LINK (col1) REFERENCES other(col2);
  *   ALTER [PU] TABLE table_name ADD PROTECTED (col1, col2);
  *
  * This operation is metadata-only (no actual DDL executed). It merges new
@@ -327,16 +328,17 @@ bool PACParserExtension::ParseCreatePACTable(const string &query, string &stripp
  * Validation:
  *   - Columns must exist in the table
  *   - Protected columns can't be added twice (idempotency check)
- *   - PAC_LINKs can't conflict (same local columns to different targets)
+ *   - PRIVACY_LINKs can't conflict (same local columns to different targets)
  */
-bool PACParserExtension::ParseAlterTableAddPAC(const string &query, string &stripped_sql, PACTableMetadata &metadata) {
+bool PrivacyParserExtension::ParseAlterTableAddPAC(const string &query, string &stripped_sql,
+                                                   PrivacyTableMetadata &metadata) {
 	string query_lower = StringUtil::Lower(query);
 
-	// Check if this is an ALTER [PU] TABLE ... ADD PAC_KEY/PAC_LINK/PROTECTED statement
+	// Check if this is an ALTER [PU] TABLE ... ADD PRIVACY_KEY/PRIVACY_LINK/PROTECTED statement
 	// Both "ALTER PU TABLE t ADD ..." and "ALTER TABLE t ADD ..." are supported,
 	// but the PU keyword must match the table's actual PU status.
 	bool has_pac_add =
-	    (query_lower.find("add pac_key") != string::npos || query_lower.find("add pac_link") != string::npos ||
+	    (query_lower.find("add privacy_key") != string::npos || query_lower.find("add privacy_link") != string::npos ||
 	     query_lower.find("add protected") != string::npos);
 	if (!has_pac_add) {
 		return false;
@@ -354,42 +356,42 @@ bool PACParserExtension::ParseAlterTableAddPAC(const string &query, string &stri
 	metadata.table_name = match[1].str();
 
 	// Get existing metadata if any
-	auto existing = PACMetadataManager::Get().GetTableMetadata(metadata.table_name);
+	auto existing = PrivacyMetadataManager::Get().GetTableMetadata(metadata.table_name);
 	if (existing) {
 		metadata = *existing;
-#if PAC_DEBUG
+#if PRIVACY_DEBUG
 		std::cerr << "[PAC DEBUG] ParseAlterTableAddPAC: Found existing metadata for " << metadata.table_name
 		          << ", links=" << existing->links.size() << ", protected=" << existing->protected_columns.size()
 		          << "\n";
 #endif
 	} else {
-#if PAC_DEBUG
+#if PRIVACY_DEBUG
 		std::cerr << "[PAC DEBUG] ParseAlterTableAddPAC: No existing metadata for " << metadata.table_name << "\n";
 #endif
 	}
 
 	// Check for PAC-related keywords (needed before the PU keyword validation below)
-	bool has_pac_key = query_lower.find("pac_key") != string::npos;
-	bool has_pac_link = query_lower.find("pac_link") != string::npos;
+	bool has_privacy_key = query_lower.find("privacy_key") != string::npos;
+	bool has_privacy_link = query_lower.find("privacy_link") != string::npos;
 	bool has_protected = query_lower.find("protected") != string::npos;
 
 	// Validate PU keyword matches table status.
-	// ADD PAC_KEY is exempt from the !used_pu_keyword && is_pu error because:
-	// - PAC_KEY is idempotent (safe to re-add)
-	// - In DuckDB's batch mode (-c flag), PRAGMA clear_pac_metadata is parsed before it
+	// ADD PRIVACY_KEY is exempt from the !used_pu_keyword && is_pu error because:
+	// - PRIVACY_KEY is idempotent (safe to re-add)
+	// - In DuckDB's batch mode (-c flag), PRAGMA clear_privacy_metadata is parsed before it
 	//   executes, so stale JSON metadata can make a PU table appear as PU at parse time
 	bool is_pu = existing && existing->is_privacy_unit;
 	if (used_pu_keyword && !is_pu) {
 		throw ParserException("Table '" + metadata.table_name +
 		                      "' is not a privacy unit. Use ALTER TABLE (without PU) for non-PU tables.");
 	}
-	if (!used_pu_keyword && is_pu && (has_pac_link || has_protected)) {
+	if (!used_pu_keyword && is_pu && (has_privacy_link || has_protected)) {
 		throw ParserException("Table '" + metadata.table_name +
 		                      "' is a privacy unit. Use ALTER PU TABLE for PU tables.");
 	}
 
 	// Extract and merge new PAC clauses
-	if (has_pac_key) {
+	if (has_privacy_key) {
 		vector<string> new_pk_cols;
 		if (ExtractPACPrimaryKey(query, new_pk_cols)) {
 			// Only add columns that don't already exist
@@ -401,15 +403,15 @@ bool PACParserExtension::ParseAlterTableAddPAC(const string &query, string &stri
 			}
 		}
 		if (!is_pu) {
-			Printer::Print("Note: PAC_KEY added to non-PU table '" + metadata.table_name +
+			Printer::Print("Note: PRIVACY_KEY added to non-PU table '" + metadata.table_name +
 			               "'. This does not trigger PAC compilation until you run: ALTER TABLE " +
 			               metadata.table_name + " SET PU");
 		}
 	}
 
 	// Extract PAC LINK clauses
-	if (has_pac_link) {
-		std::regex link_regex(R"(pac_link\s*\([^)]+\)\s+references\s+[a-zA-Z_][a-zA-Z0-9_]*\s*\([^)]+\))",
+	if (has_privacy_link) {
+		std::regex link_regex(R"(privacy_link\s*\([^)]+\)\s+references\s+[a-zA-Z_][a-zA-Z0-9_]*\s*\([^)]+\))",
 		                      std::regex_constants::icase);
 		auto begin = std::sregex_iterator(query.begin(), query.end(), link_regex);
 		auto end = std::sregex_iterator();
@@ -429,8 +431,9 @@ bool PACParserExtension::ParseAlterTableAddPAC(const string &query, string &stri
 							continue;
 						}
 						// Different target - this is an error
-						throw ParserException("Column(s) already have a PAC_LINK defined. A column or set of columns "
-						                      "can only reference one target.");
+						throw ParserException(
+						    "Column(s) already have a PRIVACY_LINK defined. A column or set of columns "
+						    "can only reference one target.");
 					}
 				}
 
@@ -450,11 +453,11 @@ bool PACParserExtension::ParseAlterTableAddPAC(const string &query, string &stri
 			}
 		}
 
-		// Check for PAC_LINK keyword present but no valid link extracted (malformed syntax)
+		// Check for PRIVACY_LINK keyword present but no valid link extracted (malformed syntax)
 		if (new_links_count == 0) {
-			throw ParserException(
-			    "Invalid PAC_LINK syntax. Use PAC_LINK (col) REFERENCES table(ref_col). "
-			    "Example: CREATE TABLE t (id INT, fk INT, PAC_LINK (fk) REFERENCES other_table(id), PROTECTED (id))");
+			throw ParserException("Invalid PRIVACY_LINK syntax. Use PRIVACY_LINK (col) REFERENCES table(ref_col). "
+			                      "Example: CREATE TABLE t (id INT, fk INT, PRIVACY_LINK (fk) REFERENCES "
+			                      "other_table(id), PROTECTED (id))");
 		}
 	}
 
@@ -499,7 +502,7 @@ bool PACParserExtension::ParseAlterTableAddPAC(const string &query, string &stri
  * ParseAlterTableDropPAC: Parses ALTER [PU] TABLE ... DROP ... statement
  *
  * Syntax:
- *   ALTER [PU] TABLE table_name DROP PAC_LINK (col1);
+ *   ALTER [PU] TABLE table_name DROP PRIVACY_LINK (col1);
  *   ALTER [PU] TABLE table_name DROP PROTECTED (col1, col2);
  *   ALTER TABLE table_name SET PU;
  *   ALTER TABLE table_name UNSET PU;
@@ -511,7 +514,8 @@ bool PACParserExtension::ParseAlterTableAddPAC(const string &query, string &stri
  *   - Table must have existing metadata
  *   - Columns/links must exist in metadata (can't drop non-existent entries)
  */
-bool PACParserExtension::ParseAlterTableDropPAC(const string &query, string &stripped_sql, PACTableMetadata &metadata) {
+bool PrivacyParserExtension::ParseAlterTableDropPAC(const string &query, string &stripped_sql,
+                                                    PrivacyTableMetadata &metadata) {
 	string query_lower = StringUtil::Lower(query);
 
 	// Check for ALTER TABLE ... SET PU (marks table as privacy unit)
@@ -522,14 +526,14 @@ bool PACParserExtension::ParseAlterTableDropPAC(const string &query, string &str
 		metadata.table_name = match[1].str();
 
 		// Get existing metadata if any, or create new
-		auto existing = PACMetadataManager::Get().GetTableMetadata(metadata.table_name);
+		auto existing = PrivacyMetadataManager::Get().GetTableMetadata(metadata.table_name);
 		if (existing) {
 			metadata = *existing;
 		}
 
 		// Mark as pending SET PU — validation deferred to plan time.
 		// Parse-time check fails in batch mode (-c flag) where DuckDB parses all statements
-		// before planning any: ADD PAC_KEY's metadata isn't in PACMetadataManager yet.
+		// before planning any: ADD PRIVACY_KEY's metadata isn't in PrivacyMetadataManager yet.
 		metadata.is_set_pu_op = true;
 		metadata.is_privacy_unit = true;
 
@@ -545,7 +549,7 @@ bool PACParserExtension::ParseAlterTableDropPAC(const string &query, string &str
 		metadata.table_name = match[1].str();
 
 		// Get existing metadata - it should exist
-		auto existing = PACMetadataManager::Get().GetTableMetadata(metadata.table_name);
+		auto existing = PrivacyMetadataManager::Get().GetTableMetadata(metadata.table_name);
 		if (existing) {
 			metadata = *existing;
 		}
@@ -556,10 +560,10 @@ bool PACParserExtension::ParseAlterTableDropPAC(const string &query, string &str
 		return true;
 	}
 
-	// Check if this is an ALTER [PU] TABLE ... DROP PAC_LINK/PROTECTED statement
+	// Check if this is an ALTER [PU] TABLE ... DROP PRIVACY_LINK/PROTECTED statement
 	// Both "ALTER PU TABLE t DROP ..." and "ALTER TABLE t DROP ..." are supported,
 	// but the PU keyword must match the table's actual PU status.
-	bool has_drop_link = query_lower.find("drop pac_link") != string::npos;
+	bool has_drop_link = query_lower.find("drop privacy_link") != string::npos;
 	bool has_drop_protected = query_lower.find("drop protected") != string::npos;
 
 	if (!has_drop_link && !has_drop_protected) {
@@ -578,7 +582,7 @@ bool PACParserExtension::ParseAlterTableDropPAC(const string &query, string &str
 	metadata.table_name = match[1].str();
 
 	// Get existing metadata - it must exist for DROP operations
-	auto existing = PACMetadataManager::Get().GetTableMetadata(metadata.table_name);
+	auto existing = PrivacyMetadataManager::Get().GetTableMetadata(metadata.table_name);
 	if (!existing) {
 		throw ParserException("Table '" + metadata.table_name + "' does not have any PAC metadata to drop");
 	}
@@ -596,7 +600,7 @@ bool PACParserExtension::ParseAlterTableDropPAC(const string &query, string &str
 
 	// Handle DROP PAC LINK (col1, col2, ...)
 	if (has_drop_link) {
-		std::regex drop_link_regex(R"(drop\s+pac_link\s*\(\s*([^)]+)\s*\))", std::regex_constants::icase);
+		std::regex drop_link_regex(R"(drop\s+privacy_link\s*\(\s*([^)]+)\s*\))", std::regex_constants::icase);
 		if (std::regex_search(query_lower, match, drop_link_regex)) {
 			string cols_str = match[1].str();
 			auto drop_cols = StringUtil::Split(cols_str, ',');

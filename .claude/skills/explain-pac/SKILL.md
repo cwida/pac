@@ -85,7 +85,7 @@ sampling per query** (each query uses a fresh random subset).
 ### Key settings
 
 - `pac_mi`: Mutual information bound (0 = deterministic/no noise)
-- `pac_seed`: RNG seed for reproducible noise
+- `privacy_seed`: RNG seed for reproducible noise
 - `pac_clip_support`: Minimum distinct contributors per magnitude level (NULL = disabled)
 - `pac_hash_repair`: Ensure pac_hash outputs exactly 32 bits set
 
@@ -128,7 +128,7 @@ Algorithmic Stability" (MIT PhD, February 2026), Chapter 3.
 ### DDL
 
 ```sql
-ALTER TABLE customer ADD PAC_KEY (c_custkey);
+ALTER TABLE customer ADD PRIVACY_KEY (c_custkey);
 ALTER TABLE customer SET PU;
-ALTER TABLE orders ADD PAC_LINK (o_custkey) REFERENCES customer (c_custkey);
+ALTER TABLE orders ADD PRIVACY_LINK (o_custkey) REFERENCES customer (c_custkey);
 ```

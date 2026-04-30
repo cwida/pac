@@ -2,13 +2,13 @@
 # description: Test PAC plan rewriting via EXPLAIN output (regex matching on optimized logical plan)
 # group: [sql]
 
-require pac
+require privacy
 
 statement ok
-PRAGMA clear_pac_metadata;
+PRAGMA clear_privacy_metadata;
 
 statement ok
-SET pac_seed = 42
+SET privacy_seed = 42
 
 statement ok
 SET pac_hash_repair = true
@@ -40,7 +40,7 @@ INSERT INTO nation VALUES
     (4, 'USA', 2);
 
 statement ok
-ALTER TABLE nation ADD PAC_KEY (n_nationkey);
+ALTER TABLE nation ADD PRIVACY_KEY (n_nationkey);
 
 # Customer table (Privacy Unit)
 statement ok
@@ -48,8 +48,8 @@ CREATE PU TABLE customer(
     c_custkey INTEGER,
     c_name VARCHAR,
     c_nationkey INTEGER,
-    PAC_KEY (c_custkey),
-    PAC_LINK (c_nationkey) REFERENCES nation(n_nationkey)
+    PRIVACY_KEY (c_custkey),
+    PRIVACY_LINK (c_nationkey) REFERENCES nation(n_nationkey)
     PROTECTED (c_name)
 );
 
@@ -80,10 +80,10 @@ INSERT INTO supplier VALUES
     (4, 'Supplier#004', 1);
 
 statement ok
-ALTER TABLE supplier ADD PAC_KEY (s_suppkey);
+ALTER TABLE supplier ADD PRIVACY_KEY (s_suppkey);
 
 statement ok
-ALTER TABLE supplier ADD PAC_LINK (s_nationkey) REFERENCES nation(n_nationkey);
+ALTER TABLE supplier ADD PRIVACY_LINK (s_nationkey) REFERENCES nation(n_nationkey);
 
 # Orders table
 statement ok
@@ -95,10 +95,10 @@ CREATE TABLE orders(
 );
 
 statement ok
-ALTER TABLE orders ADD PAC_KEY (o_orderkey);
+ALTER TABLE orders ADD PRIVACY_KEY (o_orderkey);
 
 statement ok
-ALTER TABLE orders ADD PAC_LINK (o_custkey) REFERENCES customer(c_custkey);
+ALTER TABLE orders ADD PRIVACY_LINK (o_custkey) REFERENCES customer(c_custkey);
 
 statement ok
 INSERT INTO orders VALUES
@@ -128,13 +128,13 @@ CREATE TABLE lineitem(
 );
 
 statement ok
-ALTER TABLE lineitem ADD PAC_KEY (l_orderkey, l_linenumber);
+ALTER TABLE lineitem ADD PRIVACY_KEY (l_orderkey, l_linenumber);
 
 statement ok
-ALTER TABLE lineitem ADD PAC_LINK (l_orderkey) REFERENCES orders(o_orderkey);
+ALTER TABLE lineitem ADD PRIVACY_LINK (l_orderkey) REFERENCES orders(o_orderkey);
 
 statement ok
-ALTER TABLE lineitem ADD PAC_LINK (l_suppkey) REFERENCES supplier(s_suppkey);
+ALTER TABLE lineitem ADD PRIVACY_LINK (l_suppkey) REFERENCES supplier(s_suppkey);
 
 statement ok
 INSERT INTO lineitem VALUES
@@ -821,4 +821,4 @@ statement ok
 DROP TABLE nation;
 
 statement ok
-PRAGMA clear_pac_metadata;
+PRAGMA clear_privacy_metadata;

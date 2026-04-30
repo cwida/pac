@@ -3,8 +3,8 @@
 //
 
 #include "compiler/pac_compiler_helpers.hpp"
-#include "pac_debug.hpp"
-#include "core/pac_optimizer.hpp"
+#include "privacy_debug.hpp"
+#include "core/privacy_optimizer.hpp"
 
 #include "duckdb/main/connection.hpp"
 #include "duckdb/parser/parser.hpp"
@@ -21,8 +21,8 @@
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/common/enums/optimizer_type.hpp"
-#include "metadata/pac_compatibility_check.hpp"
-#include "parser/pac_parser.hpp"
+#include "metadata/privacy_compatibility_check.hpp"
+#include "parser/privacy_parser.hpp"
 
 #include <vector>
 #include <duckdb/planner/planner.hpp>
@@ -57,7 +57,7 @@ void BuildJoinConditions(LogicalGet *left_get, LogicalGet *right_get, const vect
 }
 
 // Create a logical join operator based on FK relationships in the compatibility check metadata
-unique_ptr<LogicalOperator> CreateLogicalJoin(const PACCompatibilityResult &check, ClientContext &context,
+unique_ptr<LogicalOperator> CreateLogicalJoin(const PrivacyCompatibilityResult &check, ClientContext &context,
                                               unique_ptr<LogicalOperator> left_operator, unique_ptr<LogicalGet> right) {
 	// Simpler join builder: use precomputed metadata only. Find FK(s) on one side that reference
 	// the other's table; pair FK columns to PK columns and produce equality JoinCondition(s).
@@ -95,8 +95,8 @@ unique_ptr<LogicalOperator> CreateLogicalJoin(const PACCompatibilityResult &chec
 	const auto &left_meta = lit->second;
 	const auto &right_meta = rit->second;
 
-	// Get PAC metadata manager for looking up PAC_LINKs with referenced_columns
-	auto &metadata_mgr = PACMetadataManager::Get();
+	// Get PAC metadata manager for looking up PRIVACY_LINKs with referenced_columns
+	auto &metadata_mgr = PrivacyMetadataManager::Get();
 
 	vector<JoinCondition> conditions;
 
@@ -106,7 +106,7 @@ unique_ptr<LogicalOperator> CreateLogicalJoin(const PACCompatibilityResult &chec
 			const auto &left_fk_cols = fk.second;
 			vector<string> right_cols = right_meta.pks;
 
-			// If right table has no PKs defined, try to get referenced_columns from PAC_LINK
+			// If right table has no PKs defined, try to get referenced_columns from PRIVACY_LINK
 			if (right_cols.empty()) {
 				auto *left_pac_metadata = metadata_mgr.GetTableMetadata(left_table_name);
 				if (left_pac_metadata) {
@@ -133,7 +133,7 @@ unique_ptr<LogicalOperator> CreateLogicalJoin(const PACCompatibilityResult &chec
 				const auto &right_fk_cols = fk.second;
 				vector<string> left_cols = left_meta.pks;
 
-				// If left table has no PKs defined, try to get referenced_columns from PAC_LINK
+				// If left table has no PKs defined, try to get referenced_columns from PRIVACY_LINK
 				if (left_cols.empty()) {
 					auto *right_pac_metadata = metadata_mgr.GetTableMetadata(right_table_name);
 					if (right_pac_metadata) {
@@ -214,9 +214,9 @@ unique_ptr<LogicalGet> CreateLogicalGet(ClientContext &context, unique_ptr<Logic
 		}
 
 		// If we couldn't find some required columns, fall back to projecting all columns
-		// This is a safety net for edge cases like missing schema PKs or PAC_LINK metadata
+		// This is a safety net for edge cases like missing schema PKs or PRIVACY_LINK metadata
 		if (!required_columns.empty() && found_columns.size() < required_set.size()) {
-#if PAC_DEBUG
+#if PRIVACY_DEBUG
 			string missing;
 			for (auto &col_name : required_columns) {
 				if (found_columns.count(StringUtil::Lower(col_name)) == 0) {
@@ -226,8 +226,8 @@ unique_ptr<LogicalGet> CreateLogicalGet(ClientContext &context, unique_ptr<Logic
 					missing += col_name;
 				}
 			}
-			PAC_DEBUG_PRINT("CreateLogicalGet WARNING: Could not find columns [" + missing + "] in table " + table +
-			                ", projecting all columns instead");
+			PRIVACY_DEBUG_PRINT("CreateLogicalGet WARNING: Could not find columns [" + missing + "] in table " + table +
+			                    ", projecting all columns instead");
 #endif
 
 			// Fall back to projecting all columns
@@ -256,8 +256,8 @@ unique_ptr<LogicalGet> CreateLogicalGet(ClientContext &context, unique_ptr<Logic
 	throw ParserException("PAC: missing internal sample table " + table);
 }
 
-// Examine PACCompatibilityResult.fk_paths and populate gets_present / gets_missing
-void PopulateGetsFromFKPath(const PACCompatibilityResult &check, vector<string> &gets_present,
+// Examine PrivacyCompatibilityResult.fk_paths and populate gets_present / gets_missing
+void PopulateGetsFromFKPath(const PrivacyCompatibilityResult &check, vector<string> &gets_present,
                             vector<string> &gets_missing, string &start_table_out, vector<string> &target_pus_out) {
 	// Expect at least one FK path when this is called
 	if (check.fk_paths.empty()) {
@@ -330,7 +330,7 @@ void PopulateGetsFromFKPath(const PACCompatibilityResult &check, vector<string> 
 }
 
 // Find the FK columns from a table that reference any privacy unit.
-vector<string> FindFKColumnsToPU(const PACCompatibilityResult &check, const string &table_name,
+vector<string> FindFKColumnsToPU(const PrivacyCompatibilityResult &check, const string &table_name,
                                  const vector<string> &privacy_units) {
 	auto it = check.table_metadata.find(table_name);
 	if (it == check.table_metadata.end()) {

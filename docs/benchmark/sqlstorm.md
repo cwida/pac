@@ -177,7 +177,7 @@ For each pass (baseline, PAC):
 6. The database is checkpointed every 1000 queries to reclaim memory
 
 Between passes:
-- Baseline pass starts with `PRAGMA clear_pac_metadata` to ensure no PAC transforms
+- Baseline pass starts with `PRAGMA clear_privacy_metadata` to ensure no PAC transforms
 - PAC pass loads the appropriate PAC schema before running
 
 PAC verification:

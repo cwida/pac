@@ -8,7 +8,7 @@
 #include "duckdb.hpp"
 #include "duckdb/optimizer/optimizer_extension.hpp"
 #include "duckdb/planner/logical_operator.hpp"
-#include "metadata/pac_compatibility_check.hpp"
+#include "metadata/privacy_compatibility_check.hpp"
 #include "query_processing/pac_plan_traversal.hpp"
 
 namespace duckdb {
@@ -20,17 +20,17 @@ class LogicalGet;
 void AddPKColumns(LogicalGet &get, const vector<string> &pks);
 
 // Helper to inspect FK paths and populate lists of GETs present/missing. Defined in pac_bitslice_compiler.cpp
-void PopulateGetsFromFKPath(const PACCompatibilityResult &check, vector<string> &gets_present,
+void PopulateGetsFromFKPath(const PrivacyCompatibilityResult &check, vector<string> &gets_present,
                             vector<string> &gets_missing, string &start_table_out, vector<string> &target_pus_out);
 
 // Unified aggregate transformation: builds hash expressions from PU/FK tables and
 // transforms aggregates to use PAC functions. Works for both direct-PU and FK-joined plans.
 void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
-                      const vector<string> &pu_table_names, const PACCompatibilityResult &check,
+                      const vector<string> &pu_table_names, const PrivacyCompatibilityResult &check,
                       const CTETableMap &cte_map);
 
 // Bitslice-style PAC compiler entrypoint
-void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExtensionInput &input,
+void CompilePacBitsliceQuery(const PrivacyCompatibilityResult &check, OptimizerExtensionInput &input,
                              unique_ptr<LogicalOperator> &plan, const vector<string> &privacy_units,
                              const string &query, const string &query_hash);
 

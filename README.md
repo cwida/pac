@@ -8,7 +8,7 @@ This works on DuckDB v1.5 and beyond. See https://duckdb.org/install to install.
 
 ```sql
 INSTALL pac FROM community;
-LOAD pac;        
+LOAD privacy;        
 ```
 
 ## Example: Protecting Customers and their Purchasing Behavior
@@ -22,7 +22,7 @@ LOAD tpch;
 call dbgen(sf=1);
 
 -- Mark customer as the privacy unit, after it was created by dbgen
-ALTER TABLE customer ADD PAC_KEY (c_custkey);
+ALTER TABLE customer ADD PRIVACY_KEY (c_custkey);
 ALTER TABLE customer SET PU;
 
 -- Protected columns in customer table
@@ -33,8 +33,8 @@ ALTER PU TABLE customer ADD PROTECTED (c_name);
 ALTER PU TABLE customer ADD PROTECTED (c_address);
 
 -- Orders -> Customer and Lineitem->Orders links
-ALTER TABLE orders ADD PAC_LINK (o_custkey) REFERENCES customer(c_custkey);
-ALTER TABLE lineitem ADD PAC_LINK (l_orderkey) REFERENCES orders(o_orderkey);
+ALTER TABLE orders ADD PRIVACY_LINK (o_custkey) REFERENCES customer(c_custkey);
+ALTER TABLE lineitem ADD PRIVACY_LINK (l_orderkey) REFERENCES orders(o_orderkey);
 
 -- Protect the comment columns, as they may include customer-specific notes
 ALTER TABLE orders ADD PROTECTED (o_comment);
@@ -109,7 +109,7 @@ SELECT l_returnflag, l_linestatus, SUM(l_extendedprice) FROM lineitem GROUP BY A
 └──────────────┴──────────────┴──────────────────────┘
 
 -- the unnoised correct answer:
-set pac_noise = false;
+set privacy_noise = false;
 SELECT l_returnflag, l_linestatus, SUM(l_extendedprice) FROM lineitem GROUP BY ALL;
 ┌──────────────┬──────────────┬──────────────────────┐
 │ l_returnflag │ l_linestatus │ sum(l_extendedprice) │
@@ -122,7 +122,7 @@ SELECT l_returnflag, l_linestatus, SUM(l_extendedprice) FROM lineitem GROUP BY A
 └──────────────┴──────────────┴──────────────────────┘
 
 -- measure utility (MAPE, recall, precision)
-set pac_noise = true;
+set privacy_noise = true;
 set pac_diffcols = 2; -- two key columns l_returnflag, l_linestatus,
 SELECT l_returnflag, l_linestatus, SUM(l_extendedprice) FROM lineitem GROUP BY ALL;
 utility=0.510000 recall=1.000000 precision=1.000000 (=4 -0 +0)
@@ -140,7 +140,7 @@ utility=0.510000 recall=1.000000 precision=1.000000 (=4 -0 +0)
 ## How It Works
 
 1. You declare which table is the **privacy unit** (`CREATE PU TABLE` or `ALTER TABLE SET PU`) and which columns to protect.
-2. You link related tables with `PAC_LINK` to propagate privacy through joins.
+2. You link related tables with `PRIVACY_LINK` to propagate privacy through joins.
 3. PAC intercepts every aggregate query, hashes each privacy unit's key into a 64-bit value, and uses the bits to create 64 sub-samples (possible worlds). Each aggregate runs on all sub-samples independently, and the final result is taken from one secret world but  noised using the variance over all possible worlds — close to the true answer but safe against membership inference. Each query uses a different hash function, and choses a different secret world to return answers from, making such attacks harder.
 
 ### Mutual Information (MI)
@@ -152,23 +152,23 @@ PAC bounds the mutual information (MI) between the query output and whether any 
 ### Defining Privacy Units
 
 ```sql
--- Create a new PU table with PAC_KEY and optional PROTECTED columns
-CREATE PU TABLE t (col1 INT, col2 INT, PAC_KEY (col1), PROTECTED (col2));
+-- Create a new PU table with PRIVACY_KEY and optional PROTECTED columns
+CREATE PU TABLE t (col1 INT, col2 INT, PRIVACY_KEY (col1), PROTECTED (col2));
 
 -- Or convert an existing table to PU
-ALTER TABLE t ADD PAC_KEY (col1);       -- PAC_KEY on non-PU table (prep for SET PU)
-ALTER TABLE t SET PU;                   -- mark as PU (requires PAC_KEY)
+ALTER TABLE t ADD PRIVACY_KEY (col1);       -- PRIVACY_KEY on non-PU table (prep for SET PU)
+ALTER TABLE t SET PU;                   -- mark as PU (requires PRIVACY_KEY)
 ALTER TABLE t UNSET PU;                 -- remove PU status
 
 -- Add metadata to non-PU tables (use ALTER TABLE)
-ALTER TABLE orders ADD PAC_LINK (fk_col) REFERENCES t(col1);
+ALTER TABLE orders ADD PRIVACY_LINK (fk_col) REFERENCES t(col1);
 ALTER TABLE orders ADD PROTECTED (col2);
 
 -- Add metadata to PU tables (use ALTER PU TABLE)
 ALTER PU TABLE t ADD PROTECTED (col2);
 ```
 
-`PAC_KEY` identifies the privacy unit (composite keys supported). `PAC_LINK` declares a join path for privacy propagation. `PROTECTED` restricts columns to aggregate-only access — if omitted on a PU table, all columns are protected. Use `ALTER PU TABLE` for PU tables and `ALTER TABLE` for non-PU tables.
+`PRIVACY_KEY` identifies the privacy unit (composite keys supported). `PRIVACY_LINK` declares a join path for privacy propagation. `PROTECTED` restricts columns to aggregate-only access — if omitted on a PU table, all columns are protected. Use `ALTER PU TABLE` for PU tables and `ALTER TABLE` for non-PU tables.
 
 `CREATE TABLE AS SELECT` from a PU table automatically propagates PAC metadata to the new table (see [syntax docs](docs/pac/syntax.md#derived-tables-create-table-as-select)).
 
@@ -181,8 +181,8 @@ PAC rewrites standard aggregates: `SUM`, `COUNT`, `AVG`, `MIN`, `MAX`, and `COUN
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `pac_mi` | `1/128` | Mutual information bound (higher = less noise) |
-| `pac_seed` | random | Fix seed for reproducible results |
-| `pac_noise` | `true` | Toggle noise injection |
+| `privacy_seed` | random | Fix seed for reproducible results |
+| `privacy_noise` | `true` | Toggle noise injection |
 | `pac_ctas` | `true` | Propagate PAC metadata through CTAS |
 | `pac_diffcols` | `NULL` | [Utility diff](docs/pac/utility.md): compare noised vs exact results |
 =======

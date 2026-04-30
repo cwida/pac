@@ -12,7 +12,7 @@ static void DpLaplaceNoiseFunction(DataChunk &args, ExpressionState &state, Vect
 	auto &context = state.GetContext();
 
 	Value seed_val;
-	uint64_t seed = (context.TryGetCurrentSetting("pac_seed", seed_val) && !seed_val.IsNull())
+	uint64_t seed = (context.TryGetCurrentSetting("privacy_seed", seed_val) && !seed_val.IsNull())
 	                    ? uint64_t(seed_val.GetValue<int64_t>())
 	                    : uint64_t(std::random_device {}());
 	// If a seed was explicitly set, keep the run deterministic; otherwise vary per active query.

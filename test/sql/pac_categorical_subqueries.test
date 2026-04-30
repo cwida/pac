@@ -2,10 +2,10 @@
 # description: Test PAC categorical queries - outer queries that compare against inner PAC aggregates
 # group: [sql]
 
-require pac
+require privacy
 
 statement ok
-PRAGMA clear_pac_metadata;
+PRAGMA clear_privacy_metadata;
 
 # Categorical queries are queries where:
 # - An inner subquery contains a PAC aggregate (e.g., pac_sum, pac_count)
@@ -27,7 +27,7 @@ CREATE PU TABLE customer (
     c_name VARCHAR,
     c_nationkey INTEGER,
     c_acctbal DECIMAL(15,2),
-    PAC_KEY (c_custkey)
+    PRIVACY_KEY (c_custkey)
 );
 
 statement ok
@@ -37,7 +37,7 @@ CREATE TABLE nation (
 );
 
 statement ok
-ALTER TABLE nation ADD PAC_KEY (n_nationkey);
+ALTER TABLE nation ADD PRIVACY_KEY (n_nationkey);
 
 statement ok
 CREATE TABLE supplier (
@@ -48,7 +48,7 @@ CREATE TABLE supplier (
 );
 
 statement ok
-ALTER TABLE supplier ADD PAC_KEY (s_suppkey), ADD PAC_LINK (s_nationkey) REFERENCES nation(n_nationkey);
+ALTER TABLE supplier ADD PRIVACY_KEY (s_suppkey), ADD PRIVACY_LINK (s_nationkey) REFERENCES nation(n_nationkey);
 
 statement ok
 CREATE TABLE part (
@@ -58,7 +58,7 @@ CREATE TABLE part (
 );
 
 statement ok
-ALTER TABLE part ADD PAC_KEY (p_partkey);
+ALTER TABLE part ADD PRIVACY_KEY (p_partkey);
 
 statement ok
 CREATE TABLE partsupp (
@@ -69,7 +69,7 @@ CREATE TABLE partsupp (
 );
 
 statement ok
-ALTER TABLE partsupp ADD PAC_KEY (ps_partkey, ps_suppkey), ADD PAC_LINK (ps_partkey) REFERENCES part(p_partkey), ADD PAC_LINK (ps_suppkey) REFERENCES supplier(s_suppkey);
+ALTER TABLE partsupp ADD PRIVACY_KEY (ps_partkey, ps_suppkey), ADD PRIVACY_LINK (ps_partkey) REFERENCES part(p_partkey), ADD PRIVACY_LINK (ps_suppkey) REFERENCES supplier(s_suppkey);
 
 statement ok
 CREATE TABLE orders (
@@ -81,7 +81,7 @@ CREATE TABLE orders (
 );
 
 statement ok
-ALTER TABLE orders ADD PAC_KEY (o_orderkey), ADD PAC_LINK (o_custkey) REFERENCES customer(c_custkey);
+ALTER TABLE orders ADD PRIVACY_KEY (o_orderkey), ADD PRIVACY_LINK (o_custkey) REFERENCES customer(c_custkey);
 
 statement ok
 CREATE TABLE lineitem (
@@ -96,7 +96,7 @@ CREATE TABLE lineitem (
 );
 
 statement ok
-ALTER TABLE lineitem ADD PAC_KEY (l_orderkey, l_linenumber), ADD PAC_LINK (l_orderkey) REFERENCES orders(o_orderkey), ADD PAC_LINK (l_partkey) REFERENCES part(p_partkey), ADD PAC_LINK (l_suppkey) REFERENCES supplier(s_suppkey);
+ALTER TABLE lineitem ADD PRIVACY_KEY (l_orderkey, l_linenumber), ADD PRIVACY_LINK (l_orderkey) REFERENCES orders(o_orderkey), ADD PRIVACY_LINK (l_partkey) REFERENCES part(p_partkey), ADD PRIVACY_LINK (l_suppkey) REFERENCES supplier(s_suppkey);
 
 # ============================================================================
 # Test Data - Insert sample data for testing
@@ -184,7 +184,7 @@ INSERT INTO lineitem VALUES
 # ============================================================================
 
 statement ok
-SET pac_seed = 42;
+SET privacy_seed = 42;
 
 statement ok
 SET pac_hash_repair = true

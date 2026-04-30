@@ -9,7 +9,7 @@
 # Unlike filter-based categorical patterns (WHERE clause comparisons), these patterns
 # require lambda expressions to compute element-wise operations over LIST<DOUBLE> results.
 
-require pac
+require privacy
 
 # ============================================================================
 # Schema Setup - simplified TPC-H-like schema
@@ -20,7 +20,7 @@ CREATE PU TABLE customers (
     c_custkey INTEGER,
     c_name VARCHAR,
     c_nationkey INTEGER,
-    PAC_KEY (c_custkey)
+    PRIVACY_KEY (c_custkey)
 );
 
 statement ok
@@ -31,7 +31,7 @@ CREATE TABLE orders (
 );
 
 statement ok
-ALTER TABLE orders ADD PAC_KEY (o_orderkey), ADD PAC_LINK (o_custkey) REFERENCES customers(c_custkey);
+ALTER TABLE orders ADD PRIVACY_KEY (o_orderkey), ADD PRIVACY_LINK (o_custkey) REFERENCES customers(c_custkey);
 
 statement ok
 CREATE TABLE lineitem (
@@ -44,7 +44,7 @@ CREATE TABLE lineitem (
 );
 
 statement ok
-ALTER TABLE lineitem ADD PAC_KEY (l_orderkey, l_linenumber), ADD PAC_LINK (l_orderkey) REFERENCES orders(o_orderkey);
+ALTER TABLE lineitem ADD PRIVACY_KEY (l_orderkey, l_linenumber), ADD PRIVACY_LINK (l_orderkey) REFERENCES orders(o_orderkey);
 
 statement ok
 CREATE TABLE suppliers (
@@ -54,7 +54,7 @@ CREATE TABLE suppliers (
 );
 
 statement ok
-ALTER TABLE suppliers ADD PAC_KEY (s_suppkey);
+ALTER TABLE suppliers ADD PRIVACY_KEY (s_suppkey);
 
 statement ok
 CREATE TABLE nations (
@@ -63,7 +63,7 @@ CREATE TABLE nations (
 );
 
 statement ok
-ALTER TABLE nations ADD PAC_KEY (n_nationkey);
+ALTER TABLE nations ADD PRIVACY_KEY (n_nationkey);
 
 # ============================================================================
 # Test Data
@@ -116,7 +116,7 @@ INSERT INTO lineitem VALUES
 # ============================================================================
 
 statement ok
-SET pac_seed = 42;
+SET privacy_seed = 42;
 
 statement ok
 SET pac_hash_repair = true

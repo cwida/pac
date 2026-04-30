@@ -16,7 +16,7 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
-#include "pac_debug.hpp"
+#include "privacy_debug.hpp"
 
 namespace duckdb {
 
@@ -327,9 +327,9 @@ CTETableMap BuildAndResolveCTETableMap(LogicalOperator *plan_root) {
 	// Resolve transitive refs: CTEs that reference other CTEs get their tables merged
 	ResolveCTERefsInDefinitions(plan_root, cte_map);
 
-#if PAC_DEBUG
+#if PRIVACY_DEBUG
 	if (!cte_map.empty()) {
-		PAC_DEBUG_PRINT("CTE table map (" + std::to_string(cte_map.size()) + " CTEs):");
+		PRIVACY_DEBUG_PRINT("CTE table map (" + std::to_string(cte_map.size()) + " CTEs):");
 		for (auto &kv : cte_map) {
 			string tables_str;
 			for (auto &t : kv.second) {
@@ -338,7 +338,7 @@ CTETableMap BuildAndResolveCTETableMap(LogicalOperator *plan_root) {
 				}
 				tables_str += t;
 			}
-			PAC_DEBUG_PRINT("  CTE index " + std::to_string(kv.first) + ": {" + tables_str + "}");
+			PRIVACY_DEBUG_PRINT("  CTE index " + std::to_string(kv.first) + ": {" + tables_str + "}");
 		}
 	}
 #endif
@@ -750,7 +750,7 @@ static std::pair<string, string> GetColumnInfoFromBinding(LogicalOperator *subtr
 
 // Check if an aggregate's GROUP BY keys contain a protected column (PU PK, LINK FK, or metadata PROTECTED).
 // This is used to detect the edge case where inner aggregate groups by PU key.
-bool AggregateGroupsByPUKey(LogicalAggregate *agg, const PACCompatibilityResult &check,
+bool AggregateGroupsByPUKey(LogicalAggregate *agg, const PrivacyCompatibilityResult &check,
                             const vector<string> &privacy_units) {
 	if (!agg || agg->groups.empty()) {
 		return false;
@@ -779,10 +779,10 @@ bool AggregateGroupsByPUKey(LogicalAggregate *agg, const PACCompatibilityResult 
 		auto col_info = GetColumnInfoFromBinding(agg, binding);
 		auto &table_name = col_info.first;
 		auto &col_name = col_info.second;
-#if PAC_DEBUG
-		PAC_DEBUG_PRINT("AggregateGroupsByPUKey: binding [" + std::to_string(binding.table_index) + "." +
-		                std::to_string(binding.column_index) + "] -> table='" + table_name + "' col='" + col_name +
-		                "'");
+#if PRIVACY_DEBUG
+		PRIVACY_DEBUG_PRINT("AggregateGroupsByPUKey: binding [" + std::to_string(binding.table_index) + "." +
+		                    std::to_string(binding.column_index) + "] -> table='" + table_name + "' col='" + col_name +
+		                    "'");
 #endif
 		if (table_name.empty() || col_name.empty()) {
 			continue;
@@ -792,15 +792,16 @@ bool AggregateGroupsByPUKey(LogicalAggregate *agg, const PACCompatibilityResult 
 		string col_lower = StringUtil::Lower(col_name);
 
 		auto it = check.protected_columns.find(table_lower);
-#if PAC_DEBUG
+#if PRIVACY_DEBUG
 		if (it != check.protected_columns.end()) {
 			string cols_str;
 			for (auto &c : it->second) {
 				cols_str += c + ", ";
 			}
-			PAC_DEBUG_PRINT("AggregateGroupsByPUKey: protected_columns['" + table_lower + "'] = {" + cols_str + "}");
+			PRIVACY_DEBUG_PRINT("AggregateGroupsByPUKey: protected_columns['" + table_lower + "'] = {" + cols_str +
+			                    "}");
 		} else {
-			PAC_DEBUG_PRINT("AggregateGroupsByPUKey: no protected_columns entry for '" + table_lower + "'");
+			PRIVACY_DEBUG_PRINT("AggregateGroupsByPUKey: no protected_columns entry for '" + table_lower + "'");
 		}
 #endif
 		if (it != check.protected_columns.end() && it->second.count(col_lower) > 0) {
@@ -851,7 +852,7 @@ static LogicalAggregate *FindFirstChildAggregateWithPath(LogicalOperator *op, ve
 // In this case, the inner aggregate is skipped and the outer aggregate is noised instead.
 vector<LogicalAggregate *> FilterTargetAggregatesWithPUKeyCheck(const vector<LogicalAggregate *> &all_aggregates,
                                                                 const vector<string> &target_table_names,
-                                                                const PACCompatibilityResult &check,
+                                                                const PrivacyCompatibilityResult &check,
                                                                 const vector<string> &privacy_units,
                                                                 const CTETableMap &cte_map) {
 	vector<LogicalAggregate *> target_aggregates;
@@ -924,8 +925,8 @@ vector<LogicalAggregate *> FilterTargetAggregatesWithPUKeyCheck(const vector<Log
 	for (auto *agg : all_aggregates) {
 		// Skip aggregates that are marked to be skipped (inner aggregates that group by PU key)
 		if (skip_aggregates.count(agg) > 0) {
-#if PAC_DEBUG
-			PAC_DEBUG_PRINT("FilterTargetAggregatesWithPUKeyCheck: skipping aggregate (inner groups by PU key)");
+#if PRIVACY_DEBUG
+			PRIVACY_DEBUG_PRINT("FilterTargetAggregatesWithPUKeyCheck: skipping aggregate (inner groups by PU key)");
 #endif
 			continue;
 		}
@@ -933,8 +934,9 @@ vector<LogicalAggregate *> FilterTargetAggregatesWithPUKeyCheck(const vector<Log
 		// Check if this aggregate should be included because its inner aggregate groups by PU key
 		if (include_outer_aggregates.count(agg) > 0) {
 			// Include this outer aggregate - it needs to be noised instead of the inner one
-#if PAC_DEBUG
-			PAC_DEBUG_PRINT("FilterTargetAggregatesWithPUKeyCheck: including outer aggregate (inner groups by PU key)");
+#if PRIVACY_DEBUG
+			PRIVACY_DEBUG_PRINT(
+			    "FilterTargetAggregatesWithPUKeyCheck: including outer aggregate (inner groups by PU key)");
 #endif
 			target_aggregates.push_back(agg);
 			continue;
@@ -953,8 +955,8 @@ vector<LogicalAggregate *> FilterTargetAggregatesWithPUKeyCheck(const vector<Log
 		}
 
 		if (!has_target_table) {
-#if PAC_DEBUG
-			PAC_DEBUG_PRINT(
+#if PRIVACY_DEBUG
+			PRIVACY_DEBUG_PRINT(
 			    "FilterTargetAggregatesWithPUKeyCheck: aggregate has no target tables in subtree, skipping");
 #endif
 			continue;
@@ -975,22 +977,22 @@ vector<LogicalAggregate *> FilterTargetAggregatesWithPUKeyCheck(const vector<Log
 		}
 
 		if (has_direct_base_table) {
-#if PAC_DEBUG
-			PAC_DEBUG_PRINT("FilterTargetAggregatesWithPUKeyCheck: including aggregate (has target tables + direct "
-			                "base table/CTE ref)");
+#if PRIVACY_DEBUG
+			PRIVACY_DEBUG_PRINT("FilterTargetAggregatesWithPUKeyCheck: including aggregate (has target tables + direct "
+			                    "base table/CTE ref)");
 #endif
 			target_aggregates.push_back(agg);
 		} else {
-#if PAC_DEBUG
-			PAC_DEBUG_PRINT(
+#if PRIVACY_DEBUG
+			PRIVACY_DEBUG_PRINT(
 			    "FilterTargetAggregatesWithPUKeyCheck: aggregate has target tables but no direct base table, skipping");
 #endif
 		}
 	}
 
-#if PAC_DEBUG
-	PAC_DEBUG_PRINT("FilterTargetAggregatesWithPUKeyCheck: selected " + std::to_string(target_aggregates.size()) +
-	                " of " + std::to_string(all_aggregates.size()) + " aggregates");
+#if PRIVACY_DEBUG
+	PRIVACY_DEBUG_PRINT("FilterTargetAggregatesWithPUKeyCheck: selected " + std::to_string(target_aggregates.size()) +
+	                    " of " + std::to_string(all_aggregates.size()) + " aggregates");
 #endif
 
 	return target_aggregates;
@@ -998,7 +1000,8 @@ vector<LogicalAggregate *> FilterTargetAggregatesWithPUKeyCheck(const vector<Log
 
 // Find the inner aggregate (child of target_agg) that groups by PU key.
 // Returns the inner aggregate and the column binding of the PU key group column in its output.
-LogicalAggregate *FindInnerAggregateWithPUKeyGroup(LogicalAggregate *target_agg, const PACCompatibilityResult &check,
+LogicalAggregate *FindInnerAggregateWithPUKeyGroup(LogicalAggregate *target_agg,
+                                                   const PrivacyCompatibilityResult &check,
                                                    const vector<string> &privacy_units, ColumnBinding &out_pk_binding) {
 	if (!target_agg) {
 		return nullptr;

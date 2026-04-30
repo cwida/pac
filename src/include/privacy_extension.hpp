@@ -4,7 +4,7 @@
 
 namespace duckdb {
 
-class PacExtension : public Extension {
+class PrivacyExtension : public Extension {
 public:
 	void Load(ExtensionLoader &db) override;
 	string Name() override;

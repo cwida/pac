@@ -8,7 +8,7 @@
 
 #include "categorical/pac_categorical.hpp"
 #include "duckdb/parser/parsed_data/create_scalar_function_info.hpp"
-#include "pac_debug.hpp"
+#include "privacy_debug.hpp"
 #include "aggregates/pac_aggregate.hpp"
 
 #include "duckdb/function/scalar_function.hpp"
@@ -48,17 +48,17 @@ struct PacCategoricalBindData : public FunctionData {
 	std::shared_ptr<PacPState> pstate; // p-tracking state shared across query (may be nullptr)
 	double utility_threshold;          // z-score threshold for utility NULLing (NaN = disabled)
 
-	// Primary constructor - reads seed from pac_seed setting, or uses default 42 if not set.
+	// Primary constructor - reads seed from privacy_seed setting, or uses default 42 if not set.
 	// When mi > 0, seed is randomized per query via the query number.
 	explicit PacCategoricalBindData(ClientContext &ctx, double mi_val = 0.0, double correction_val = 1.0)
 	    : mi(mi_val), correction(correction_val), utility_threshold(std::numeric_limits<double>::quiet_NaN()) {
 		// Read utility threshold setting
 		Value ut_val;
-		if (ctx.TryGetCurrentSetting("pac_utility_threshold", ut_val) && !ut_val.IsNull()) {
+		if (ctx.TryGetCurrentSetting("privacy_min_group_count", ut_val) && !ut_val.IsNull()) {
 			utility_threshold = ut_val.GetValue<double>();
 		}
 		Value pac_seed_val;
-		if (ctx.TryGetCurrentSetting("pac_seed", pac_seed_val) && !pac_seed_val.IsNull()) {
+		if (ctx.TryGetCurrentSetting("privacy_seed", pac_seed_val) && !pac_seed_val.IsNull()) {
 			seed = uint64_t(pac_seed_val.GetValue<int64_t>());
 		} else {
 			seed = 42;
@@ -765,7 +765,7 @@ static void PacNoisedDivFunction(DataChunk &args, ExpressionState &state, Vector
 }
 
 // ============================================================================
-// Bind function for pac_filter/pac_select (reads pac_seed and pac_mi settings)
+// Bind function for pac_filter/pac_select (reads privacy_seed and pac_mi settings)
 // ============================================================================
 static unique_ptr<FunctionData> PacCategoricalBind(ClientContext &ctx, ScalarFunction &func,
                                                    vector<unique_ptr<Expression>> &args) {
@@ -776,9 +776,9 @@ static unique_ptr<FunctionData> PacCategoricalBind(ClientContext &ctx, ScalarFun
 
 	auto result = make_uniq<PacCategoricalBindData>(ctx, mi, correction);
 
-#if PAC_DEBUG
-	PAC_DEBUG_PRINT("PacCategoricalBind: mi=" + std::to_string(mi) + ", correction=" + std::to_string(correction) +
-	                ", seed=" + std::to_string(result->seed));
+#if PRIVACY_DEBUG
+	PRIVACY_DEBUG_PRINT("PacCategoricalBind: mi=" + std::to_string(mi) + ", correction=" + std::to_string(correction) +
+	                    ", seed=" + std::to_string(result->seed));
 #endif
 
 	return result;

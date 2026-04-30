@@ -4,7 +4,7 @@
 
 #include "query_processing/pac_expression_builder.hpp"
 #include "query_processing/pac_plan_traversal.hpp"
-#include "pac_debug.hpp"
+#include "privacy_debug.hpp"
 
 #include "duckdb/planner/operator/logical_cteref.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
@@ -23,7 +23,7 @@
 #include "duckdb/planner/binder.hpp"
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
 #include "duckdb/planner/operator/logical_cross_product.hpp"
-#include "utils/pac_helpers.hpp"
+#include "utils/privacy_helpers.hpp"
 #include "categorical/pac_categorical_detection.hpp"
 
 namespace duckdb {
@@ -39,7 +39,7 @@ static void EnsureProjectionIdsPopulated(LogicalGet &get) {
 	}
 }
 
-#if PAC_DEBUG
+#if PRIVACY_DEBUG
 // Helper function to find a LogicalGet by table_index in the operator tree
 static LogicalGet *FindLogicalGetByTableIndex(LogicalOperator &op, idx_t table_index) {
 	if (op.type == LogicalOperatorType::LOGICAL_GET) {
@@ -291,9 +291,9 @@ static unique_ptr<LogicalOperator> *FindCTERefSlot(unique_ptr<LogicalOperator> &
 
 ColumnBinding InsertHashProjectionAboveCTERef(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
                                               LogicalCTERef &cte_ref, const vector<string> &key_columns) {
-#if PAC_DEBUG
-	PAC_DEBUG_PRINT("InsertHashProjectionAboveCTERef: CTE_SCAN table_index=" + std::to_string(cte_ref.table_index) +
-	                " cte_index=" + std::to_string(cte_ref.cte_index));
+#if PRIVACY_DEBUG
+	PRIVACY_DEBUG_PRINT("InsertHashProjectionAboveCTERef: CTE_SCAN table_index=" + std::to_string(cte_ref.table_index) +
+	                    " cte_index=" + std::to_string(cte_ref.cte_index));
 #endif
 
 	// 1. Resolve key column indices in the CTE_SCAN's bound_columns
@@ -309,8 +309,8 @@ ColumnBinding InsertHashProjectionAboveCTERef(OptimizerExtensionInput &input, un
 			}
 		}
 		if (!found) {
-#if PAC_DEBUG
-			PAC_DEBUG_PRINT("InsertHashProjectionAboveCTERef: key column '" + key + "' not found in bound_columns");
+#if PRIVACY_DEBUG
+			PRIVACY_DEBUG_PRINT("InsertHashProjectionAboveCTERef: key column '" + key + "' not found in bound_columns");
 #endif
 			return ColumnBinding(DConstants::INVALID_INDEX, 0);
 		}
@@ -358,10 +358,10 @@ ColumnBinding InsertHashProjectionAboveCTERef(OptimizerExtensionInput &input, un
 	replacer.stop_operator = proj_ptr;
 	replacer.VisitOperator(*plan);
 
-#if PAC_DEBUG
-	PAC_DEBUG_PRINT("InsertHashProjectionAboveCTERef: inserted hash projection (table_index=" +
-	                std::to_string(proj_table_index) + ") above CTE_SCAN #" + std::to_string(cte_ref.table_index) +
-	                ", hash at column " + std::to_string(num_cte_cols));
+#if PRIVACY_DEBUG
+	PRIVACY_DEBUG_PRINT("InsertHashProjectionAboveCTERef: inserted hash projection (table_index=" +
+	                    std::to_string(proj_table_index) + ") above CTE_SCAN #" + std::to_string(cte_ref.table_index) +
+	                    ", hash at column " + std::to_string(num_cte_cols));
 #endif
 
 	return ColumnBinding(proj_table_index, num_cte_cols);
@@ -538,10 +538,10 @@ static void InsertDistinctPreAggregation(OptimizerExtensionInput &input, Logical
 
 	agg->ResolveOperatorTypes();
 
-#if PAC_DEBUG
-	PAC_DEBUG_PRINT("InsertDistinctPreAggregation: Inserted inner GROUP BY aggregate (group_index=" +
-	                std::to_string(inner_group_index) + ", agg_index=" + std::to_string(inner_agg_index) + ") with " +
-	                std::to_string(num_original_groups) + " original groups + distinct value");
+#if PRIVACY_DEBUG
+	PRIVACY_DEBUG_PRINT("InsertDistinctPreAggregation: Inserted inner GROUP BY aggregate (group_index=" +
+	                    std::to_string(inner_group_index) + ", agg_index=" + std::to_string(inner_agg_index) +
+	                    ") with " + std::to_string(num_original_groups) + " original groups + distinct value");
 #endif
 }
 
@@ -902,9 +902,9 @@ static void InsertMultiBranchPreAggregation(OptimizerExtensionInput &input, uniq
 		auto original_type = agg->expressions[ai]->return_type;
 		auto branch_type = branch_expr_types[branch_idx][pos_in_branch];
 
-		PAC_DEBUG_PRINT("MultiBranch output: ai=" + std::to_string(ai) + " branch=" + std::to_string(branch_idx) +
-		                " pos=" + std::to_string(pos_in_branch) + " agg_index=" + std::to_string(branch.agg_index) +
-		                " original_type=" + original_type.ToString() + " branch_type=" + branch_type.ToString());
+		PRIVACY_DEBUG_PRINT("MultiBranch output: ai=" + std::to_string(ai) + " branch=" + std::to_string(branch_idx) +
+		                    " pos=" + std::to_string(pos_in_branch) + " agg_index=" + std::to_string(branch.agg_index) +
+		                    " original_type=" + original_type.ToString() + " branch_type=" + branch_type.ToString());
 
 		unique_ptr<Expression> ref =
 		    make_uniq<BoundColumnRefExpression>(branch_type, ColumnBinding(branch.agg_index, pos_in_branch));
@@ -998,44 +998,46 @@ static void InsertMultiBranchPreAggregation(OptimizerExtensionInput &input, uniq
 void ModifyAggregatesWithPacFunctions(OptimizerExtensionInput &input, LogicalAggregate *agg,
                                       unique_ptr<Expression> &hash_input_expr, unique_ptr<LogicalOperator> &plan,
                                       double correction) {
-#if PAC_DEBUG
-	PAC_DEBUG_PRINT("ModifyAggregatesWithPacFunctions: Processing aggregate with " +
-	                std::to_string(agg->expressions.size()) + " expressions");
+#if PRIVACY_DEBUG
+	PRIVACY_DEBUG_PRINT("ModifyAggregatesWithPacFunctions: Processing aggregate with " +
+	                    std::to_string(agg->expressions.size()) + " expressions");
 
 	// Debug: Print hash input expression details
-	PAC_DEBUG_PRINT("ModifyAggregatesWithPacFunctions: Hash input expression: " + hash_input_expr->ToString());
-	PAC_DEBUG_PRINT("ModifyAggregatesWithPacFunctions: Hash input type: " + hash_input_expr->return_type.ToString());
+	PRIVACY_DEBUG_PRINT("ModifyAggregatesWithPacFunctions: Hash input expression: " + hash_input_expr->ToString());
+	PRIVACY_DEBUG_PRINT("ModifyAggregatesWithPacFunctions: Hash input type: " +
+	                    hash_input_expr->return_type.ToString());
 
 	// Debug: Print all column references in the hash expression
 	ExpressionIterator::EnumerateExpression(hash_input_expr, [&](Expression &expr) {
 		if (expr.type == ExpressionType::BOUND_COLUMN_REF) {
 			auto &col_ref = expr.Cast<BoundColumnRefExpression>();
-			PAC_DEBUG_PRINT("ModifyAggregatesWithPacFunctions: Hash expr references column [" +
-			                std::to_string(col_ref.binding.table_index) + "." +
-			                std::to_string(col_ref.binding.column_index) + "] type=" + col_ref.return_type.ToString());
+			PRIVACY_DEBUG_PRINT("ModifyAggregatesWithPacFunctions: Hash expr references column [" +
+			                    std::to_string(col_ref.binding.table_index) + "." +
+			                    std::to_string(col_ref.binding.column_index) +
+			                    "] type=" + col_ref.return_type.ToString());
 		}
 	});
 
 	// Debug: Print aggregate's groups
-	PAC_DEBUG_PRINT("ModifyAggregatesWithPacFunctions: Aggregate has " + std::to_string(agg->groups.size()) +
-	                " groups:");
+	PRIVACY_DEBUG_PRINT("ModifyAggregatesWithPacFunctions: Aggregate has " + std::to_string(agg->groups.size()) +
+	                    " groups:");
 	for (idx_t i = 0; i < agg->groups.size(); i++) {
-		PAC_DEBUG_PRINT("  Group " + std::to_string(i) + ": " + agg->groups[i]->ToString());
+		PRIVACY_DEBUG_PRINT("  Group " + std::to_string(i) + ": " + agg->groups[i]->ToString());
 	}
 
 	// Debug: Print aggregate's group_index and aggregate_index
-	PAC_DEBUG_PRINT("ModifyAggregatesWithPacFunctions: group_index=" + std::to_string(agg->group_index) +
-	                ", aggregate_index=" + std::to_string(agg->aggregate_index));
+	PRIVACY_DEBUG_PRINT("ModifyAggregatesWithPacFunctions: group_index=" + std::to_string(agg->group_index) +
+	                    ", aggregate_index=" + std::to_string(agg->aggregate_index));
 
 	// Debug: Print child operator info
 	if (!agg->children.empty()) {
-		PAC_DEBUG_PRINT("ModifyAggregatesWithPacFunctions: Child operator type=" +
-		                std::to_string(static_cast<int>(agg->children[0]->type)));
+		PRIVACY_DEBUG_PRINT("ModifyAggregatesWithPacFunctions: Child operator type=" +
+		                    std::to_string(static_cast<int>(agg->children[0]->type)));
 		if (agg->children[0]->type == LogicalOperatorType::LOGICAL_GET) {
 			auto &child_get = agg->children[0]->Cast<LogicalGet>();
-			PAC_DEBUG_PRINT("ModifyAggregatesWithPacFunctions: Child is GET with table_index=" +
-			                std::to_string(child_get.table_index) +
-			                ", columns=" + std::to_string(child_get.GetColumnIds().size()));
+			PRIVACY_DEBUG_PRINT("ModifyAggregatesWithPacFunctions: Child is GET with table_index=" +
+			                    std::to_string(child_get.table_index) +
+			                    ", columns=" + std::to_string(child_get.GetColumnIds().size()));
 		}
 	}
 #endif
@@ -1095,8 +1097,8 @@ void ModifyAggregatesWithPacFunctions(OptimizerExtensionInput &input, LogicalAgg
 		auto &old_aggr = agg->expressions[i]->Cast<BoundAggregateExpression>();
 		string function_name = old_aggr.function.name;
 
-#if PAC_DEBUG
-		PAC_DEBUG_PRINT("ModifyAggregatesWithPacFunctions: Transforming " + function_name + " to PAC function");
+#if PRIVACY_DEBUG
+		PRIVACY_DEBUG_PRINT("ModifyAggregatesWithPacFunctions: Transforming " + function_name + " to PAC function");
 #endif
 
 		// Extract the original aggregate's value child expression
@@ -1190,7 +1192,7 @@ static bool IsPacAggregate(LogicalAggregate *agg) {
 }
 
 void RewriteClipAggregates(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
-                           const PACCompatibilityResult &check, const vector<string> &privacy_units) {
+                           const PrivacyCompatibilityResult &check, const vector<string> &privacy_units) {
 	// Find all aggregate nodes
 	vector<LogicalAggregate *> all_aggregates;
 	FindAllAggregates(plan, all_aggregates);

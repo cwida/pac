@@ -420,7 +420,7 @@ void PacSumFinalize(Vector &states, AggregateInputData &input, Vector &result, i
 			result_mask.SetInvalid(offset + i); // return NULL (no values seen)
 			continue;
 		}
-		// Use per-group deterministic RNG seeded by both pac_seed and key_hash
+		// Use per-group deterministic RNG seeded by both privacy_seed and key_hash
 		// This ensures each group gets the same noise regardless of processing order
 		uint64_t key_hash = pos->key_hash;
 		std::mt19937_64 gen(input.bind_data->Cast<PacBindData>().seed);
@@ -451,7 +451,7 @@ void PacSumFinalize(Vector &states, AggregateInputData &input, Vector &result, i
 			result_mask.SetInvalid(offset + i);
 			continue;
 		}
-#if PAC_DEBUG
+#if PRIVACY_DEBUG
 		Printer::Print("pac_sum finalize: result_val=" + std::to_string(result_val));
 #endif
 		data[offset + i] = FromDouble<ACC_TYPE>(result_val);

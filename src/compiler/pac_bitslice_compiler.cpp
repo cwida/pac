@@ -15,16 +15,16 @@
 //
 
 #include "compiler/pac_bitslice_compiler.hpp"
-#include "pac_debug.hpp"
-#include "utils/pac_helpers.hpp"
-#include "metadata/pac_compatibility_check.hpp"
+#include "privacy_debug.hpp"
+#include "utils/privacy_helpers.hpp"
+#include "metadata/privacy_compatibility_check.hpp"
 #include "compiler/pac_compiler_helpers.hpp"
 #include "query_processing/pac_projection_propagation.hpp"
 #include "query_processing/pac_subquery_handler.hpp"
 #include "compiler/pac_bitslice_add_fkjoins.hpp"
 #include "categorical/pac_categorical_rewriter.hpp"
 #include "query_processing/pac_avg_rewriter.hpp"
-#include "parser/pac_parser.hpp"
+#include "parser/privacy_parser.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/planner/operator/logical_aggregate.hpp"
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
@@ -120,8 +120,8 @@ static unique_ptr<Expression> HandlePassthroughDeepHash(OptimizerExtensionInput 
  * 2. Filter to aggregates that have at least one PU table in their subtree
  * 3. For each target aggregate:
  *    - For each PU table in the aggregate's subtree:
- *      * Use PAC_KEY columns for hashing
- *      * Build hash expression: hash(pk) or hash(xor(pk1, pk2, ...)) for composite PAC_KEYs
+ *      * Use PRIVACY_KEY columns for hashing
+ *      * Build hash expression: hash(pk) or hash(xor(pk1, pk2, ...)) for composite PRIVACY_KEYs
  *      * Propagate the hash expression through projections to the aggregate level
  *    - Combine all PU hash expressions with AND (for multi-PU queries)
  *    - Transform the aggregate to use PAC functions
@@ -262,7 +262,7 @@ static ColumnBinding PropagateColumnThroughSubtree(LogicalOperator *root, Logica
 	return current;
 }
 
-// Expand a CTE definition to include missing PAC_KEY columns so that CTE_REF nodes
+// Expand a CTE definition to include missing PRIVACY_KEY columns so that CTE_REF nodes
 // expose them for hashing. This modifies the MATERIALIZED_CTE's definition (child[0]),
 // the GET node's column_ids, intermediate projections, and all CTE_REF nodes.
 static bool ExpandCTEWithColumns(LogicalOperator *plan_root, const LogicalCTERef &ref, const string &table_name,
@@ -317,7 +317,8 @@ static bool ExpandCTEWithColumns(LogicalOperator *plan_root, const LogicalCTERef
 			}
 		}
 		if (col_oid == COLUMN_IDENTIFIER_ROW_ID) {
-			PAC_DEBUG_PRINT("ExpandCTEWithColumns: column '" + col_name + "' not found in table '" + table_name + "'");
+			PRIVACY_DEBUG_PRINT("ExpandCTEWithColumns: column '" + col_name + "' not found in table '" + table_name +
+			                    "'");
 			return false;
 		}
 
@@ -358,8 +359,8 @@ static bool ExpandCTEWithColumns(LogicalOperator *plan_root, const LogicalCTERef
 			cte_ref->ResolveOperatorTypes();
 		}
 
-		PAC_DEBUG_PRINT("ExpandCTEWithColumns: added column '" + col_name + "' (oid=" + std::to_string(col_oid) +
-		                ") to CTE index " + std::to_string(ref.cte_index));
+		PRIVACY_DEBUG_PRINT("ExpandCTEWithColumns: added column '" + col_name + "' (oid=" + std::to_string(col_oid) +
+		                    ") to CTE index " + std::to_string(ref.cte_index));
 	}
 
 	return true;
@@ -372,7 +373,7 @@ static bool ExpandCTEWithColumns(LogicalOperator *plan_root, const LogicalCTERef
 // CTE_SCAN nodes inside DELIM_JOIN subtrees are skipped because inserting a hash
 // projection there corrupts the DELIM_JOIN/DELIM_GET statistics pairing.
 static CTEHashMatch FindCTEHashSource(LogicalOperator *op, const string &pu_table_name, const vector<string> &pu_pks,
-                                      const CTETableMap &cte_map, const PACCompatibilityResult &check,
+                                      const CTETableMap &cte_map, const PrivacyCompatibilityResult &check,
                                       LogicalOperator *plan_root = nullptr, bool inside_delim_join = false) {
 	if (!op) {
 		return CTEHashMatch();
@@ -389,7 +390,7 @@ static CTEHashMatch FindCTEHashSource(LogicalOperator *op, const string &pu_tabl
 				if (CTERefExposesColumns(ref, pu_pks)) {
 					return CTEHashMatch(&ref, pu_pks);
 				}
-				// CTE contains the PU table but doesn't expose PAC_KEY columns.
+				// CTE contains the PU table but doesn't expose PRIVACY_KEY columns.
 				// Try expanding the CTE definition to include the missing columns.
 				if (plan_root && ExpandCTEWithColumns(plan_root, ref, pu_table_name, pu_pks)) {
 					if (CTERefExposesColumns(ref, pu_pks)) {
@@ -448,7 +449,7 @@ static CTEHashMatch FindCTEHashSource(LogicalOperator *op, const string &pu_tabl
 }
 
 void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
-                      const vector<string> &pu_table_names, const PACCompatibilityResult &check,
+                      const vector<string> &pu_table_names, const PrivacyCompatibilityResult &check,
                       const CTETableMap &cte_map, PacAggregateInfoMap &pac_agg_info) {
 	// Find ALL aggregate nodes in the plan first
 	vector<LogicalAggregate *> all_aggregates;
@@ -534,7 +535,7 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 				// The PU table is in the subtree AND its columns are accessible
 				auto &get = *get_ptr;
 
-				// Get PAC_KEY columns (required for all PU tables)
+				// Get PRIVACY_KEY columns (required for all PU tables)
 				vector<string> pks;
 
 				auto it = check.table_metadata.find(pu_table_name);
@@ -542,8 +543,8 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 					pks = it->second.pks;
 				} else {
 					throw InternalException("PAC compiler: PU table '" + pu_table_name +
-					                        "' has no PAC_KEY defined. Use ALTER PU TABLE " + pu_table_name +
-					                        " ADD PAC_KEY (column_name) to define one.");
+					                        "' has no PRIVACY_KEY defined. Use ALTER PU TABLE " + pu_table_name +
+					                        " ADD PRIVACY_KEY (column_name) to define one.");
 				}
 
 				// Check if the PU table is directly reachable (not behind a nested aggregate).
@@ -757,19 +758,19 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 	}
 }
 
-void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExtensionInput &input,
+void CompilePacBitsliceQuery(const PrivacyCompatibilityResult &check, OptimizerExtensionInput &input,
                              unique_ptr<LogicalOperator> &plan, const vector<string> &privacy_units,
                              const string &query, const string &query_hash) {
-#if PAC_DEBUG
-	PAC_DEBUG_PRINT("=== PAC BITSLICE COMPILATION ===");
-	PAC_DEBUG_PRINT("Query hash: " + query_hash);
-	PAC_DEBUG_PRINT("Query: " + query.substr(0, 100) + (query.length() > 100 ? "..." : ""));
-	PAC_DEBUG_PRINT("Privacy units: " + std::to_string(privacy_units.size()));
+#if PRIVACY_DEBUG
+	PRIVACY_DEBUG_PRINT("=== PAC BITSLICE COMPILATION ===");
+	PRIVACY_DEBUG_PRINT("Query hash: " + query_hash);
+	PRIVACY_DEBUG_PRINT("Query: " + query.substr(0, 100) + (query.length() > 100 ? "..." : ""));
+	PRIVACY_DEBUG_PRINT("Privacy units: " + std::to_string(privacy_units.size()));
 	for (auto &pu : privacy_units) {
-		PAC_DEBUG_PRINT("  " + pu);
+		PRIVACY_DEBUG_PRINT("  " + pu);
 	}
-	PAC_DEBUG_PRINT("Scanned PU tables: " + std::to_string(check.scanned_pu_tables.size()));
-	PAC_DEBUG_PRINT("Scanned non-PU tables: " + std::to_string(check.scanned_non_pu_tables.size()));
+	PRIVACY_DEBUG_PRINT("Scanned PU tables: " + std::to_string(check.scanned_pu_tables.size()));
+	PRIVACY_DEBUG_PRINT("Scanned non-PU tables: " + std::to_string(check.scanned_non_pu_tables.size()));
 #endif
 	// Resolve operator types on the raw plan so that .types vectors are populated.
 	// In the pre-optimizer phase, ResolveOperatorTypes hasn't run yet.
@@ -793,7 +794,7 @@ void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExten
 	// a) the query scans PU table(s):
 	// a.1) each PU table has 1 PK: we hash it
 	// a.2) each PU table has multiple PKs: we XOR them and hash the result
-	// a.3) each PU table must have a PAC_KEY (no rowid fallback)
+	// a.3) each PU table must have a PRIVACY_KEY (no rowid fallback)
 	// a.4) we AND all the hashes together for multiple PUs
 	// b) the query does not scan PU table(s):
 	// b.1) we follow the FK path to find the PK(s) of each PU table
@@ -830,8 +831,8 @@ void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExten
 		}
 		pu_present_in_tree = pu_via_cte;
 	}
-#if PAC_DEBUG
-	PAC_DEBUG_PRINT("=== PLAN BEFORE PAC TRANSFORMATION ===");
+#if PRIVACY_DEBUG
+	PRIVACY_DEBUG_PRINT("=== PLAN BEFORE PAC TRANSFORMATION ===");
 	plan->Print();
 #endif
 	if (!pu_present_in_tree && !check.fk_paths.empty()) {
@@ -890,10 +891,10 @@ void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExten
 		}
 	}
 
-#if PAC_DEBUG
-	PAC_DEBUG_PRINT("=== PAC-OPTIMIZED PLAN ===");
+#if PRIVACY_DEBUG
+	PRIVACY_DEBUG_PRINT("=== PAC-OPTIMIZED PLAN ===");
 	plan->Print();
-	PAC_DEBUG_PRINT("=== PAC COMPILATION END ===");
+	PRIVACY_DEBUG_PRINT("=== PAC COMPILATION END ===");
 #endif
 }
 } // namespace duckdb

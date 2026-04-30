@@ -2,13 +2,13 @@
 # description: Stress test PAC parser and compatibility checker with malformed syntax, wrong keywords, edge cases
 # group: [sql]
 
-require pac
+require privacy
 
 statement ok
-PRAGMA clear_pac_metadata;
+PRAGMA clear_privacy_metadata;
 
 statement ok
-SET pac_seed = 42
+SET privacy_seed = 42
 
 statement ok
 SET pac_hash_repair = true
@@ -23,70 +23,70 @@ SET threads = 1
 # A. Parser: Malformed CREATE PU TABLE
 # ============================================================================
 
-# A1: CREATE PU TABLE without PAC_KEY
+# A1: CREATE PU TABLE without PRIVACY_KEY
 statement error
 CREATE PU TABLE a1 (id INTEGER, name VARCHAR);
 ----
-CREATE PU TABLE requires a PAC_KEY clause to identify the privacy unit
+CREATE PU TABLE requires a PRIVACY_KEY clause to identify the privacy unit
 
-# A2: PAC_KEY without parens (missing opening paren)
+# A2: PRIVACY_KEY without parens (missing opening paren)
 # DuckDB parser will fail before PAC parser can extract it
 statement error
-CREATE PU TABLE a2 (id INTEGER, PAC_KEY);
+CREATE PU TABLE a2 (id INTEGER, PRIVACY_KEY);
 ----
-CREATE PU TABLE requires a PAC_KEY clause to identify the privacy unit
+CREATE PU TABLE requires a PRIVACY_KEY clause to identify the privacy unit
 
-# A3: Empty PAC_KEY column list
+# A3: Empty PRIVACY_KEY column list
 statement error
-CREATE PU TABLE a3 (id INTEGER, PAC_KEY());
+CREATE PU TABLE a3 (id INTEGER, PRIVACY_KEY());
 ----
-CREATE PU TABLE requires a PAC_KEY clause to identify the privacy unit
+CREATE PU TABLE requires a PRIVACY_KEY clause to identify the privacy unit
 
-# A4: PAC_KEY referencing nonexistent column
+# A4: PRIVACY_KEY referencing nonexistent column
 # Table gets created first, then column validation happens at plan time
 # DuckDB will catch this because table is created with only id,
-# but PAC_KEY(nonexistent) should still parse. The column doesn't need to exist
-# as a separate definition since PAC_KEY is metadata-only.
-# Actually, the CREATE TABLE succeeds (PAC_KEY is stripped), but PAC metadata
+# but PRIVACY_KEY(nonexistent) should still parse. The column doesn't need to exist
+# as a separate definition since PRIVACY_KEY is metadata-only.
+# Actually, the CREATE TABLE succeeds (PRIVACY_KEY is stripped), but PAC metadata
 # stores 'nonexistent'. The column check happens at ALTER time, not CREATE time.
-# Let's just verify the table is created with PAC_KEY pointing at a real column.
+# Let's just verify the table is created with PRIVACY_KEY pointing at a real column.
 statement ok
-CREATE PU TABLE a4 (id INTEGER, PAC_KEY(id));
+CREATE PU TABLE a4 (id INTEGER, PRIVACY_KEY(id));
 
 statement ok
 DROP TABLE a4;
 
-# A5: Duplicate PAC_KEY
-# The parser just merges columns, so duplicate PAC_KEY clauses get deduped
+# A5: Duplicate PRIVACY_KEY
+# The parser just merges columns, so duplicate PRIVACY_KEY clauses get deduped
 statement ok
-CREATE PU TABLE a5 (id INTEGER, PAC_KEY(id), PAC_KEY(id));
+CREATE PU TABLE a5 (id INTEGER, PRIVACY_KEY(id), PRIVACY_KEY(id));
 
 statement ok
 DROP TABLE a5;
 
-# A6: PROTECTED without PAC_KEY on CREATE PU TABLE
+# A6: PROTECTED without PRIVACY_KEY on CREATE PU TABLE
 statement error
 CREATE PU TABLE a6 (id INTEGER, PROTECTED(id));
 ----
-CREATE PU TABLE requires a PAC_KEY clause to identify the privacy unit
+CREATE PU TABLE requires a PRIVACY_KEY clause to identify the privacy unit
 
-# A7: PAC_LINK referencing nonexistent table on CREATE PU TABLE
+# A7: PRIVACY_LINK referencing nonexistent table on CREATE PU TABLE
 # For CREATE path, referenced table existence is NOT validated (only ALTER validates).
 # The table gets created and metadata stored. Link validation happens at query time.
 statement ok
-CREATE PU TABLE a7 (id INTEGER, PAC_KEY(id), PAC_LINK(id) REFERENCES nonexistent_table(x));
+CREATE PU TABLE a7 (id INTEGER, PRIVACY_KEY(id), PRIVACY_LINK(id) REFERENCES nonexistent_table(x));
 
 statement ok
 DROP TABLE a7;
 
 # A8: PROTECTED without parens (bare keyword)
 statement error
-CREATE PU TABLE a8 (id INTEGER PROTECTED, PAC_KEY(id));
+CREATE PU TABLE a8 (id INTEGER PROTECTED, PRIVACY_KEY(id));
 ----
 Invalid PROTECTED syntax
 
 statement ok
-PRAGMA clear_pac_metadata;
+PRAGMA clear_privacy_metadata;
 
 # ============================================================================
 # B. Parser: Malformed ALTER TABLE
@@ -97,39 +97,39 @@ statement ok
 CREATE TABLE b_table (id INTEGER, fk INTEGER, val INTEGER, extra INTEGER);
 
 statement ok
-CREATE PU TABLE b_pu (pk INTEGER, secret INTEGER, PAC_KEY(pk), PROTECTED(secret));
+CREATE PU TABLE b_pu (pk INTEGER, secret INTEGER, PRIVACY_KEY(pk), PROTECTED(secret));
 
 # B1: ALTER TABLE on nonexistent table
 statement error
-ALTER TABLE nonexistent ADD PAC_KEY (id);
+ALTER TABLE nonexistent ADD PRIVACY_KEY (id);
 ----
 Table 'nonexistent' does not exist
 
-# B2: Empty PAC_KEY column list in ALTER
+# B2: Empty PRIVACY_KEY column list in ALTER
 # The regex won't match empty parens, so "add pac_key" is detected but
 # ExtractPACPrimaryKey returns false. No columns get added.
 # This is a metadata-only operation that succeeds but adds nothing.
 statement ok
-ALTER TABLE b_table ADD PAC_KEY();
+ALTER TABLE b_table ADD PRIVACY_KEY();
 
-# B3: Incomplete REFERENCES in PAC_LINK
+# B3: Incomplete REFERENCES in PRIVACY_LINK
 statement error
-ALTER TABLE b_table ADD PAC_LINK (fk) REFERENCES;
+ALTER TABLE b_table ADD PRIVACY_LINK (fk) REFERENCES;
 ----
-Invalid PAC_LINK syntax
+Invalid PRIVACY_LINK syntax
 
-# B4: PAC_LINK referencing nonexistent table
+# B4: PRIVACY_LINK referencing nonexistent table
 statement ok
-ALTER TABLE b_table ADD PAC_KEY(id);
+ALTER TABLE b_table ADD PRIVACY_KEY(id);
 
 statement error
-ALTER TABLE b_table ADD PAC_LINK (fk) REFERENCES nonexistent(id);
+ALTER TABLE b_table ADD PRIVACY_LINK (fk) REFERENCES nonexistent(id);
 ----
 Referenced table 'nonexistent' does not exist
 
-# B5: PAC_LINK with nonexistent local column
+# B5: PRIVACY_LINK with nonexistent local column
 statement error
-ALTER TABLE b_table ADD PAC_LINK (nonexistent) REFERENCES b_pu(pk);
+ALTER TABLE b_table ADD PRIVACY_LINK (nonexistent) REFERENCES b_pu(pk);
 ----
 Column 'nonexistent' does not exist in table 'b_table'
 
@@ -157,14 +157,14 @@ ALTER TABLE b_pu ADD PROTECTED (secret);
 ----
 Table 'b_pu' is a privacy unit. Use ALTER PU TABLE for PU tables.
 
-# B10: SET PU without PAC_KEY
+# B10: SET PU without PRIVACY_KEY
 statement ok
 CREATE TABLE b_no_key (id INTEGER);
 
 statement error
 ALTER TABLE b_no_key SET PU;
 ----
-ALTER TABLE SET PU requires a PAC_KEY
+ALTER TABLE SET PU requires a PRIVACY_KEY
 
 # B11: SET PU is idempotent
 statement ok
@@ -191,7 +191,7 @@ statement ok
 DROP TABLE IF EXISTS b_no_key;
 
 statement ok
-PRAGMA clear_pac_metadata;
+PRAGMA clear_privacy_metadata;
 
 # ============================================================================
 # C. Parser: Malformed DROP metadata
@@ -199,20 +199,20 @@ PRAGMA clear_pac_metadata;
 
 # Setup for DROP tests
 statement ok
-CREATE PU TABLE c_pu (id INTEGER, val INTEGER, PAC_KEY(id), PROTECTED(val));
+CREATE PU TABLE c_pu (id INTEGER, val INTEGER, PRIVACY_KEY(id), PROTECTED(val));
 
 statement ok
 CREATE TABLE c_ref (rid INTEGER);
 
 statement ok
-ALTER TABLE c_ref ADD PAC_KEY(rid);
+ALTER TABLE c_ref ADD PRIVACY_KEY(rid);
 
 statement ok
-ALTER TABLE c_ref ADD PAC_LINK(rid) REFERENCES c_pu(id);
+ALTER TABLE c_ref ADD PRIVACY_LINK(rid) REFERENCES c_pu(id);
 
-# C1: DROP PAC_LINK on column with no link
+# C1: DROP PRIVACY_LINK on column with no link
 statement error
-ALTER TABLE c_ref DROP PAC_LINK (nonexistent);
+ALTER TABLE c_ref DROP PRIVACY_LINK (nonexistent);
 ----
 No PAC LINK found on column 'nonexistent'
 
@@ -242,27 +242,27 @@ statement ok
 DROP TABLE IF EXISTS c_plain;
 
 statement ok
-PRAGMA clear_pac_metadata;
+PRAGMA clear_privacy_metadata;
 
 # ============================================================================
 # D. Parser: PU-to-PU link prevention (cycle detection)
 # ============================================================================
 
 statement ok
-CREATE PU TABLE d_pu1 (id INTEGER, PAC_KEY(id));
+CREATE PU TABLE d_pu1 (id INTEGER, PRIVACY_KEY(id));
 
 statement ok
-CREATE PU TABLE d_pu2 (id INTEGER, ref_id INTEGER, PAC_KEY(id));
+CREATE PU TABLE d_pu2 (id INTEGER, ref_id INTEGER, PRIVACY_KEY(id));
 
-# D1: ALTER PU TABLE ADD PAC_LINK from PU to PU should fail
+# D1: ALTER PU TABLE ADD PRIVACY_LINK from PU to PU should fail
 statement error
-ALTER PU TABLE d_pu2 ADD PAC_LINK (ref_id) REFERENCES d_pu1(id);
+ALTER PU TABLE d_pu2 ADD PRIVACY_LINK (ref_id) REFERENCES d_pu1(id);
 ----
 Cannot create PAC LINK from PAC table 'd_pu2' to PAC table 'd_pu1'. PAC tables cannot link to other PAC tables (cycles not supported).
 
 # D2: CREATE PU TABLE with link to PU table should fail
 statement error
-CREATE PU TABLE d_pu3 (id INTEGER, ref INTEGER, PAC_KEY(id), PAC_LINK(ref) REFERENCES d_pu1(id));
+CREATE PU TABLE d_pu3 (id INTEGER, ref INTEGER, PRIVACY_KEY(id), PRIVACY_LINK(ref) REFERENCES d_pu1(id));
 ----
 Cannot create PAC LINK from PAC table 'd_pu3' to PAC table 'd_pu1'. PAC tables cannot link to other PAC tables (cycles not supported).
 
@@ -274,7 +274,7 @@ statement ok
 DROP TABLE IF EXISTS d_pu1;
 
 statement ok
-PRAGMA clear_pac_metadata;
+PRAGMA clear_privacy_metadata;
 
 # ============================================================================
 # E. Compatibility checker: Protected column violations
@@ -284,7 +284,7 @@ statement ok
 CREATE PU TABLE e_pu (
     uid INTEGER,
     secret INTEGER,
-    PAC_KEY(uid),
+    PRIVACY_KEY(uid),
     PROTECTED(secret)
 );
 
@@ -297,7 +297,7 @@ SELECT secret FROM e_pu;
 ----
 PAC rewrite: protected column 'e_pu.secret' can only be accessed inside aggregate functions
 
-# E2: SELECT * from PU table (PAC_KEY is auto-protected)
+# E2: SELECT * from PU table (PRIVACY_KEY is auto-protected)
 statement error
 SELECT * FROM e_pu;
 ----
@@ -346,14 +346,14 @@ statement ok
 DROP TABLE IF EXISTS e_pu;
 
 statement ok
-PRAGMA clear_pac_metadata;
+PRAGMA clear_privacy_metadata;
 
 # ============================================================================
 # F. Compatibility checker: Unsupported operators
 # ============================================================================
 
 statement ok
-CREATE PU TABLE f_pu (id INTEGER, val INTEGER, PAC_KEY(id));
+CREATE PU TABLE f_pu (id INTEGER, val INTEGER, PRIVACY_KEY(id));
 
 statement ok
 INSERT INTO f_pu VALUES (1, 10), (2, 20), (3, 30);
@@ -366,7 +366,7 @@ PAC rewrite: protected column 'f_pu.id' can only be accessed inside aggregate fu
 
 # F2: Recursive CTE on PU table
 # The protected column check fires before the recursive CTE check,
-# because PAC_KEY column 'id' is auto-protected and used in WHERE filter.
+# because PRIVACY_KEY column 'id' is auto-protected and used in WHERE filter.
 statement error
 WITH RECURSIVE cte AS (
     SELECT id, val FROM f_pu WHERE id = 1
@@ -382,7 +382,7 @@ statement ok
 DROP TABLE IF EXISTS f_pu;
 
 statement ok
-PRAGMA clear_pac_metadata;
+PRAGMA clear_privacy_metadata;
 
 # ============================================================================
 # G. Edge cases: Case insensitivity and whitespace
@@ -390,31 +390,31 @@ PRAGMA clear_pac_metadata;
 
 # G1: Extra spaces in CREATE PU TABLE
 statement ok
-CREATE   PU   TABLE   g1 (id INTEGER, PAC_KEY(id));
+CREATE   PU   TABLE   g1 (id INTEGER, PRIVACY_KEY(id));
 
 statement ok
 DROP TABLE g1;
 
 # G2: All lowercase
 statement ok
-create pu table g2 (id integer, pac_key(id));
+create pu table g2 (id integer, privacy_key(id));
 
 statement ok
 DROP TABLE g2;
 
 # G3: Mixed case
 statement ok
-CREATE Pu TaBlE g3 (id INTEGER, Pac_Key(id));
+CREATE Pu TaBlE g3 (id INTEGER, Privacy_Key(id));
 
 statement ok
 DROP TABLE g3;
 
-# G4: Extra whitespace in ALTER TABLE ADD PAC_KEY
+# G4: Extra whitespace in ALTER TABLE ADD PRIVACY_KEY
 statement ok
 CREATE TABLE g4 (id INTEGER);
 
 statement ok
-ALTER   TABLE   g4   ADD   PAC_KEY   (  id  );
+ALTER   TABLE   g4   ADD   PRIVACY_KEY   (  id  );
 
 statement ok
 DROP TABLE g4;
@@ -424,7 +424,7 @@ statement ok
 CREATE PU TABLE g5 (
     id INTEGER,
     name VARCHAR,
-    PAC_KEY(id)
+    PRIVACY_KEY(id)
 );
 
 statement ok
@@ -432,75 +432,75 @@ DROP TABLE g5;
 
 # G6: Tab-separated keywords (tabs become spaces in parser cleanup)
 statement ok
-CREATE	PU	TABLE	g6 (id INTEGER, PAC_KEY(id));
+CREATE	PU	TABLE	g6 (id INTEGER, PRIVACY_KEY(id));
 
 statement ok
 DROP TABLE g6;
 
 statement ok
-PRAGMA clear_pac_metadata;
+PRAGMA clear_privacy_metadata;
 
 # ============================================================================
 # H. Keyword typos and wrong ordering
 # ============================================================================
 
-# H1: Space instead of underscore in PAC_KEY
+# H1: Space instead of underscore in PRIVACY_KEY
 statement error
 CREATE PU TABLE h1 (id INTEGER, PAC KEY(id));
 ----
-Did you mean PAC_KEY (with underscore)?
+Did you mean PRIVACY_KEY (with underscore)?
 
-# H2: No underscore → "PACKEY" is not recognized as PAC_KEY
+# H2: No underscore → "PACKEY" is not recognized as PRIVACY_KEY
 statement error
 CREATE PU TABLE h2 (id INTEGER, PACKEY(id));
 ----
-CREATE PU TABLE requires a PAC_KEY clause to identify the privacy unit
+CREATE PU TABLE requires a PRIVACY_KEY clause to identify the privacy unit
 
-# H3: Plural PAC_KEYS
+# H3: Plural PRIVACY_KEYS
 statement error
-CREATE PU TABLE h3 (id INTEGER, PAC_KEYS(id));
+CREATE PU TABLE h3 (id INTEGER, PRIVACY_KEYS(id));
 ----
-CREATE PU TABLE requires a PAC_KEY clause to identify the privacy unit
+CREATE PU TABLE requires a PRIVACY_KEY clause to identify the privacy unit
 
 # H4: Reversed keyword KEY_PAC
 statement error
 CREATE PU TABLE h4 (id INTEGER, KEY_PAC(id));
 ----
-CREATE PU TABLE requires a PAC_KEY clause to identify the privacy unit
+CREATE PU TABLE requires a PRIVACY_KEY clause to identify the privacy unit
 
 # H5: Parens around table name in REFERENCES
-# PAC_LINK(id) REFERENCES(foo) → regex won't match, triggering PAC_LINK syntax error
+# PRIVACY_LINK(id) REFERENCES(foo) → regex won't match, triggering PRIVACY_LINK syntax error
 statement error
-CREATE PU TABLE h5 (id INTEGER, PAC_KEY(id), PAC_LINK(id) REFERENCES(foo));
+CREATE PU TABLE h5 (id INTEGER, PRIVACY_KEY(id), PRIVACY_LINK(id) REFERENCES(foo));
 ----
-Invalid PAC_LINK syntax
+Invalid PRIVACY_LINK syntax
 
 # H6: Missing ref column parens in REFERENCES
-# PAC_LINK(id) REFERENCES foo → regex won't match, triggering PAC_LINK syntax error
+# PRIVACY_LINK(id) REFERENCES foo → regex won't match, triggering PRIVACY_LINK syntax error
 statement error
-CREATE PU TABLE h6 (id INTEGER, PAC_KEY(id), PAC_LINK(id) REFERENCES foo);
+CREATE PU TABLE h6 (id INTEGER, PRIVACY_KEY(id), PRIVACY_LINK(id) REFERENCES foo);
 ----
-Invalid PAC_LINK syntax
+Invalid PRIVACY_LINK syntax
 
 # H7: PU after TABLE instead of before → "CREATE TABLE PU" means table named "PU"
 # PAC parser extracts table name "pu" (first identifier after TABLE), strips PAC clauses,
 # but the resulting "CREATE TABLE PU h7 (id INTEGER)" fails in DuckDB because "h7" is unexpected.
 statement error
-CREATE TABLE PU h7 (id INTEGER, PAC_KEY(id));
+CREATE TABLE PU h7 (id INTEGER, PRIVACY_KEY(id));
 ----
 Failed to execute DDL
 
 # H8: Missing TABLE keyword → DuckDB sees "CREATE PU" which is invalid
 statement error
-CREATE PU h8 (id INTEGER, PAC_KEY(id));
+CREATE PU h8 (id INTEGER, PRIVACY_KEY(id));
 ----
 
 # H9: REFERENCE instead of REFERENCES (singular)
 # The regex expects "references", so "reference" won't match
 statement error
-CREATE PU TABLE h9 (id INTEGER, PAC_KEY(id), PAC_LINK(id) REFERENCE foo(x));
+CREATE PU TABLE h9 (id INTEGER, PRIVACY_KEY(id), PRIVACY_LINK(id) REFERENCE foo(x));
 ----
-Invalid PAC_LINK syntax
+Invalid PRIVACY_LINK syntax
 
 # H10: SET PAC instead of SET PU
 # "ALTER TABLE t SET PAC" won't match any PAC pattern, falls through to DuckDB parser
@@ -520,11 +520,11 @@ ALTER TABLE nonexistent ADD PROTECT (col);
 # with "pu" as the table name, but then "table" appears after, which is confusing.
 # The regex will try to extract table name and may fail or create unexpected results.
 statement error
-CREATE PU PU TABLE h12 (id INTEGER, PAC_KEY(id));
+CREATE PU PU TABLE h12 (id INTEGER, PRIVACY_KEY(id));
 ----
 
 statement ok
-PRAGMA clear_pac_metadata;
+PRAGMA clear_privacy_metadata;
 
 # ============================================================================
 # I. Edge cases: Column interactions (add, drop, re-add)
@@ -532,13 +532,13 @@ PRAGMA clear_pac_metadata;
 
 # Setup
 statement ok
-CREATE PU TABLE i_pu (id INTEGER, col1 INTEGER, col2 INTEGER, fk INTEGER, PAC_KEY(id));
+CREATE PU TABLE i_pu (id INTEGER, col1 INTEGER, col2 INTEGER, fk INTEGER, PRIVACY_KEY(id));
 
 statement ok
 CREATE TABLE i_ref (rid INTEGER);
 
 statement ok
-ALTER TABLE i_ref ADD PAC_KEY(rid);
+ALTER TABLE i_ref ADD PRIVACY_KEY(rid);
 
 # I1: Add PROTECTED, drop it, re-add → should work
 statement ok
@@ -550,15 +550,15 @@ ALTER PU TABLE i_pu DROP PROTECTED (col1);
 statement ok
 ALTER PU TABLE i_pu ADD PROTECTED (col1);
 
-# I2: Add PAC_LINK, drop it, re-add → should work
+# I2: Add PRIVACY_LINK, drop it, re-add → should work
 statement ok
-ALTER PU TABLE i_pu ADD PAC_LINK (fk) REFERENCES i_ref(rid);
+ALTER PU TABLE i_pu ADD PRIVACY_LINK (fk) REFERENCES i_ref(rid);
 
 statement ok
-ALTER PU TABLE i_pu DROP PAC_LINK (fk);
+ALTER PU TABLE i_pu DROP PRIVACY_LINK (fk);
 
 statement ok
-ALTER PU TABLE i_pu ADD PAC_LINK (fk) REFERENCES i_ref(rid);
+ALTER PU TABLE i_pu ADD PRIVACY_LINK (fk) REFERENCES i_ref(rid);
 
 # I3: Same PROTECTED column added twice in separate ALTERs → error on second
 statement ok
@@ -577,4 +577,4 @@ statement ok
 DROP TABLE IF EXISTS i_pu;
 
 statement ok
-PRAGMA clear_pac_metadata;
+PRAGMA clear_privacy_metadata;

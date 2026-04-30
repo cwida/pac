@@ -211,7 +211,7 @@ static constexpr uint8_t CMD_UNSET_PAC = 3;
     try {
         DuckDB db(db_path);
         Connection con(db);
-        auto r = con.Query("LOAD pac");
+        auto r = con.Query("LOAD privacy");
         if (r->HasError()) {
             _exit(2);
         }

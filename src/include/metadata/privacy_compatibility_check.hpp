@@ -1,7 +1,7 @@
 #pragma once
 
 #include "duckdb.hpp"
-#include "core/pac_optimizer.hpp"
+#include "core/privacy_optimizer.hpp"
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -10,20 +10,20 @@ namespace duckdb {
 
 // Lightweight metadata about a table discovered during compatibility checking.
 // - table_name: unqualified table name
-// - pks: PAC_KEY column names (identifying the privacy unit)
-// - fks: PAC_LINK relationships: (referenced_table_name, local_column_names)
+// - pks: PRIVACY_KEY column names (identifying the privacy unit)
+// - fks: PRIVACY_LINK relationships: (referenced_table_name, local_column_names)
 struct ColumnMetadata {
 	string table_name;
 	vector<string> pks;
 	vector<pair<string, vector<string>>> fks;
 };
 
-struct PACCompatibilityResult {
-	// Map from scanned table name (start) to PAC_LINK path vector of table names from start to privacy unit
+struct PrivacyCompatibilityResult {
+	// Map from scanned table name (start) to PRIVACY_LINK path vector of table names from start to privacy unit
 	std::unordered_map<string, vector<string>> fk_paths;
 	// List of tables that have protected columns (these are treated as implicit privacy units)
 	vector<string> tables_with_protected_columns;
-	// Lightweight per-table metadata (PAC_KEY/PAC_LINK) for scanned tables
+	// Lightweight per-table metadata (PRIVACY_KEY/PRIVACY_LINK) for scanned tables
 	std::unordered_map<string, ColumnMetadata> table_metadata;
 	// Whether plan passed basic PAC-eligibility checks (aggregation/join/window/distinct checks)
 	bool eligible_for_rewrite = false;
@@ -32,16 +32,16 @@ struct PACCompatibilityResult {
 	// List of scanned tables that are NOT configured PAC tables
 	vector<string> scanned_non_pu_tables;
 	// Per-table set of protected column names (lowercased).
-	// Union of: PAC_KEY columns, PAC_LINK columns reaching a PU, metadata PROTECTED columns.
+	// Union of: PRIVACY_KEY columns, PRIVACY_LINK columns reaching a PU, metadata PROTECTED columns.
 	std::unordered_map<string, std::unordered_set<string>> protected_columns;
 };
 
 // Check whether a logical plan is PAC-compatible according to the project's rules.
 // Privacy unit tables are discovered from PAC metadata (is_privacy_unit = true).
-// Returns a PACCompatibilityResult with fk_paths empty when no PAC rewrite is needed.
+// Returns a PrivacyCompatibilityResult with fk_paths empty when no PAC rewrite is needed.
 // If `replan_in_progress` is true the function will return an empty result immediately to avoid recursion.
-PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, ClientContext &context,
-                                            PACOptimizerInfo *optimizer_info = nullptr);
+PrivacyCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, ClientContext &context,
+                                                PACOptimizerInfo *optimizer_info = nullptr);
 
 void CountScans(const LogicalOperator &op, std::unordered_map<string, idx_t> &counts);
 } // namespace duckdb

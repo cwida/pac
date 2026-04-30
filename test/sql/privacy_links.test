@@ -1,11 +1,11 @@
-# name: test/sql/pac_links.test
-# description: Test PAC compilation with user-defined PAC_LINKs (no actual FK constraints)
+# name: test/sql/privacy_links.test
+# description: Test PAC compilation with user-defined PRIVACY_LINKs (no actual FK constraints)
 # group: [sql]
 
-require pac
+require privacy
 
 statement ok
-SET pac_seed = 42
+SET privacy_seed = 42
 
 statement ok
 SET pac_hash_repair = true
@@ -14,13 +14,13 @@ statement ok
 SET threads = 1
 
 statement ok
-PRAGMA clear_pac_metadata;
+PRAGMA clear_privacy_metadata;
 
 statement ok
 SET pac_mi = 0;
 
 # ==============================================================================
-# Create tables WITHOUT FK constraints - only PAC_LINKs define relationships
+# Create tables WITHOUT FK constraints - only PRIVACY_LINKs define relationships
 # ==============================================================================
 
 # PU table (will be the privacy unit)
@@ -30,7 +30,7 @@ CREATE TABLE users (
     name VARCHAR
 );
 
-# Child table - NO FK constraint, will use PAC_LINK
+# Child table - NO FK constraint, will use PRIVACY_LINK
 statement ok
 CREATE TABLE orders (
     id INTEGER,
@@ -39,7 +39,7 @@ CREATE TABLE orders (
     amount INTEGER
 );
 
-# Grandchild table - NO FK constraint, will use PAC_LINK
+# Grandchild table - NO FK constraint, will use PRIVACY_LINK
 statement ok
 CREATE TABLE order_items (
     id INTEGER,
@@ -71,12 +71,12 @@ statement ok
 INSERT INTO shipments SELECT i AS id, (i % 100) AS item_id, (i % 5) AS grp, (i % 200) AS weight FROM range(200) t(i);
 
 # ==============================================================================
-# Define PAC metadata with PAC_LINKs (NO actual FK constraints exist!)
+# Define PAC metadata with PRIVACY_LINKs (NO actual FK constraints exist!)
 # ==============================================================================
 
 # Mark users as a privacy unit (required for PAC compilation)
 statement ok
-ALTER TABLE users ADD PAC_KEY (id);
+ALTER TABLE users ADD PRIVACY_KEY (id);
 
 statement ok
 ALTER TABLE users SET PU;
@@ -85,25 +85,25 @@ statement ok
 ALTER PU TABLE users ADD PROTECTED (name);
 
 statement ok
-ALTER TABLE orders ADD PAC_KEY (id);
+ALTER TABLE orders ADD PRIVACY_KEY (id);
 
 statement ok
-ALTER TABLE orders ADD PAC_LINK (user_id) REFERENCES users(id);
+ALTER TABLE orders ADD PRIVACY_LINK (user_id) REFERENCES users(id);
 
 statement ok
-ALTER TABLE order_items ADD PAC_KEY (id);
+ALTER TABLE order_items ADD PRIVACY_KEY (id);
 
 statement ok
-ALTER TABLE order_items ADD PAC_LINK (order_id) REFERENCES orders(id);
+ALTER TABLE order_items ADD PRIVACY_LINK (order_id) REFERENCES orders(id);
 
 statement ok
-ALTER TABLE shipments ADD PAC_KEY (id);
+ALTER TABLE shipments ADD PRIVACY_KEY (id);
 
 statement ok
-ALTER TABLE shipments ADD PAC_LINK (item_id) REFERENCES order_items(id);
+ALTER TABLE shipments ADD PRIVACY_LINK (item_id) REFERENCES order_items(id);
 
 # ==============================================================================
-# Test 1: Basic aggregation on child table connected via PAC_LINK
+# Test 1: Basic aggregation on child table connected via PRIVACY_LINK
 # ==============================================================================
 
 query II
@@ -114,7 +114,7 @@ SELECT grp, COUNT(*) FROM orders GROUP BY grp ORDER BY grp;
 2	12
 
 # ==============================================================================
-# Test 2: Aggregation on grandchild table (2-level PAC_LINK chain)
+# Test 2: Aggregation on grandchild table (2-level PRIVACY_LINK chain)
 # Note: MIN/MAX now return actual values (with PAC noise) rather than hash values
 # ==============================================================================
 
@@ -124,7 +124,7 @@ SELECT grp, MIN(quantity), MAX(quantity) FROM order_items GROUP BY grp ORDER BY 
 0	0	48
 
 # ==============================================================================
-# Test 3: Deep chain aggregation (3-level PAC_LINK chain)
+# Test 3: Deep chain aggregation (3-level PRIVACY_LINK chain)
 # ==============================================================================
 
 query II
@@ -144,7 +144,7 @@ FROM orders GROUP BY grp ORDER BY grp LIMIT 1;
 0	10	96	0	18
 
 # ==============================================================================
-# Test 5: Explicit joins through PAC_LINK chain
+# Test 5: Explicit joins through PRIVACY_LINK chain
 # ==============================================================================
 
 query II
@@ -175,7 +175,7 @@ LIMIT 1;
 PAC rewrite: protected column 'users.id' can only be accessed inside aggregate functions
 
 # ==============================================================================
-# Test 7: Subquery with PAC_LINK chain
+# Test 7: Subquery with PRIVACY_LINK chain
 # ==============================================================================
 
 query II
@@ -188,7 +188,7 @@ LIMIT 1;
 0	480
 
 # ==============================================================================
-# Test 8: Complex - Multiple correlated subqueries with deep PAC_LINK chains
+# Test 8: Complex - Multiple correlated subqueries with deep PRIVACY_LINK chains
 # ==============================================================================
 
 query III
@@ -372,7 +372,7 @@ LIMIT 1;
 0	12	12
 
 # ==============================================================================
-# Test 18: Side table — multiple PAC_LINK paths to the same PU
+# Test 18: Side table — multiple PRIVACY_LINK paths to the same PU
 # ==============================================================================
 
 statement ok
@@ -384,10 +384,10 @@ CREATE TABLE side_orders (
 );
 
 statement ok
-ALTER TABLE side_orders ADD PAC_KEY (id);
+ALTER TABLE side_orders ADD PRIVACY_KEY (id);
 
 statement ok
-ALTER TABLE side_orders ADD PAC_LINK (user_id) REFERENCES users(id);
+ALTER TABLE side_orders ADD PRIVACY_LINK (user_id) REFERENCES users(id);
 
 statement ok
 INSERT INTO side_orders
@@ -420,7 +420,7 @@ LIMIT 1;
 0	50	8
 
 # ==============================================================================
-# Test 20: UNION ALL with PAC_LINK chain aggregates
+# Test 20: UNION ALL with PRIVACY_LINK chain aggregates
 # ==============================================================================
 
 query I
@@ -499,4 +499,4 @@ LIMIT 1;
 # ==============================================================================
 
 statement ok
-PRAGMA clear_pac_metadata;
+PRAGMA clear_privacy_metadata;

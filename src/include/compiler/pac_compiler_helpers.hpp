@@ -7,7 +7,7 @@
 
 #include "duckdb.hpp"
 #include "duckdb/optimizer/optimizer_extension.hpp"
-#include "metadata/pac_compatibility_check.hpp"
+#include "metadata/privacy_compatibility_check.hpp"
 #include "query_processing/pac_expression_builder.hpp"
 #include "query_processing/pac_plan_traversal.hpp"
 #include "query_processing/pac_projection_propagation.hpp"
@@ -22,7 +22,7 @@ void BuildJoinConditions(LogicalGet *left_get, LogicalGet *right_get, const vect
                          const string &right_table_name, vector<JoinCondition> &conditions);
 
 // Create a logical join operator based on FK relationships in the compatibility check metadata
-unique_ptr<LogicalOperator> CreateLogicalJoin(const PACCompatibilityResult &check, ClientContext &context,
+unique_ptr<LogicalOperator> CreateLogicalJoin(const PrivacyCompatibilityResult &check, ClientContext &context,
                                               unique_ptr<LogicalOperator> left_operator, unique_ptr<LogicalGet> right);
 
 // Create a LogicalGet operator for a table by name, projecting only the specified columns
@@ -30,13 +30,13 @@ unique_ptr<LogicalOperator> CreateLogicalJoin(const PACCompatibilityResult &chec
 unique_ptr<LogicalGet> CreateLogicalGet(ClientContext &context, unique_ptr<LogicalOperator> &plan, const string &table,
                                         idx_t idx, const vector<string> &required_columns = {});
 
-// Examine PACCompatibilityResult.fk_paths and populate gets_present / gets_missing
-void PopulateGetsFromFKPath(const PACCompatibilityResult &check, vector<string> &gets_present,
+// Examine PrivacyCompatibilityResult.fk_paths and populate gets_present / gets_missing
+void PopulateGetsFromFKPath(const PrivacyCompatibilityResult &check, vector<string> &gets_present,
                             vector<string> &gets_missing, string &start_table_out, vector<string> &target_pus_out);
 
 // Find the FK columns from a table that reference any privacy unit.
 // Returns the FK column names, or empty vector if no FK to any PU exists.
-vector<string> FindFKColumnsToPU(const PACCompatibilityResult &check, const string &table_name,
+vector<string> FindFKColumnsToPU(const PrivacyCompatibilityResult &check, const string &table_name,
                                  const vector<string> &privacy_units);
 
 // Find a LogicalGet for a table that is accessible within a subtree root's descendants.

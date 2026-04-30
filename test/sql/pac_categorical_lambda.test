@@ -10,7 +10,7 @@
 # - WHERE (value + offset) > pac_agg
 # - WHERE pac_agg * factor > threshold
 
-require pac
+require privacy
 
 # ============================================================================
 # Schema Setup
@@ -25,14 +25,14 @@ CREATE TABLE products (
 );
 
 statement ok
-ALTER TABLE products ADD PAC_KEY (product_id);
+ALTER TABLE products ADD PRIVACY_KEY (product_id);
 
 statement ok
 CREATE PU TABLE customers (
     customer_id INTEGER,
     customer_name VARCHAR,
     region VARCHAR,
-    PAC_KEY (customer_id)
+    PRIVACY_KEY (customer_id)
 );
 
 statement ok
@@ -46,7 +46,7 @@ CREATE TABLE sales (
 );
 
 statement ok
-ALTER TABLE sales ADD PAC_KEY (sale_id), ADD PAC_LINK (customer_id) REFERENCES customers(customer_id), ADD PAC_LINK (product_id) REFERENCES products(product_id);
+ALTER TABLE sales ADD PRIVACY_KEY (sale_id), ADD PRIVACY_LINK (customer_id) REFERENCES customers(customer_id), ADD PRIVACY_LINK (product_id) REFERENCES products(product_id);
 
 # ============================================================================
 # Test Data
@@ -106,7 +106,7 @@ INSERT INTO sales VALUES
 # ============================================================================
 
 statement ok
-SET pac_seed = 42;
+SET privacy_seed = 42;
 
 statement ok
 SET pac_hash_repair = true

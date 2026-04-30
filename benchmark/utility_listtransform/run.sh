@@ -45,7 +45,7 @@ run_query() {
     local seed="${2:-}"
     local seed_sql=""
     if [ -n "$seed" ]; then
-        seed_sql="SET pac_seed = $seed;"
+        seed_sql="SET privacy_seed = $seed;"
     fi
     echo "$SETUP $seed_sql $sql" | "$DUCKDB" "$DB" -csv -noheader 2>/dev/null | head -1
 }

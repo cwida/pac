@@ -29,8 +29,8 @@
 
 #include "aggregates/pac_aggregate.hpp"
 #include "categorical/pac_categorical_detection.hpp"
-#include "metadata/pac_metadata_manager.hpp"
-#include "pac_debug.hpp"
+#include "metadata/privacy_metadata_manager.hpp"
+#include "privacy_debug.hpp"
 #include "duckdb/catalog/catalog_entry/duck_table_entry.hpp"
 #include "duckdb/optimizer/optimizer.hpp"
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
@@ -112,8 +112,8 @@ static void ConvertAggregatesRecursive(OptimizerExtensionInput &input, LogicalOp
 
 		auto new_aggr = RebindAggregate(input.context, counters_name, std::move(children), bound_agg.IsDistinct());
 		if (new_aggr) {
-			PAC_DEBUG_PRINT("[PAC DERIVED WRITE] Rebound " + bound_agg.function.name + " → " +
-			                new_aggr->Cast<BoundAggregateExpression>().function.name);
+			PRIVACY_DEBUG_PRINT("[PAC DERIVED WRITE] Rebound " + bound_agg.function.name + " → " +
+			                    new_aggr->Cast<BoundAggregateExpression>().function.name);
 			agg.expressions[i] = std::move(new_aggr);
 		} else {
 			bound_agg.function.name = counters_name;
@@ -200,7 +200,7 @@ static void FindDerivedPuGets(LogicalOperator *op, unordered_set<idx_t> &derived
 	if (!entry) {
 		return;
 	}
-	auto &mgr = PACMetadataManager::Get();
+	auto &mgr = PrivacyMetadataManager::Get();
 	auto *meta = mgr.GetTableMetadata(entry->name);
 	if (!meta || !meta->derived_pu) {
 		return;
@@ -333,7 +333,7 @@ static unique_ptr<Expression> RewriteComparisonToFilterCmp(OptimizerExtensionInp
 	auto counter_ref = ExtractCounterRef(std::move(counter_on_left ? cmp.left : cmp.right), list_type);
 	auto scalar_expr =
 	    CastScalarToPacFloat(std::move(counter_on_left ? cmp.right : cmp.left), finalized_type, list_type);
-	PAC_DEBUG_PRINT("[PAC DERIVED READ] Rewriting comparison to " + func_name);
+	PRIVACY_DEBUG_PRINT("[PAC DERIVED READ] Rewriting comparison to " + func_name);
 	return input.optimizer.BindScalarFunction(func_name, std::move(scalar_expr), std::move(counter_ref));
 }
 
@@ -352,7 +352,7 @@ RewriteBetweenToFilterCmp(OptimizerExtensionInput &input, unique_ptr<Expression>
 	string upper_func = upper_inclusive ? "pac_filter_gte" : "pac_filter_gt";
 	auto lower_call = input.optimizer.BindScalarFunction(lower_func, std::move(lower_scalar), std::move(counter_ref1));
 	auto upper_call = input.optimizer.BindScalarFunction(upper_func, std::move(upper_scalar), std::move(counter_ref2));
-	PAC_DEBUG_PRINT("[PAC DERIVED READ] Rewriting BETWEEN to " + lower_func + " AND " + upper_func);
+	PRIVACY_DEBUG_PRINT("[PAC DERIVED READ] Rewriting BETWEEN to " + lower_func + " AND " + upper_func);
 	return make_uniq<BoundConjunctionExpression>(ExpressionType::CONJUNCTION_AND, std::move(lower_call),
 	                                             std::move(upper_call));
 }
@@ -473,8 +473,9 @@ static void WrapCounterRefsWithFinalize(OptimizerExtensionInput &input, LogicalO
 		if (e->type == ExpressionType::BOUND_COLUMN_REF) {
 			auto &col_ref = e->Cast<BoundColumnRefExpression>();
 			if (col_ref.return_type == list_type) {
-				PAC_DEBUG_PRINT("[PAC DERIVED READ] Wrapping binding (" + std::to_string(col_ref.binding.table_index) +
-				                "," + std::to_string(col_ref.binding.column_index) + ") with pac_finalize");
+				PRIVACY_DEBUG_PRINT("[PAC DERIVED READ] Wrapping binding (" +
+				                    std::to_string(col_ref.binding.table_index) + "," +
+				                    std::to_string(col_ref.binding.column_index) + ") with pac_finalize");
 				e = input.optimizer.BindScalarFunction("pac_finalize", std::move(e));
 			}
 		}
@@ -611,8 +612,8 @@ static void RewriteCounterFiltersFromGets(OptimizerExtensionInput &input, unique
 			filter_exprs.push_back(std::move(expr));
 		}
 		get.table_filters.filters.erase(filter_col_idx);
-		PAC_DEBUG_PRINT("[PAC DERIVED READ] Rewrote table_filter to pac_filter_<cmp> for counter column " +
-		                std::to_string(filter_col_idx));
+		PRIVACY_DEBUG_PRINT("[PAC DERIVED READ] Rewrote table_filter to pac_filter_<cmp> for counter column " +
+		                    std::to_string(filter_col_idx));
 	}
 	auto filter_op = make_uniq<LogicalFilter>();
 	for (auto &expr : filter_exprs) {
@@ -637,8 +638,8 @@ void InjectPacFinalizeForDerivedPu(OptimizerExtensionInput &input, unique_ptr<Lo
 	if (derived_table_indices.empty()) {
 		return;
 	}
-	PAC_DEBUG_PRINT("[PAC DERIVED READ] Injecting pac_finalize for " + std::to_string(derived_table_indices.size()) +
-	                " derived_pu table(s)");
+	PRIVACY_DEBUG_PRINT("[PAC DERIVED READ] Injecting pac_finalize for " +
+	                    std::to_string(derived_table_indices.size()) + " derived_pu table(s)");
 	// Rewrite scan-level filters on counter columns to pac_filter_<cmp> calls.
 	// DuckDB's filter pushdown may push comparisons (including BETWEEN) into table_filters
 	// before our post-optimizer runs. The scan executor doesn't support LIST types.

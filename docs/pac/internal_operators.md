@@ -106,7 +106,7 @@ Projection (reorder outputs)
 
 ## Window Functions (Proposal)
 
-**Status:** Not yet implemented. Window functions are currently blocked in `pac_compatibility_check.cpp`.
+**Status:** Not yet implemented. Window functions are currently blocked in `privacy_compatibility_check.cpp`.
 
 ### Scope
 
@@ -152,7 +152,7 @@ The existing `PROTECTED` column mechanism ensures that protected columns cannot 
 
 ### Detection
 
-In `pac_compatibility_check.cpp`, instead of unconditionally blocking all window functions:
+In `privacy_compatibility_check.cpp`, instead of unconditionally blocking all window functions:
 
 1. Walk the `LogicalWindow` node's expressions
 2. For each `BoundWindowExpression`:

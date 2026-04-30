@@ -102,7 +102,7 @@ At query completion, PAC prints (or appends to CSV) two metrics:
 ### Ungrouped Query (Positional Matching)
 
 ```sql
-SET pac_noise = true;
+SET privacy_noise = true;
 SET pac_diffcols = '0';
 
 SELECT SUM(val) AS total_val FROM data_table;
@@ -112,7 +112,7 @@ SELECT SUM(val) AS total_val FROM data_table;
 ### Grouped Query (Key-Based Matching)
 
 ```sql
-SET pac_noise = true;
+SET privacy_noise = true;
 SET pac_diffcols = '1';
 
 SELECT category, SUM(amount) AS total FROM sales GROUP BY category ORDER BY category;
@@ -148,7 +148,7 @@ SET pac_diffcols = NULL;
 
 1. **Use deterministic settings for reproducible results:**
    ```sql
-   SET pac_seed = 42;
+   SET privacy_seed = 42;
    SET pac_deterministic_noise = true;
    SET threads = 1;
    ```
@@ -173,8 +173,8 @@ SET pac_diffcols = NULL;
 
 | Setting | Relevance |
 |---------|-----------|
-| `pac_noise` | Must be `true` for meaningful utility comparison |
+| `privacy_noise` | Must be `true` for meaningful utility comparison |
 | `pac_mi` | Counter index affects noise level |
-| `pac_seed` | Set for reproducible PAC results |
+| `privacy_seed` | Set for reproducible PAC results |
 | `pac_deterministic_noise` | Use `true` for reproducible testing |
 

@@ -1,4 +1,4 @@
-// filepath: /home/ila/Code/pac/src/pac_helpers.hpp
+// filepath: /home/ila/Code/pac/src/privacy_helpers.hpp
 #pragma once
 
 #include "duckdb.hpp"
@@ -34,20 +34,20 @@ idx_t GetNextTableIndex(unique_ptr<LogicalOperator> &plan);
 void ReplaceNode(unique_ptr<LogicalOperator> &root, unique_ptr<LogicalOperator> &old_node,
                  unique_ptr<LogicalOperator> &new_node, Binder *binder = nullptr);
 
-// Find PAC_KEY column names for the given table. Only uses PAC metadata.
-// Returns a vector with the PAC_KEY column names in order; empty vector if no PAC_KEY is defined.
+// Find PRIVACY_KEY column names for the given table. Only uses PAC metadata.
+// Returns a vector with the PRIVACY_KEY column names in order; empty vector if no PRIVACY_KEY is defined.
 vector<string> FindPacKey(ClientContext &context, const string &table_name);
 
-// Find PAC_LINK relationships declared on the given table. Only uses PAC metadata.
-// Returns a vector of pairs: (referenced_table_name, local_column_names) for each PAC_LINK.
+// Find PRIVACY_LINK relationships declared on the given table. Only uses PAC metadata.
+// Returns a vector of pairs: (referenced_table_name, local_column_names) for each PRIVACY_LINK.
 vector<std::pair<string, vector<string>>> FindPacLinks(ClientContext &context, const string &table_name);
 
-// Find the referenced columns on the parent table for a specific PAC_LINK relationship.
-// E.g., for PAC_LINK (l_orderkey) REFERENCES orders(o_orderkey), calling
+// Find the referenced columns on the parent table for a specific PRIVACY_LINK relationship.
+// E.g., for PRIVACY_LINK (l_orderkey) REFERENCES orders(o_orderkey), calling
 // FindReferencedPKColumns(ctx, "lineitem", "orders") returns {"o_orderkey"}.
 vector<string> FindReferencedPKColumns(ClientContext &context, const string &table_name, const string &ref_table);
 
-// Find PAC_LINK path(s) from any of `table_names` to any of `privacy_units`.
+// Find PRIVACY_LINK path(s) from any of `table_names` to any of `privacy_units`.
 // Returns a map: start_table (as provided) -> path (vector of table names from start to privacy unit,
 // inclusive). If no path exists for a start table, it will not appear in the returned map.
 std::unordered_map<string, vector<string>> FindPacLinkPath(ClientContext &context, const vector<string> &privacy_units,
@@ -59,7 +59,7 @@ std::unordered_map<string, vector<string>> FindPacLinkPath(ClientContext &contex
 
 // RAII guard that sets PACOptimizerInfo::replan_in_progress to true for the lifetime of the guard
 // and restores the previous value on destruction. Construct with nullptr to have no effect.
-struct PACOptimizerInfo; // forward-declare to avoid including pac_optimizer.hpp here
+struct PACOptimizerInfo; // forward-declare to avoid including privacy_optimizer.hpp here
 class ReplanGuard {
 public:
 	explicit ReplanGuard(PACOptimizerInfo *info);

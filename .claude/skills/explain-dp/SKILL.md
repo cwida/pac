@@ -52,7 +52,7 @@ Three flavors, decided by what counts as a "neighboring dataset":
 - **User-level / entity-level (unbounded at the user)**: D and D' differ by
   adding/removing all rows belonging to one user. Wilson et al. 2019 (Google)
   use this. This is what PAC's PU concept already encodes — one PU = one user
-  = one row in the PU table plus all linked rows across PAC_LINK joins.
+  = one row in the PU table plus all linked rows across PRIVACY_LINK joins.
 
 For a PU+LINK system, **user-level (unbounded at the PU)** is the natural choice.
 The neighboring relation is "remove all rows belonging to one PU." Elastic
@@ -96,7 +96,7 @@ Formula (Wilson et al., Theorem 2):
 where C_u is the per-user partition contribution bound. Requires δ > 0;
 without δ, τ-thresholding can't be made (ε,δ)-DP.
 
-This is conceptually similar to PAC's `pac_utility_threshold` (NULL out
+This is conceptually similar to PAC's `privacy_min_group_count` (NULL out
 low-SNR cells), but the formula differs. A unified setting could expose
 "minimum group size" with each mechanism applying its own formula.
 

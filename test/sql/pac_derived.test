@@ -2,13 +2,13 @@
 # description: Test PAC derived_pu counter storage and read-time finalization
 # group: [sql]
 
-require pac
+require privacy
 
 statement ok
 SET pac_mi = 0;
 
 statement ok
-SET pac_seed = 42;
+SET privacy_seed = 42;
 
 statement ok
 SET threads = 1;
@@ -18,7 +18,7 @@ SET threads = 1;
 # ==========================================
 
 statement ok
-CREATE PU TABLE scores (id INT, grp INT, value INT, PAC_KEY(id), protected(value));
+CREATE PU TABLE scores (id INT, grp INT, value INT, PRIVACY_KEY(id), protected(value));
 
 statement ok
 INSERT INTO scores VALUES (1, 1, 10), (2, 1, 20), (3, 2, 30);
@@ -190,7 +190,7 @@ statement ok
 SET pac_mi = 0;
 
 statement ok
-SET pac_seed = 99;
+SET privacy_seed = 99;
 
 query IR rowsort
 SELECT grp, total FROM mv;

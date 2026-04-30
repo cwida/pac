@@ -207,7 +207,7 @@ FROM customer;
 
 `pac_hash(UBIGINT) → UBIGINT`
 
-XOR's the input hash with a per-query hash derived from `pac_seed`, so the same privacy unit receives different sub-sample assignments on each query. This is analogous to a complete resampling of the possible worlds, making inference attacks across queries harder.
+XOR's the input hash with a per-query hash derived from `privacy_seed`, so the same privacy unit receives different sub-sample assignments on each query. This is analogous to a complete resampling of the possible worlds, making inference attacks across queries harder.
 
 ```sql
 SELECT pac_hash(hash(id)) FROM employees;

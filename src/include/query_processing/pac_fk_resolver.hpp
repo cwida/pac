@@ -15,7 +15,7 @@
 #include "duckdb/planner/logical_operator.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
-#include "metadata/pac_compatibility_check.hpp"
+#include "metadata/privacy_compatibility_check.hpp"
 namespace duckdb {
 
 // Get the FK columns from a table that reference any of the privacy units
@@ -32,7 +32,7 @@ struct FKToPUResult {
 };
 
 FKToPUResult GetFKColumnsToPU(const string &table_name, const vector<string> &privacy_units,
-                              const PACCompatibilityResult &check);
+                              const PrivacyCompatibilityResult &check);
 
 // Find an accessible FK table in the plan that can be used for hashing
 // This is used when the primary FK table is blocked by SEMI/ANTI joins
@@ -49,7 +49,8 @@ struct AccessibleFKTableResult {
 
 AccessibleFKTableResult FindAccessibleFKTable(unique_ptr<LogicalOperator> &plan, LogicalOperator *search_root,
                                               const vector<string> &candidate_tables,
-                                              const vector<string> &privacy_units, const PACCompatibilityResult &check);
+                                              const vector<string> &privacy_units,
+                                              const PrivacyCompatibilityResult &check);
 
 } // namespace duckdb
 

@@ -15,7 +15,7 @@
 #include "duckdb.hpp"
 #include "duckdb/optimizer/optimizer_extension.hpp"
 #include "duckdb/planner/logical_operator.hpp"
-#include "metadata/pac_compatibility_check.hpp"
+#include "metadata/privacy_compatibility_check.hpp"
 #include "query_processing/pac_plan_traversal.hpp"
 
 namespace duckdb {
@@ -28,7 +28,7 @@ using ConnectingTableMap = std::unordered_map<idx_t, idx_t>;
 // Ensures all FK tables needed for PAC compilation are present in the plan.
 // For each connecting table instance, inserts join chains to missing FK tables
 // and builds a mapping from connecting table index to FK table index.
-ConnectingTableMap EnsureFKTablesInPlan(const PACCompatibilityResult &check, OptimizerExtensionInput &input,
+ConnectingTableMap EnsureFKTablesInPlan(const PrivacyCompatibilityResult &check, OptimizerExtensionInput &input,
                                         unique_ptr<LogicalOperator> &plan, const vector<string> &gets_missing,
                                         const vector<string> &gets_present, const vector<string> &fk_path,
                                         const vector<string> &privacy_units, const CTETableMap &cte_map);

@@ -67,7 +67,7 @@ If the input list is NULL (e.g., from a LEFT JOIN where no matching rows exist),
 
 **Problem**: PAC noise can dominate the true aggregate value for small or sparse groups, producing results that are technically private but practically useless (e.g., a true sum of 5 reported as 2000 due to noise). Returning such low-utility cells can mislead analysts.
 
-**Mechanism**: When `pac_utility_threshold` is set to a numeric value (e.g., `SET pac_utility_threshold = 4`), PAC post-processes each noised result cell by computing its z-score:
+**Mechanism**: When `privacy_min_group_count` is set to a numeric value (e.g., `SET privacy_min_group_count = 4`), PAC post-processes each noised result cell by computing its z-score:
 
 ```
 z = |noised_value| / noise_std_dev
@@ -92,8 +92,8 @@ with `steepness = 3`. At the threshold z-score, P(keep) ≈ 50%. Well above thre
 
 **Configuration**:
 ```sql
-SET pac_utility_threshold = 4;     -- enable: z < 4 → likely NULLed (~20% relative error cutoff)
-SET pac_utility_threshold = NULL;  -- disable (default)
+SET privacy_min_group_count = 4;     -- enable: z < 4 → likely NULLed (~20% relative error cutoff)
+SET privacy_min_group_count = NULL;  -- disable (default)
 ```
 
 **Default**: Disabled (`NULL`). Must be explicitly enabled.

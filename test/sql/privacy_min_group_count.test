@@ -1,14 +1,14 @@
-# name: test/sql/pac_utility_threshold.test
-# description: Test pac_utility_threshold setting for NULLing low-SNR cells
+# name: test/sql/privacy_min_group_count.test
+# description: Test privacy_min_group_count setting for NULLing low-SNR cells
 # group: [sql]
 
-require pac
+require privacy
 
 statement ok
-PRAGMA clear_pac_metadata;
+PRAGMA clear_privacy_metadata;
 
 statement ok
-SET pac_seed = 42
+SET privacy_seed = 42
 
 statement ok
 SET pac_hash_repair = true
@@ -42,7 +42,7 @@ SET pac_mi = 1
 # ============================================================================
 
 statement ok
-PRAGMA clear_pac_metadata;
+PRAGMA clear_privacy_metadata;
 
 query I
 SELECT count(*) FROM (
@@ -57,10 +57,10 @@ SELECT count(*) FROM (
 # ============================================================================
 
 statement ok
-PRAGMA clear_pac_metadata;
+PRAGMA clear_privacy_metadata;
 
 statement ok
-SET pac_utility_threshold = 0.5
+SET privacy_min_group_count = 0.5
 
 query I
 SELECT count(*) FROM (
@@ -76,10 +76,10 @@ SELECT count(*) FROM (
 # ============================================================================
 
 statement ok
-PRAGMA clear_pac_metadata;
+PRAGMA clear_privacy_metadata;
 
 statement ok
-SET pac_utility_threshold = 100
+SET privacy_min_group_count = 100
 
 query I
 SELECT count(*) > 0 FROM (
@@ -94,10 +94,10 @@ true
 # ============================================================================
 
 statement ok
-PRAGMA clear_pac_metadata;
+PRAGMA clear_privacy_metadata;
 
 statement ok
-SET pac_utility_threshold = 1000
+SET privacy_min_group_count = 1000
 
 query I
 SELECT count(*) FROM (
@@ -112,10 +112,10 @@ SELECT count(*) FROM (
 # ============================================================================
 
 statement ok
-PRAGMA clear_pac_metadata;
+PRAGMA clear_privacy_metadata;
 
 statement ok
-SET pac_utility_threshold = NULL
+SET privacy_min_group_count = NULL
 
 query I
 SELECT count(*) FROM (
@@ -130,10 +130,10 @@ SELECT count(*) FROM (
 # ============================================================================
 
 statement ok
-PRAGMA clear_pac_metadata;
+PRAGMA clear_privacy_metadata;
 
 statement ok
-SET pac_utility_threshold = 100
+SET privacy_min_group_count = 100
 
 query I
 SELECT count(*) > 0 FROM (
@@ -148,10 +148,10 @@ true
 # ============================================================================
 
 statement ok
-PRAGMA clear_pac_metadata;
+PRAGMA clear_privacy_metadata;
 
 statement ok
-SET pac_utility_threshold = 1000
+SET privacy_min_group_count = 1000
 
 query I
 SELECT count(*) FROM (
@@ -166,10 +166,10 @@ SELECT count(*) FROM (
 # ============================================================================
 
 statement ok
-PRAGMA clear_pac_metadata;
+PRAGMA clear_privacy_metadata;
 
 statement ok
-SET pac_utility_threshold = NULL
+SET privacy_min_group_count = NULL
 
 query I
 SELECT count(*) FROM (
@@ -189,10 +189,10 @@ SET pac_clip_support = 40
 # Disabled: no NULLs
 
 statement ok
-PRAGMA clear_pac_metadata;
+PRAGMA clear_privacy_metadata;
 
 statement ok
-SET pac_utility_threshold = NULL
+SET privacy_min_group_count = NULL
 
 query I
 SELECT count(*) FROM (
@@ -205,10 +205,10 @@ SELECT count(*) FROM (
 # Low threshold: no NULLs
 
 statement ok
-PRAGMA clear_pac_metadata;
+PRAGMA clear_privacy_metadata;
 
 statement ok
-SET pac_utility_threshold = 0.5
+SET privacy_min_group_count = 0.5
 
 query I
 SELECT count(*) FROM (
@@ -221,10 +221,10 @@ SELECT count(*) FROM (
 # Moderate threshold: some NULLed
 
 statement ok
-PRAGMA clear_pac_metadata;
+PRAGMA clear_privacy_metadata;
 
 statement ok
-SET pac_utility_threshold = 100
+SET privacy_min_group_count = 100
 
 query I
 SELECT count(*) > 0 FROM (
@@ -237,10 +237,10 @@ true
 # Very high threshold: all NULLed
 
 statement ok
-PRAGMA clear_pac_metadata;
+PRAGMA clear_privacy_metadata;
 
 statement ok
-SET pac_utility_threshold = 1000
+SET privacy_min_group_count = 1000
 
 query I
 SELECT count(*) FROM (
@@ -256,10 +256,10 @@ SELECT count(*) FROM (
 # ============================================================================
 
 statement ok
-PRAGMA clear_pac_metadata;
+PRAGMA clear_privacy_metadata;
 
 statement ok
-SET pac_utility_threshold = NULL
+SET privacy_min_group_count = NULL
 
 query I
 SELECT count(*) FROM (
@@ -282,7 +282,7 @@ SELECT count(*) FROM (
 # ============================================================================
 
 statement ok
-SET pac_utility_threshold = NULL
+SET privacy_min_group_count = NULL
 
 statement ok
 SET pac_clip_support = NULL

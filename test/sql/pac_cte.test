@@ -2,13 +2,13 @@
 # description: Test PAC bitslice compiler with Common Table Expressions (CTEs)
 # group: [sql]
 
-require pac
+require privacy
 
 statement ok
-PRAGMA clear_pac_metadata;
+PRAGMA clear_privacy_metadata;
 
 statement ok
-SET pac_seed = 42
+SET privacy_seed = 42
 
 statement ok
 SET pac_hash_repair = true
@@ -38,7 +38,7 @@ INSERT INTO nation VALUES
     (4, 'USA', 2);
 
 statement ok
-ALTER TABLE nation ADD PAC_KEY (n_nationkey);
+ALTER TABLE nation ADD PRIVACY_KEY (n_nationkey);
 
 # Customer table (Privacy Unit)
 statement ok
@@ -46,8 +46,8 @@ CREATE PU TABLE customer(
     c_custkey INTEGER,
     c_name VARCHAR,
     c_nationkey INTEGER,
-    PAC_KEY (c_custkey),
-    PAC_LINK (c_nationkey) REFERENCES nation(n_nationkey)
+    PRIVACY_KEY (c_custkey),
+    PRIVACY_LINK (c_nationkey) REFERENCES nation(n_nationkey)
 );
 
 statement ok
@@ -77,10 +77,10 @@ INSERT INTO supplier VALUES
     (4, 'Supplier#004', 1);
 
 statement ok
-ALTER TABLE supplier ADD PAC_KEY (s_suppkey);
+ALTER TABLE supplier ADD PRIVACY_KEY (s_suppkey);
 
 statement ok
-ALTER TABLE supplier ADD PAC_LINK (s_nationkey) REFERENCES nation(n_nationkey);
+ALTER TABLE supplier ADD PRIVACY_LINK (s_nationkey) REFERENCES nation(n_nationkey);
 
 # Orders table
 statement ok
@@ -92,10 +92,10 @@ CREATE TABLE orders(
 );
 
 statement ok
-ALTER TABLE orders ADD PAC_KEY (o_orderkey);
+ALTER TABLE orders ADD PRIVACY_KEY (o_orderkey);
 
 statement ok
-ALTER TABLE orders ADD PAC_LINK (o_custkey) REFERENCES customer(c_custkey);
+ALTER TABLE orders ADD PRIVACY_LINK (o_custkey) REFERENCES customer(c_custkey);
 
 statement ok
 INSERT INTO orders VALUES
@@ -125,13 +125,13 @@ CREATE TABLE lineitem(
 );
 
 statement ok
-ALTER TABLE lineitem ADD PAC_KEY (l_orderkey, l_linenumber);
+ALTER TABLE lineitem ADD PRIVACY_KEY (l_orderkey, l_linenumber);
 
 statement ok
-ALTER TABLE lineitem ADD PAC_LINK (l_orderkey) REFERENCES orders(o_orderkey);
+ALTER TABLE lineitem ADD PRIVACY_LINK (l_orderkey) REFERENCES orders(o_orderkey);
 
 statement ok
-ALTER TABLE lineitem ADD PAC_LINK (l_suppkey) REFERENCES supplier(s_suppkey);
+ALTER TABLE lineitem ADD PRIVACY_LINK (l_suppkey) REFERENCES supplier(s_suppkey);
 
 statement ok
 INSERT INTO lineitem VALUES
@@ -341,22 +341,22 @@ ORDER BY s_suppkey;
 3	Supplier#003
 
 # ============================================================
-# Test 10: CTE that does NOT expose PAC_KEY columns
+# Test 10: CTE that does NOT expose PRIVACY_KEY columns
 # Tests: CTE projects only non-key columns (grp, value) from
 # a PU table. The PAC compiler must expand the CTE definition
-# to include the missing PAC_KEY column so noise can be applied.
+# to include the missing PRIVACY_KEY column so noise can be applied.
 # Without the fix, the aggregate would silently skip noising.
 # ============================================================
 statement ok
-PRAGMA clear_pac_metadata;
+PRAGMA clear_privacy_metadata;
 
 statement ok
-CREATE PU TABLE scores (id INT, grp INT, value INT, PAC_KEY(id), PROTECTED(value));
+CREATE PU TABLE scores (id INT, grp INT, value INT, PRIVACY_KEY(id), PROTECTED(value));
 
 statement ok
 INSERT INTO scores VALUES (1, 1, 10), (2, 1, 20), (3, 2, 30), (4, 2, 40);
 
-# CTE only selects grp and value — PAC_KEY 'id' is NOT projected.
+# CTE only selects grp and value — PRIVACY_KEY 'id' is NOT projected.
 # The aggregate should still be noised (pac_noised_sum) after CTE expansion.
 query II
 WITH data AS (
@@ -387,4 +387,4 @@ statement ok
 DROP TABLE nation;
 
 statement ok
-PRAGMA clear_pac_metadata;
+PRAGMA clear_privacy_metadata;

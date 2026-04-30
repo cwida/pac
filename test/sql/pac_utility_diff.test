@@ -2,13 +2,13 @@
 # description: Test pac_diffcols setting with utility summary
 # group: [sql]
 
-require pac
+require privacy
 
 statement ok
-PRAGMA clear_pac_metadata;
+PRAGMA clear_privacy_metadata;
 
 statement ok
-SET pac_seed = 42
+SET privacy_seed = 42
 
 statement ok
 SET pac_hash_repair = true
@@ -23,7 +23,7 @@ SET pac_mi = 0
 statement ok
 CREATE PU TABLE diff_pu(
     id INTEGER,
-    PAC_KEY (id)
+    PRIVACY_KEY (id)
 );
 
 statement ok
@@ -45,15 +45,15 @@ FROM range(300) t(i);
 
 # Add PAC metadata for diff_data
 statement ok
-ALTER TABLE diff_data ADD PAC_KEY (id);
+ALTER TABLE diff_data ADD PRIVACY_KEY (id);
 
 statement ok
-ALTER TABLE diff_data ADD PAC_LINK (pu_id) REFERENCES diff_pu(id);
+ALTER TABLE diff_data ADD PRIVACY_LINK (pu_id) REFERENCES diff_pu(id);
 
 # ========== Test 1: pac_diffcols with key-based matching (perfect utility) ==========
-# pac_noise=true but pac_mi=0 means zero noise → utility should be 100%
+# privacy_noise=true but pac_mi=0 means zero noise → utility should be 100%
 statement ok
-SET pac_noise = true
+SET privacy_noise = true
 
 statement ok
 SET pac_diffcols = '1'
@@ -71,7 +71,7 @@ SET pac_diffcols = NULL
 
 # ========== Test 2: Ungrouped query with positional diff ==========
 statement ok
-SET pac_noise = true
+SET privacy_noise = true
 
 statement ok
 SET pac_diffcols = '0'
@@ -86,7 +86,7 @@ SET pac_diffcols = NULL
 
 # ========== Test 3: CSV output path ==========
 statement ok
-SET pac_noise = true
+SET privacy_noise = true
 
 statement ok
 SET pac_diffcols = '1:/tmp/test_pac_utility.csv'
@@ -103,7 +103,7 @@ SET pac_diffcols = NULL
 
 # ========== Test 4: Auto-detect key columns (grouped) ==========
 statement ok
-SET pac_noise = true
+SET privacy_noise = true
 
 statement ok
 SET pac_diffcols = 'true'
@@ -120,7 +120,7 @@ SET pac_diffcols = NULL
 
 # ========== Test 5: Auto-detect key columns (ungrouped) ==========
 statement ok
-SET pac_noise = true
+SET privacy_noise = true
 
 statement ok
 SET pac_diffcols = 'true'
@@ -135,7 +135,7 @@ SET pac_diffcols = NULL
 
 # ========== Test 6: Auto-detect with output path ==========
 statement ok
-SET pac_noise = true
+SET privacy_noise = true
 
 statement ok
 SET pac_diffcols = '/tmp/test_pac_utility_auto.csv'
@@ -152,7 +152,7 @@ SET pac_diffcols = NULL
 
 # ========== Test 7: ORDER BY DESC is preserved in diff output ==========
 statement ok
-SET pac_noise = true
+SET privacy_noise = true
 
 statement ok
 SET pac_diffcols = 'true'
@@ -172,7 +172,7 @@ statement ok
 SET pac_diffcols = NULL
 
 statement ok
-PRAGMA clear_pac_metadata;
+PRAGMA clear_privacy_metadata;
 
 statement ok
 DROP TABLE diff_data;
