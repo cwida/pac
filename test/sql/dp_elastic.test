@@ -724,6 +724,36 @@ SELECT COUNT(*) FROM u WHERE id > 1000;
 ----
 0
 
+# ---------------------------------------------------------------------------
+# Phase J: HAVING with AVG aggregates — regression test
+# DuckDB binds HAVING references to aggregate output columns. After our AVG→
+# SUM rewrite, the AVG column is the SUM in the noise projection. The ratio
+# projection must be inserted BELOW HAVING so HAVING's bindings get remapped
+# from the SUM to the ratio output. Otherwise `HAVING AVG(x) > 3` would
+# secretly filter on the SUM, returning wrong groups.
+# ---------------------------------------------------------------------------
+
+statement ok
+SET dp_sum_bound = 10.0;
+
+# HAVING AVG(amount) > 3: only groups with avg ∈ {4, 5, 6} survive.
+# Pre-fix bug: this returned groups 1..6 because HAVING checked SUM not ratio.
+query II
+SELECT CAST(amount AS INTEGER) g, AVG(amount) FROM orders GROUP BY g HAVING AVG(amount) > 3 ORDER BY g;
+----
+4	4.0
+5	5.0
+6	6.0
+
+# Combined HAVING on AVG and COUNT — both predicates apply correctly
+query III
+SELECT CAST(amount AS INTEGER) g, AVG(amount), COUNT(*) FROM orders
+GROUP BY g HAVING AVG(amount) > 3 AND COUNT(*) > 70 ORDER BY g;
+----
+4	4.0	71
+5	5.0	71
+6	6.0	71
+
 statement ok
 RESET dp_sum_bound;
 

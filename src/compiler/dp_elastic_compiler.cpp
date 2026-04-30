@@ -717,6 +717,7 @@ void CompileDPElasticQuery(const PrivacyCompatibilityResult &check, OptimizerExt
 	                         !threshold_val.IsNull() && (threshold = threshold_val.GetValue<double>()) > 0.0 &&
 	                         std::isfinite(threshold);
 
+	LogicalFilter *suppression_filter = nullptr;
 	if (apply_suppression) {
 		// Suppression scales: 0 for AVG sum positions (ratio output, not directly Laplace),
 		// normal for everything else (including AVG-derived COUNT positions).
@@ -730,42 +731,21 @@ void CompileDPElasticQuery(const PrivacyCompatibilityResult &check, OptimizerExt
 		for (idx_t ai = 0; ai < agg->expressions.size(); ai++) {
 			noise_col_types[ai] = noise_proj.proj_types[n_groups + ai];
 		}
-		ApplyGroupSuppression(input, plan, noise_proj.proj_ptr, noise_proj.proj_idx, noise_col_types, n_groups,
-		                      agg->expressions.size(), suppress_scales, threshold);
+		suppression_filter =
+		    ApplyGroupSuppression(input, plan, noise_proj.proj_ptr, noise_proj.proj_idx, noise_col_types, n_groups,
+		                          agg->expressions.size(), suppress_scales, threshold);
 	}
 
-	// Wrap AVG: insert ratio projection above the (possibly filtered) noise projection.
+	// Wrap AVG: insert ratio projection above the suppression filter (if any) so that
+	// upstream operators — including HAVING that references AVG — get their bindings
+	// remapped from noise_proj_idx → ratio_proj_idx (i.e., from raw SUM to the ratio).
+	// We MUST NOT walk the plan and pick up an unrelated LogicalFilter (e.g., HAVING)
+	// as the anchor; that would put the ratio above HAVING and HAVING would still see
+	// the noised SUM instead of the ratio.
 	if (!avg_infos.empty()) {
-		// Find the current top of the noise_proj subtree (may be a filter now)
-		auto *insert_above = FindSlotForOperator(plan, noise_proj.proj_ptr)
-		                         ? static_cast<LogicalOperator *>(noise_proj.proj_ptr)
-		                         : noise_proj.proj_ptr;
-		// Walk up: if a filter was inserted above noise_proj, insert_above should be the filter.
-		// FindSlotForOperator returns the slot *containing* noise_proj.proj_ptr. We need to
-		// determine if noise_proj.proj_ptr is now wrapped by a filter. Walk the plan to find the
-		// parent of noise_proj.proj_ptr.
-		struct ParentFinder : LogicalOperatorVisitor {
-			LogicalOperator *target;
-			LogicalOperator *parent = nullptr;
-			explicit ParentFinder(LogicalOperator *t) : target(t) {
-			}
-			void VisitOperator(LogicalOperator &op) override {
-				for (auto &child : op.children) {
-					if (child.get() == target) {
-						parent = &op;
-						return;
-					}
-				}
-				VisitOperatorChildren(op);
-			}
-		};
-		ParentFinder finder(noise_proj.proj_ptr);
-		finder.VisitOperator(*plan);
-		// If noise_proj has a parent (a filter), insert ratio above the parent; otherwise above noise_proj itself.
-		LogicalOperator *actual_top = (finder.parent && finder.parent->type == LogicalOperatorType::LOGICAL_FILTER)
-		                                  ? finder.parent
-		                                  : noise_proj.proj_ptr;
-		WrapAvgRatioProjection(input, plan, noise_proj, avg_infos, n_groups, n_original_aggs, actual_top);
+		LogicalOperator *anchor =
+		    suppression_filter ? static_cast<LogicalOperator *>(suppression_filter) : noise_proj.proj_ptr;
+		WrapAvgRatioProjection(input, plan, noise_proj, avg_infos, n_groups, n_original_aggs, anchor);
 	}
 
 #if PRIVACY_DEBUG
