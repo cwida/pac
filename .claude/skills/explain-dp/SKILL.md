@@ -41,6 +41,82 @@ Standard approach for DP SQL:
 This handles both single-large-value outliers and many-small-values users.
 Reference: "Differentially Private SQL with Bounded User Contribution" (Google).
 
+### Bounded vs. unbounded vs. user-level DP — what to pick
+
+Three flavors, decided by what counts as a "neighboring dataset":
+- **Bounded (row-level)**: D and D' differ by *changing* one tuple. Flex/elastic
+  sensitivity (Johnson, Near, Song 2018) uses this. Tractable but only protects
+  individual tuples, not entities.
+- **Unbounded (row-level)**: D and D' differ by adding or removing one tuple.
+  Adds factor 2× to sensitivity vs. bounded.
+- **User-level / entity-level (unbounded at the user)**: D and D' differ by
+  adding/removing all rows belonging to one user. Wilson et al. 2019 (Google)
+  use this. This is what PAC's PU concept already encodes — one PU = one user
+  = one row in the PU table plus all linked rows across PAC_LINK joins.
+
+For a PU+LINK system, **user-level (unbounded at the PU)** is the natural choice.
+The neighboring relation is "remove all rows belonging to one PU." Elastic
+sensitivity = ∏(max-frequency along the join chain) — already counts per-PU
+contribution correctly. This is what the current `dp_elastic_compiler.cpp`
+implements via `ExtractFKChain`/`ComputeMfK`.
+
+### Elastic sensitivity (Flex / Johnson, Near, Song 2018)
+
+Per-query upper bound on local sensitivity for SQL with equijoins:
+- Walk the join tree bottom-up. Each table contributes a max-frequency
+  metric `mf` (max number of rows sharing any FK value).
+- Global elastic sensitivity = ∏ mf along the chain.
+- Smooth elastic sensitivity (when δ > 0): exponential decay over distance k
+  with parameter β = ε / (2 ln(2/δ)). Tighter than global ES.
+
+**Key Flex design choices, paraphrased:**
+- WHERE clauses / filters: do NOT reduce the sensitivity bound. Filters
+  pass through unchanged (Flex Section 3.3, Definition 7). They only shrink
+  result size, not sensitivity. Do not assume a selective filter buys privacy.
+- GROUP BY: 2× sensitivity multiplier (one row change can affect two histogram
+  bins — the "from" bin and the "to" bin). Bin set must be specified or
+  drawn from a public domain.
+- SUM/AVG: requires a value-range bound `vr(a) = max - min` per column.
+  Flex does not auto-detect bounds — analyst supplies them, or column
+  CHECK constraints enforce them.
+- Unsupported: non-equijoins, joins on computed/aggregated keys, recursive
+  queries. Flex paper: 76% of real-world SQL queries supported; 14% rejected
+  for unsupported features, 7% for parsing.
+
+### τ-thresholding for GROUP BY (Wilson et al. 2019)
+
+Drop any group whose noisy count is below threshold τ. Required for
+unbounded GROUP BY domains (otherwise the *set of keys released* leaks
+who's in the data).
+
+Formula (Wilson et al., Theorem 2):
+
+    τ = 1 − (C_u · log(2 − 2(1−δ)^(1/C_u))) / ε
+
+where C_u is the per-user partition contribution bound. Requires δ > 0;
+without δ, τ-thresholding can't be made (ε,δ)-DP.
+
+This is conceptually similar to PAC's `pac_utility_threshold` (NULL out
+low-SNR cells), but the formula differs. A unified setting could expose
+"minimum group size" with each mechanism applying its own formula.
+
+### WHERE-clause handling — what to watch
+
+Flex/Wilson both let WHERE pass through for sensitivity. But two practical
+gotchas:
+1. WHERE on a *protected* column: predicate evaluation reveals info about
+   the protected value (the row appears or doesn't). Strictly speaking
+   still DP-compliant if sensitivity is computed correctly, but a soft
+   spot — better to reject or warn.
+2. WHERE that turns COUNT into "test for one specific user": if the filter
+   is selective enough that only one PU matches, the noise still protects
+   them, but utility collapses. This is utility, not privacy.
+
+References:
+- Flex / Elastic Sensitivity: arXiv 1706.09479 (Johnson, Near, Song; VLDB 2018)
+- Bounded User Contribution: arXiv 1909.01917 (Wilson et al., PoPETs 2020)
+- Chorus follow-up: ICDE 2020 — same group's full SQL→SQL DP rewriter
+
 ### How PAC differs from DP
 
 | | DP | PAC |

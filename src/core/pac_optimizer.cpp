@@ -11,6 +11,8 @@
 #include "utils/pac_helpers.hpp"
 // Include PAC bitslice compiler
 #include "compiler/pac_bitslice_compiler.hpp"
+// Include elastic-sensitivity DP compiler
+#include "compiler/dp_elastic_compiler.hpp"
 // Include PAC parser for metadata management
 #include "parser/pac_parser.hpp"
 // Include utility diff
@@ -515,7 +517,11 @@ void PACRewriteRule::PACPreOptimizeFunction(OptimizerExtensionInput &input, uniq
 
 	if (check.eligible_for_rewrite) {
 		bool apply_noise = IsPacNoiseEnabled(input.context, true);
-		if (apply_noise) {
+		string privacy_mode = GetPrivacyMode(input.context);
+		// dp_elastic always runs its pipeline so clipping, FK chain, and sensitivity
+		// are exercised even when pac_noise=false. The compiler zeroes scales internally.
+		bool should_compile = apply_noise || privacy_mode == "dp_elastic";
+		if (should_compile) {
 #if PAC_DEBUG
 			PAC_DEBUG_PRINT("Query requires PAC Compilation for privacy units:");
 			for (const auto &pu_name : privacy_units) {
@@ -524,13 +530,17 @@ void PACRewriteRule::PACPreOptimizeFunction(OptimizerExtensionInput &input, uniq
 #endif
 			// set replan flag for duration of compilation
 			ReplanGuard scoped2(pac_info);
-			CompilePacBitsliceQuery(check, input, target_plan, privacy_units, normalized, query_hash);
+			if (privacy_mode == "dp_elastic") {
+				CompileDPElasticQuery(check, input, target_plan, privacy_units, query_hash);
+			} else {
+				CompilePacBitsliceQuery(check, input, target_plan, privacy_units, normalized, query_hash);
+			}
 
 			// For DML targeting derived_pu tables: convert pac_noised_* → pac_* counter variants
 			// so the table stores raw 64-element counter lists instead of noised scalars.
 			// Check the DML TARGET table (not source tables) for derived_pu.
 			// PropagateCTASMetadata already ran (line 276) and set derived_pu on the target.
-			if (is_dml_wrapper) {
+			if (privacy_mode == "pac" && is_dml_wrapper) {
 				string target_table;
 				if (outer_plan->type == LogicalOperatorType::LOGICAL_CREATE_TABLE) {
 					auto &create = outer_plan->Cast<LogicalCreateTable>();

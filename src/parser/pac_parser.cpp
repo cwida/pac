@@ -308,6 +308,24 @@ ParserExtensionPlanResult PACParserExtension::PACPlanFunction(ParserExtensionInf
 
 				auto &table = table_entry->Cast<TableCatalogEntry>();
 
+				// For SET PU: re-fetch metadata at plan time to pick up ADD PAC_KEY from same batch.
+				// In DuckDB's -c batch mode, all statements are parsed before any are planned, so
+				// PACMetadataManager is empty when SET PU is parsed. By plan time, ADD PAC_KEY's
+				// plan function has already run and stored the key.
+				if (pac_data.metadata.is_set_pu_op) {
+					auto current = PACMetadataManager::Get().GetTableMetadata(pac_data.metadata.table_name);
+					if (current) {
+						pac_data.metadata = *current;
+						pac_data.metadata.is_privacy_unit = true;
+						pac_data.metadata.is_set_pu_op = false;
+					}
+					if (pac_data.metadata.primary_key_columns.empty()) {
+						throw CatalogException("ALTER TABLE SET PU requires a PAC_KEY. "
+						                       "First run: ALTER TABLE " +
+						                       pac_data.metadata.table_name + " ADD PAC_KEY (column_name)");
+					}
+				}
+
 				// Validate ALL protected columns exist before adding any (atomic operation)
 				if (!pac_data.metadata.protected_columns.empty()) {
 					ValidateColumnsExist(table, pac_data.metadata.protected_columns, pac_data.metadata.table_name,

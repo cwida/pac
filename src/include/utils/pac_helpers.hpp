@@ -80,6 +80,15 @@ int64_t GetPacM(ClientContext &context, int64_t default_m = 128);
 bool IsPacNoiseEnabled(ClientContext &context, bool default_value = true);
 string GetPacCompileMethod(ClientContext &context, const string &default_method = "standard");
 
+// Return the selected privacy mechanism: "pac" (default) or "dp_elastic". Lowercased, trimmed.
+string GetPrivacyMode(ClientContext &context);
+// Return the DP budget (ε) from `dp_epsilon`; falls back to default if unset.
+double GetDpEpsilon(ClientContext &context, double default_value = 1.0);
+// Read `dp_sum_bound` into `out`. Returns false if the setting is unset/NULL.
+bool TryGetDpSumBound(ClientContext &context, double &out);
+// Read `dp_delta` into `out`. Returns false if unset/NULL (→ use global elastic sensitivity).
+bool TryGetDpDelta(ClientContext &context, double &out);
+
 // Helper to safely retrieve boolean settings with defaults
 bool GetBooleanSetting(ClientContext &context, const string &setting_name, bool default_value);
 

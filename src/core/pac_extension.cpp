@@ -21,6 +21,7 @@
 #include "aggregates/pac_clip_sum.hpp"
 #include "aggregates/pac_min_max.hpp"
 #include "aggregates/pac_clip_min_max.hpp"
+#include "aggregates/dp_laplace_noise.hpp"
 #include "categorical/pac_categorical.hpp"
 #include "parser/pac_parser.hpp"
 #include "diff/pac_utility_diff.hpp"
@@ -199,6 +200,25 @@ static void LoadInternal(ExtensionLoader &loader) {
 	    "Mutual information bound controlling privacy-utility tradeoff (default: 1/128). "
 	    "Lower values = more noise = more privacy. Set to 0 for deterministic (no noise) mode.",
 	    LogicalType::DOUBLE, Value::DOUBLE(1.0 / 128));
+	// Privacy mechanism selector: 'pac' (default) or 'dp_elastic' for elastic-sensitivity DP
+	db.config.AddExtensionOption("privacy_mode",
+	                             "Privacy mechanism: 'pac' (default) or 'dp_elastic' for elastic-sensitivity DP",
+	                             LogicalType::VARCHAR, Value("pac"));
+	// Differential privacy budget (ε), used only when privacy_mode = 'dp_elastic'
+	db.config.AddExtensionOption("dp_epsilon", "Differential privacy budget (used when privacy_mode = 'dp_elastic')",
+	                             LogicalType::DOUBLE, Value::DOUBLE(1.0));
+	// Per-tuple clipping bound for SUM/AVG in dp_elastic mode. Required when such an aggregate is present.
+	db.config.AddExtensionOption(
+	    "dp_sum_bound",
+	    "Per-tuple clipping bound for SUM/AVG in dp_elastic mode (required when such an aggregate is present)",
+	    LogicalType::DOUBLE, Value(LogicalType::DOUBLE));
+	// Privacy failure probability δ for (ε, δ)-DP smooth sensitivity in dp_elastic mode.
+	// If unset or 0, global elastic sensitivity is used (pure ε-DP).
+	db.config.AddExtensionOption(
+	    "dp_delta",
+	    "Privacy failure probability δ for (ε,δ)-DP smooth elastic sensitivity (dp_elastic mode). "
+	    "If unset, global elastic sensitivity is used instead (pure ε-DP).",
+	    LogicalType::DOUBLE, Value(LogicalType::DOUBLE));
 	// Set deterministic RNG seed for PAC functions (useful for tests)
 	db.config.AddExtensionOption("pac_seed", "RNG seed for reproducible noised results", LogicalType::BIGINT);
 	// Enable/disable PAC noise application (useful for testing, since noise affects result determinism)
@@ -318,6 +338,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	// Register pac_hash scalar function (UBIGINT -> UBIGINT with exactly 32 bits set)
 	RegisterPacHashFunction(loader);
+
+	// Register dp_laplace_noise scalar function (value, scale) -> value + Lap(scale)
+	RegisterDpLaplaceNoiseFunction(loader);
 
 	// Register PAC parser extension
 	ParserExtension::Register(db.config, PACParserExtension());
