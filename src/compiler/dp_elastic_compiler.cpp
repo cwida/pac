@@ -84,10 +84,20 @@ static vector<AvgInfo> RewriteAvgAggregates(OptimizerExtensionInput &input, Logi
 		if (aggr.function.name != "avg") {
 			continue;
 		}
+		// Preserve `FILTER (WHERE ...)` from the original AVG: both the rewritten SUM
+		// and the appended COUNT(*) must apply the same predicate so the ratio matches
+		// the user-visible AVG semantics.
 		auto arg = std::move(aggr.children[0]);
+		auto filter_for_sum = std::move(aggr.filter);
+		auto filter_for_count = filter_for_sum ? filter_for_sum->Copy() : nullptr;
+
 		agg->expressions[i] = BindAggregateLocal(input, "sum", std::move(arg));
+		agg->expressions[i]->Cast<BoundAggregateExpression>().filter = std::move(filter_for_sum);
+
 		idx_t count_pos = agg->expressions.size();
 		agg->expressions.push_back(BindAggregateLocal(input, "count_star", nullptr));
+		agg->expressions.back()->Cast<BoundAggregateExpression>().filter = std::move(filter_for_count);
+
 		avg_infos.push_back({i, count_pos});
 	}
 	if (!avg_infos.empty()) {

@@ -754,6 +754,20 @@ GROUP BY g HAVING AVG(amount) > 3 AND COUNT(*) > 70 ORDER BY g;
 5	5.0	71
 6	6.0	71
 
+# FILTER (WHERE pred) on AVG: predicate must propagate to BOTH the rewritten
+# SUM and the appended COUNT, otherwise the ratio uses the unfiltered count.
+# amount>2 → values 3,4,5,6 → sum=1278, count=284, avg=4.5.
+query I
+SELECT AVG(amount) FILTER (WHERE amount > 2) FROM orders;
+----
+4.5
+
+# Mixed: filtered and unfiltered AVG in the same query — must give different results
+query II
+SELECT AVG(amount), AVG(amount) FILTER (WHERE amount > 2) FROM orders;
+----
+2.988	4.5
+
 statement ok
 RESET dp_sum_bound;
 
