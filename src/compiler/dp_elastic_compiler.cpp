@@ -681,16 +681,23 @@ void CompileDPElasticQuery(const PrivacyCompatibilityResult &check, OptimizerExt
 	// This mirrors pac_mi=0 for PAC and enables deterministic testing.
 	bool noise_enabled = IsPacNoiseEnabled(input.context, true);
 
-	// Build per-aggregate Laplace scales. AVG-derived positions use ε/2 (budget split),
-	// doubling the scale so that SUM+COUNT together consume exactly ε.
+	// Build per-aggregate Laplace scales. With k user-visible aggregates we split ε equally
+	// (sequential composition) → each gets ε/k. AVG splits its share again into ε/(2k) per
+	// component (SUM and COUNT). Effective scale multiplier:
+	//   - non-AVG aggregate:           k       (using ε/k)
+	//   - AVG-derived SUM and COUNT:   2k      (each using ε/(2k))
+	double k = static_cast<double>(n_original_aggs);
 	vector<double> agg_scales;
 	agg_scales.reserve(agg->expressions.size());
 	for (idx_t ai = 0; ai < agg->expressions.size(); ai++) {
 		auto &aggr = agg->expressions[ai]->Cast<BoundAggregateExpression>();
 		double sens = Sensitivity(aggr, sum_bound, es);
 		double scale = noise_enabled ? (sens / epsilon) : 0.0;
+		if (k > 1.0) {
+			scale *= k; // budget split across user-visible aggregates
+		}
 		if (avg_positions.count(ai)) {
-			scale *= 2.0; // budget split: each AVG component uses ε/2
+			scale *= 2.0; // additional split: each AVG component uses half its allocation
 		}
 		agg_scales.push_back(scale);
 		PRIVACY_DEBUG_PRINT("[DP_ELASTIC] agg '" + aggr.function.name + "' sensitivity=" + std::to_string(sens) +

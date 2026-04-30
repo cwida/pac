@@ -199,6 +199,8 @@ PAC bounds the mutual information (MI) between the query output and whether any 
 
 Uses elastic sensitivity (Flex, Johnson/Near/Song VLDB 2018) to derive a per-query upper bound on local sensitivity from the join structure. The sensitivity equals the product of per-table max frequencies along the FK join chain. Each SUM input is clipped to `[-dp_sum_bound, dp_sum_bound]` and calibrated Laplace noise is added to the aggregate result.
 
+`AVG(x)` is rewritten to noised `SUM(x) / COUNT(*)`. With *k* user-visible aggregates in a query, the budget is split evenly under sequential composition — each consumes ε/k (and AVG further splits its share into ε/(2k) per component) so the total cost stays at ε.
+
 This gives a formal (ε,δ)-DP guarantee at the **user level** — neighboring datasets differ by removing all rows belonging to one privacy unit across all linked tables. Requires δ > 0 for smooth elastic sensitivity (tighter noise); set `dp_delta = 0` for pure ε-DP with global elastic sensitivity.
 
 ## Settings

@@ -638,6 +638,30 @@ SELECT AVG(price) FROM order_lines;
 ----
 2.0
 
+# ---------------------------------------------------------------------------
+# Phase H: multi-aggregate budget split (sequential composition)
+# k user-visible aggregates → each uses ε/k. With privacy_noise=false the
+# rewrite still runs (clipping, k-split scale calc) but Laplace scale is 0
+# so the result is exact. Runtime correctness is verified deterministically;
+# noise calibration is exercised by the noisy tests in earlier phases.
+# ---------------------------------------------------------------------------
+
+# 2 aggregates: COUNT and SUM, k=2 → each uses ε/2. Exact under noise=false.
+statement ok
+SET dp_sum_bound = 100.0;
+
+query II
+SELECT COUNT(*), SUM(id) FROM u;
+----
+100	4950
+
+# 3 aggregates: COUNT, SUM, AVG. AVG decomposes into SUM+COUNT (ε/(2·3) per
+# component); other aggregates use ε/3. All exact under noise=false.
+query III
+SELECT COUNT(*), SUM(id), AVG(id) FROM u;
+----
+100	4950	49.5
+
 statement ok
 RESET dp_sum_bound;
 
