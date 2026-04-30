@@ -1,10 +1,10 @@
-# PAC Query Rewriting
+# Query Rewriting
 
-The PAC compiler is an optimizer extension that transforms standard SQL query plans into PAC-private equivalents. It operates as a **pre-optimizer**, running before DuckDB's built-in optimizers (join ordering, filter pushdown, column lifetime, compressed materialization), so the PAC-transformed plan benefits from all standard optimizations automatically.
+The privacy extension optimizer hook transforms standard SQL aggregate plans into privacy-preserving equivalents. It operates as a **pre-optimizer**, running before DuckDB's built-in optimizers (join ordering, filter pushdown, column lifetime, compressed materialization), so the transformed plan benefits from all standard optimizations automatically.
 
-The compiler proceeds in two phases, matching Algorithm 1 in the paper:
-1. **Top-down**: insert PU joins and derive hash expressions (including through CTEs)
-2. **Bottom-up**: replace aggregates with PAC functions, rewrite categorical expressions
+The active mode (`privacy_mode`) determines which compiler runs:
+- **`pac`** (default): Proceeds in two phases matching Algorithm 1 in the PAC paper — top-down PU join insertion + hash derivation, then bottom-up aggregate replacement and categorical rewriting.
+- **`dp_elastic`**: Extracts the FK join chain, computes elastic sensitivity, clips SUM inputs per-PU, injects Laplace noise.
 
 ## Query Classification
 

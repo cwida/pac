@@ -462,6 +462,74 @@ SELECT COUNT(*) FROM u;
 statement ok
 SET pac_diffcols = NULL;
 
+# ---------------------------------------------------------------------------
+# Implicit FK chain: PU table not in FROM clause (no explicit join required)
+# Sensitivity is derived from PRIVACY_LINK metadata; result equals explicit-join version.
+# ---------------------------------------------------------------------------
+
+statement ok
+RESET dp_sum_bound;
+
+# 1-hop COUNT without joining u — same result as FROM u JOIN orders
+query I
+SELECT COUNT(*) FROM orders;
+----
+500
+
+# 1-hop SUM without joining u — same result as FROM u JOIN orders (no clipping)
+statement ok
+SET dp_sum_bound = 10.0;
+
+query I
+SELECT SUM(amount) FROM orders;
+----
+1494.0
+
+# 1-hop SUM with clipping without joining u — same as explicit-join version
+statement ok
+SET dp_sum_bound = 3.0;
+
+query I
+SELECT SUM(amount) FROM orders;
+----
+1068.0
+
+# 2-hop COUNT without any joins — same result as full explicit join chain
+statement ok
+RESET dp_sum_bound;
+
+query I
+SELECT COUNT(*) FROM order_lines;
+----
+750
+
+# 2-hop SUM without any joins — same result as full explicit join chain
+statement ok
+SET dp_sum_bound = 5.0;
+
+query I
+SELECT SUM(price) FROM order_lines;
+----
+1500.0
+
+# Table with no privacy metadata is inconspicuous — passes through unmodified
+statement ok
+CREATE TABLE no_link_table (x INTEGER);
+
+statement ok
+INSERT INTO no_link_table VALUES (1), (2), (3);
+
+query I
+SELECT COUNT(*) FROM no_link_table;
+----
+3
+
+statement ok
+DROP TABLE no_link_table;
+
+statement ok
+RESET dp_sum_bound;
+
 statement ok
 SET privacy_noise = true;
 

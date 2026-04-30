@@ -20,9 +20,14 @@ Never execute git commands that could lose code. Always ask the user for permiss
 - **Keep the paper in mind.** The PAC mechanism is described in [SIMD-PAC-DB: Pretty Performant PAC Privacy](https://arxiv.org/abs/2603.15023). Refer to it for the theoretical foundations (noise calibration, mutual information bounds, counter semantics) before making changes to core aggregate logic.
 - **Add `PRIVACY_DEBUG_PRINT` statements** at major code flow points (entry/exit of compilation phases, aggregate rewrites, clipping decisions). Use the existing `PRIVACY_DEBUG_PRINT` macro from `src/include/privacy_debug.hpp` — it's compiled out when `PRIVACY_DEBUG` is 0.
 
-## What is PAC?
+## What is this extension?
 
-PAC (Probably Approximately Correct) Privacy, or short: pac, is a DuckDB extension that automatically privatizes SQL aggregate queries. It protects against Membership Inference Attacks by maintaining 64 parallel counters per aggregate (one per "world" bit), adding calibrated noise at finalization. Queries are rewritten transparently — users write normal SQL and PAC transforms it.
+`privacy` is a DuckDB extension that automatically privatizes SQL aggregate queries. It supports two privacy mechanisms, selected via `SET privacy_mode`:
+
+- **`pac`** (default): PAC Privacy — empirical MIA resistance. Maintains 64 parallel counters per aggregate (one per "world" bit), adds noise calibrated to the query variance across sub-samples. Provides theoretical mutual-information bounds. Not differential privacy.
+- **`dp_elastic`**: Elastic sensitivity DP — formal (ε,δ)-differential privacy. Derives a per-query sensitivity bound from the join tree's max frequencies, injects Laplace noise calibrated to `sensitivity/epsilon`. Only `dp_elastic` provides a formal ε-DP guarantee.
+
+Both modes share the same DDL (`PRIVACY_KEY`, `PRIVACY_LINK`, `PROTECTED`) and rewrite aggregate plans transparently — users write normal SQL.
 
 ## Build & Test
 
@@ -34,27 +39,34 @@ make test                     # run all tests (~20 tests, ~1600 assertions)
 build/release/test/unittest "test/sql/pac_sum.test"
 
 # C++ unit tests (parser, traversal, compiler)
-build/release/extension/pac/pac_test_runner
+build/release/extension/privacy/pac_test_runner
 ```
 
 Build outputs go to `build/release/`. DuckDB is a git submodule in `duckdb/`.
 
 ## Compilation Pipeline
 
-PAC runs in `pre_optimize_function` — BEFORE DuckDB's built-in optimizers (join order, filter pushdown, column lifetime). This means:
+The optimizer hook runs in `pre_optimize_function` — BEFORE DuckDB's built-in optimizers (join order, filter pushdown, column lifetime). This means:
 - `plan->ResolveOperatorTypes()` must be called before accessing `LogicalProjection::types` (they're empty in raw plans)
 - WHERE filters are still separate FILTER nodes
 - LIMIT is a separate root node
-- DuckDB's optimizers run automatically on the PAC-transformed plan
+- DuckDB's optimizers run automatically on the transformed plan
 
-### Pipeline phases (in order)
+### PAC pipeline phases (in order)
 
-1. **Compatibility check** (`privacy_compatibility_check.cpp`) — decides if query needs PAC rewrite
+1. **Compatibility check** (`privacy_compatibility_check.cpp`) — decides if query needs PAC rewrite; rejects unsupported patterns (window functions, protected columns in GROUP BY)
 2. **FK join injection** (`pac_bitslice_add_fkjoins.cpp`) — adds missing joins to reach PU tables
 3. **Aggregate transformation** (`pac_bitslice_compiler.cpp` → `pac_expression_builder.cpp`) — replaces SUM/COUNT/etc. with pac_noised_sum/pac_noised_count/etc., inserts pac_hash projections above scans
 4. **Categorical rewrite** (`pac_categorical_rewriter.cpp`) — when PAC aggregates appear in filters/comparisons, converts to counter lists (LIST\<FLOAT\>) with pac_filter/pac_select terminals
 5. **AVG decomposition** (`pac_avg_rewriter.cpp`) — rewrites pac_noised_avg into pac_noised_div(pac_sum, pac_count)
 6. **Clip rewrite** (`pac_expression_builder.cpp:RewriteClipAggregates`) — when `pac_clip_support` is set, inserts lower aggregate for per-PU pre-aggregation with clipping
+
+### DP-elastic pipeline phases (in order)
+
+1. **Compatibility check** (`privacy_compatibility_check.cpp`) — same structural checks; must be equijoins along the PRIVACY_LINK chain
+2. **FK chain extraction** (`dp_elastic_compiler.cpp:ExtractFKChain`) — validates the join path is a linear FK chain
+3. **Sensitivity computation** (`dp_elastic_compiler.cpp:ComputeMfK`) — per-table max frequency; global ES = ∏ mf; smooth ES with β = ε/(2·ln(2/δ)) when δ > 0
+4. **Aggregate rewrite** (`dp_elastic_compiler.cpp`) — SUM clipped to `[-dp_sum_bound, dp_sum_bound]`, then `dp_laplace_noise(agg, sensitivity/epsilon)` injected
 
 ### Aggregate naming convention
 
@@ -77,27 +89,40 @@ pac_noised_* is the fused version of pac_noised(pac_*()). The unfused form is us
 
 ## Key source files
 
-- `src/core/privacy_optimizer.cpp` — optimizer hook entry point
-- `src/compiler/pac_bitslice_compiler.cpp` — main compilation orchestrator (`CompilePacBitsliceQuery`)
+- `src/core/privacy_optimizer.cpp` — optimizer hook entry point; dispatches to PAC or DP-elastic based on `privacy_mode`
+- `src/compiler/pac_bitslice_compiler.cpp` — PAC compilation orchestrator (`CompilePacBitsliceQuery`)
+- `src/compiler/dp_elastic_compiler.cpp` — DP-elastic compilation (`CompileDPElasticQuery`, `ExtractFKChain`, `ComputeMfK`)
 - `src/query_processing/pac_expression_builder.cpp` — aggregate modification, clip rewrite, expression binding
 - `src/query_processing/pac_plan_traversal.cpp` — plan traversal utilities (FindAllAggregates, AggregateGroupsByPUKey, etc.)
 - `src/include/aggregates/pac_aggregate.hpp` — PacBindData, noise calibration, p-tracking
 - `src/categorical/pac_categorical_rewriter.cpp` — categorical query transformation (~1770 lines)
+- `src/metadata/privacy_compatibility_check.cpp` — shared compatibility check for both modes
 
 ## Debugging
 
 Set `#define PRIVACY_DEBUG 1` in `src/include/privacy_debug.hpp` for stderr trace output. Use `EXPLAIN` to see the transformed plan.
 
-## PAC DDL examples
+## DDL examples
 
 ```sql
+-- Declare privacy structure (shared by both modes)
 ALTER TABLE customer ADD PRIVACY_KEY (c_custkey);
 ALTER TABLE customer SET PU;
 ALTER TABLE orders ADD PRIVACY_LINK (o_custkey) REFERENCES customer (c_custkey);
-SET pac_mi = 0;        -- disable noise for testing
-SET privacy_seed = 42;     -- reproducible results
-SET pac_clip_support = 40;  -- enable clip rewrite with support threshold
-SET privacy_min_group_count = 4;  -- NULL low-SNR cells (default: NULL = disabled)
+
+-- PAC mode (default)
+SET privacy_mode = 'pac';
+SET pac_mi = 0;                      -- disable noise for testing
+SET privacy_seed = 42;               -- reproducible results
+SET pac_clip_support = 40;           -- enable clip rewrite with support threshold
+SET privacy_min_group_count = 4;     -- suppress low-SNR cells
+
+-- DP-elastic mode (formal ε-DP)
+SET privacy_mode = 'dp_elastic';
+SET dp_epsilon = 1.0;
+SET dp_delta = 1e-6;
+SET dp_sum_bound = 1000;             -- required for SUM: max abs value per PU
+SET privacy_min_group_count = 4;     -- τ-thresholding for GROUP BY
 ```
 
 ## Code style (clang-tidy)

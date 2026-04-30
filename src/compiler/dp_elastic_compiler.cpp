@@ -92,19 +92,30 @@ static DPFKChain ExtractFKChain(const PrivacyCompatibilityResult &check, const v
 		return {{check.scanned_pu_tables[0]}, {}};
 	}
 
-	// Exactly one PU required
-	if (check.scanned_pu_tables.size() != 1) {
-		throw InvalidInputException("dp_elastic: expected exactly one privacy unit table, found " +
-		                            std::to_string(check.scanned_pu_tables.size()));
+	// At most one PU may be scanned directly. Zero is fine — the PU is then inferred from
+	// PRIVACY_LINK metadata via fk_paths (no explicit join required).
+	if (check.scanned_pu_tables.size() > 1) {
+		string pu_list;
+		for (auto &pu : check.scanned_pu_tables) {
+			if (!pu_list.empty()) {
+				pu_list += ", ";
+			}
+			pu_list += "'" + pu + "'";
+		}
+		throw InvalidInputException("dp_elastic: query touches multiple privacy unit tables (" + pu_list +
+		                            "). Only one privacy unit is supported per query.");
 	}
 
-	// Find non-PU table with the longest FK path — this is the root of the chain
+	// Find non-PU table with the longest FK path — this is the root of the chain.
+	// fk_paths contains the full path to the PU (including the PU itself) for every scanned
+	// non-PU table, whether or not the PU is explicitly joined in the query.
 	const vector<string> *longest_path = nullptr;
 	for (auto &non_pu : check.scanned_non_pu_tables) {
 		auto it = check.fk_paths.find(non_pu);
-		if (it == check.fk_paths.end()) {
+		if (it == check.fk_paths.end() || it->second.empty()) {
 			throw InvalidInputException("dp_elastic: table '" + non_pu +
-			                            "' has no PRIVACY_LINK path to the privacy unit");
+			                            "' has no PRIVACY_LINK path to a privacy unit table. "
+			                            "Declare the link with ALTER TABLE ADD PRIVACY_LINK.");
 		}
 		if (!longest_path || it->second.size() > longest_path->size()) {
 			longest_path = &it->second;

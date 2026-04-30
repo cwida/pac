@@ -1,4 +1,4 @@
-# PAC SQL Syntax
+# Privacy Extension SQL Syntax
 
 ## DDL Statements
 

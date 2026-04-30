@@ -1,52 +1,90 @@
-# PAC — Automatic Query Privatization for DuckDB
+# Privacy — Automatic Query Privatization for DuckDB
 
-PAC is a DuckDB extension that automatically privatizes SQL queries using the PAC Privacy framework, protecting against Membership Inference Attacks by adding noise to aggregate query results. Unlike Differential Privacy, PAC works automatically and transparently — no per-query analysis by a privacy specialist is needed.
+`privacy` is a DuckDB extension that automatically privatizes SQL aggregate queries. It supports two privacy mechanisms:
 
-This works on DuckDB v1.5 and beyond. See https://duckdb.org/install to install. Or if you do not want to install anything: this extension is also distributed in WASM, so you can run the examples also in https://shell.duckdb.org in a browser. 
+- **PAC mode** (default): Empirical membership-inference-attack (MIA) resistance via the PAC Privacy framework. Adds calibrated noise derived from the query's own variance over parallel sub-samples. Tight theoretical MI bounds; no per-query sensitivity analysis needed.
+- **DP-elastic mode**: Formal (ε,δ)-differential privacy via elastic sensitivity. Computes a per-query sensitivity bound from the join structure (max frequency per table), then injects calibrated Laplace noise. Provides a provable ε-DP guarantee.
+
+Both modes share the same DDL and require no changes to query syntax — the extension rewrites aggregate query plans transparently.
+
+This works on DuckDB v1.5 and beyond. See https://duckdb.org/install to install. Or if you do not want to install anything: this extension is also distributed in WASM, so you can run the examples also in https://shell.duckdb.org in a browser.
 
 ## Install
 
 ```sql
-INSTALL pac FROM community;
-LOAD privacy;        
+INSTALL privacy FROM community;
+LOAD privacy;
 ```
 
-## Example: Protecting Customers and their Purchasing Behavior
+## Declaring Privacy Structure
 
-In this example we use standard the TPC-H data warehouse benchmark setup. In this warehouse, customers place orders, consisting of lineitems -- which are certain quantities of parts, provided by part suppliers. In this setup, we consider personal customer data sensitive, but also consider their purchase history sensitive. Note that not all aspects of customers get protection under the below scenario: for instance, we consider aggregating customers by market segment (c_mksegment is a non-protected column) non-senstive, nor aggregating by nation or region.
+Before running private queries, you declare the privacy structure using three DDL constructs:
+
+**`PRIVACY_KEY (col)`** — Identifies which column is the privacy unit key. The privacy unit (PU) is the entity being protected: one PU = one customer, user, or individual. Composite keys are supported.
+
+**`PRIVACY_LINK (local_col) REFERENCES table(col)`** — Declares that a table's rows belong to a PU via a foreign key. Links propagate privacy through joins: if `lineitem` links to `orders` which links to `customer`, then every lineitem row is tied to a customer (the PU).
+
+**`PROTECTED (col)`** — Marks a column as sensitive. Protected columns cannot be returned directly; they can only be accessed inside aggregate functions (`SUM`, `COUNT`, etc.). On PU tables, all columns are protected by default.
 
 ```sql
-# generate TPC-H database
-INSTALL tpch;
-LOAD tpch;
-call dbgen(sf=1);
-
--- Mark customer as the privacy unit, after it was created by dbgen
+-- Mark the entity being protected as the privacy unit
 ALTER TABLE customer ADD PRIVACY_KEY (c_custkey);
 ALTER TABLE customer SET PU;
 
--- Protected columns in customer table
+-- Declare join paths so privacy propagates through the schema
+ALTER TABLE orders ADD PRIVACY_LINK (o_custkey) REFERENCES customer(c_custkey);
+ALTER TABLE lineitem ADD PRIVACY_LINK (l_orderkey) REFERENCES orders(o_orderkey);
+
+-- Mark sensitive columns (optional on PU tables — all columns protected by default)
+ALTER PU TABLE customer ADD PROTECTED (c_name);
+ALTER PU TABLE customer ADD PROTECTED (c_acctbal);
+```
+
+## Choosing a Mode
+
+| | PAC (default) | DP-elastic |
+|---|---|---|
+| **Privacy guarantee** | Empirical MIA resistance, theoretical MI bound | Formal (ε,δ)-differential privacy |
+| **Noise calibration** | From query variance across 64 sub-samples | From elastic sensitivity of the join tree |
+| **Join requirement** | Injected automatically from PRIVACY_LINK chain | Must be written explicitly in the query |
+| **SUM** | Works automatically | Requires `SET dp_sum_bound` |
+| **When to use** | General-purpose; works on most queries | When you need a formal DP certificate |
+
+```sql
+SET privacy_mode = 'pac';        -- default
+SET privacy_mode = 'dp_elastic'; -- formal ε-DP
+```
+
+## Example: PAC Mode
+
+Using the TPC-H benchmark. Customers place orders consisting of lineitems. Customer data and purchase history are sensitive.
+
+```sql
+-- Generate TPC-H database
+INSTALL tpch;
+LOAD tpch;
+CALL dbgen(sf=1);
+
+-- Declare privacy structure
+ALTER TABLE customer ADD PRIVACY_KEY (c_custkey);
+ALTER TABLE customer SET PU;
 ALTER PU TABLE customer ADD PROTECTED (c_custkey);
 ALTER PU TABLE customer ADD PROTECTED (c_comment);
 ALTER PU TABLE customer ADD PROTECTED (c_acctbal);
 ALTER PU TABLE customer ADD PROTECTED (c_name);
 ALTER PU TABLE customer ADD PROTECTED (c_address);
-
--- Orders -> Customer and Lineitem->Orders links
 ALTER TABLE orders ADD PRIVACY_LINK (o_custkey) REFERENCES customer(c_custkey);
 ALTER TABLE lineitem ADD PRIVACY_LINK (l_orderkey) REFERENCES orders(o_orderkey);
-
--- Protect the comment columns, as they may include customer-specific notes
 ALTER TABLE orders ADD PROTECTED (o_comment);
 ALTER TABLE lineitem ADD PROTECTED (l_comment);
 
--- protected columns cannot be returned
+-- Protected columns cannot be returned directly
 SELECT c_name FROM customer;
 -- Error: protected column 'customer.c_name' can only be accessed inside
 -- aggregate functions (e.g., SUM, COUNT, AVG, MIN, MAX)
 
---The noised result is close to the real answer but perturbed — an attacker cannot determine whether
---any specific customer (who might have made many purchases) is in the database. 
+-- PAC rewrites the aggregate and injects the join to orders automatically
+-- The noised result is close to the true answer but safe against MIA
 SELECT l_returnflag, l_linestatus, SUM(l_extendedprice) FROM lineitem GROUP BY ALL;
 ┌──────────────┬──────────────┬──────────────────────┐
 │ l_returnflag │ l_linestatus │ sum(l_extendedprice) │
@@ -58,9 +96,7 @@ SELECT l_returnflag, l_linestatus, SUM(l_extendedprice) FROM lineitem GROUP BY A
 │ R            │ F            │       57318996705.28 │
 └──────────────┴──────────────┴──────────────────────┘
 
--- PAC rewrites the query plan automatically
--- Note that: (1) the GROUP_BY uses a pac_noised_sum(#2, #3), not a standard sum()
---            (2) while the query only mentions lineitem, pac joins with orders to get _custkey (the PU key)
+-- The rewritten plan — note pac_noised_sum and the injected join to orders
 EXPLAIN SELECT l_returnflag, l_linestatus, SUM(l_extendedprice) FROM lineitem GROUP BY ALL;
 ┌───────────────────────────┐
 │   PERFECT_HASH_GROUP_BY   │
@@ -95,8 +131,7 @@ EXPLAIN SELECT l_returnflag, l_linestatus, SUM(l_extendedprice) FROM lineitem GR
                              │      ~1,500,000 rows      │
                              └───────────────────────────┘
 
--- every time the result is noised a bit differently (the database is resampled -- though this is "virtual"
--- "on-the-fly", because it is one  by perturbing the hash function that feeds into the stochastic aggregates)
+-- Each query uses a different hash function — results vary slightly per run
 SELECT l_returnflag, l_linestatus, SUM(l_extendedprice) FROM lineitem GROUP BY ALL;
 ┌──────────────┬──────────────┬──────────────────────┐
 │ l_returnflag │ l_linestatus │ sum(l_extendedprice) │
@@ -108,8 +143,8 @@ SELECT l_returnflag, l_linestatus, SUM(l_extendedprice) FROM lineitem GROUP BY A
 │ R            │ F            │       58803811778.56 │
 └──────────────┴──────────────┴──────────────────────┘
 
--- the unnoised correct answer:
-set privacy_noise = false;
+-- Disable noise to see the true answer
+SET privacy_noise = false;
 SELECT l_returnflag, l_linestatus, SUM(l_extendedprice) FROM lineitem GROUP BY ALL;
 ┌──────────────┬──────────────┬──────────────────────┐
 │ l_returnflag │ l_linestatus │ sum(l_extendedprice) │
@@ -120,72 +155,94 @@ SELECT l_returnflag, l_linestatus, SUM(l_extendedprice) FROM lineitem GROUP BY A
 │ N            │ O            │      114935210409.19 │
 │ R            │ F            │       56568041380.90 │
 └──────────────┴──────────────┴──────────────────────┘
+```
 
--- measure utility (MAPE, recall, precision)
-set privacy_noise = true;
-set pac_diffcols = 2; -- two key columns l_returnflag, l_linestatus,
-SELECT l_returnflag, l_linestatus, SUM(l_extendedprice) FROM lineitem GROUP BY ALL;
-utility=0.510000 recall=1.000000 precision=1.000000 (=4 -0 +0)
+## Example: DP-Elastic Mode
+
+Same dataset and privacy structure. No explicit joins are needed — the extension derives the FK chain from PRIVACY_LINK metadata automatically.
+
+```sql
+-- (same DDL as above — reuse the privacy structure already declared)
+
+SET privacy_mode = 'dp_elastic';
+SET dp_epsilon = 1.0;
+SET dp_delta = 1e-6;
+SET dp_sum_bound = 100000;  -- max absolute l_extendedprice per row, for clipping
+SET privacy_seed = 42;
+
+-- No joins needed: the extension derives lineitem → orders → customer from PRIVACY_LINK metadata
+SELECT l_returnflag, l_linestatus, SUM(l_extendedprice) FROM lineitem GROUP BY ALL ORDER BY ALL;
 ┌──────────────┬──────────────┬──────────────────────┐
 │ l_returnflag │ l_linestatus │ sum(l_extendedprice) │
 │   varchar    │   varchar    │    decimal(38,2)     │
 ├──────────────┼──────────────┼──────────────────────┤
-│ A            │ F            │                 0.56 │
-│ N            │ F            │                 0.13 │
-│ N            │ O            │                 0.58 │
-│ R            │ F            │                 0.77 │
+│ A            │ F            │       56589946031.64 │
+│ N            │ F            │        1534396959.73 │
+│ N            │ O            │      114528541709.94 │
+│ R            │ F            │       56505612137.93 │
 └──────────────┴──────────────┴──────────────────────┘
 ```
 
+The extension computes elastic sensitivity as the product of per-table max frequencies along the `lineitem → orders → customer` chain (via auxiliary `MAX(COUNT(*))` queries, not by executing the join), clips each value to `[-dp_sum_bound, dp_sum_bound]`, and injects `Laplace(sensitivity/ε)` noise into the aggregate result. This gives a formal (ε,δ)-DP guarantee at the privacy-unit (customer) level.
+
 ## How It Works
 
-1. You declare which table is the **privacy unit** (`CREATE PU TABLE` or `ALTER TABLE SET PU`) and which columns to protect.
+### PAC Mode
+
+1. You declare which table is the **privacy unit** and which columns to protect.
 2. You link related tables with `PRIVACY_LINK` to propagate privacy through joins.
-3. PAC intercepts every aggregate query, hashes each privacy unit's key into a 64-bit value, and uses the bits to create 64 sub-samples (possible worlds). Each aggregate runs on all sub-samples independently, and the final result is taken from one secret world but  noised using the variance over all possible worlds — close to the true answer but safe against membership inference. Each query uses a different hash function, and choses a different secret world to return answers from, making such attacks harder.
+3. The extension intercepts every aggregate query, hashes each PU key into a 64-bit value, and uses the bits to create 64 sub-samples (possible worlds). Each aggregate runs on all sub-samples independently. The final result is taken from one secret world, noised using the variance across all worlds. Each query uses a different hash function and selects a different secret world.
 
-### Mutual Information (MI)
+PAC bounds the mutual information (MI) between the query output and whether any individual is in the database. The `pac_mi` parameter sets this bound: at the default `pac_mi = 1/128`, an attacker gains at most 1/128 nats of information per query. **PAC is not differential privacy** — it provides empirical MIA resistance with theoretical MI bounds, not a formal ε-DP guarantee.
 
-PAC bounds the mutual information (MI) between the query output and whether any specific individual is in the database. The `pac_mi` parameter sets this bound: at the default `pac_mi = 1/128`, an attacker observing PAC query results gains no additional information about any individual's presence. Higher values relax the bound, allowing less noise (more accurate results) at the cost of more information leakage.
+### DP-Elastic Mode
+
+Uses elastic sensitivity (Flex, Johnson/Near/Song VLDB 2018) to derive a per-query upper bound on local sensitivity from the join structure. The sensitivity equals the product of per-table max frequencies along the FK join chain. Each SUM input is clipped to `[-dp_sum_bound, dp_sum_bound]` and calibrated Laplace noise is added to the aggregate result.
+
+This gives a formal (ε,δ)-DP guarantee at the **user level** — neighboring datasets differ by removing all rows belonging to one privacy unit across all linked tables. Requires δ > 0 for smooth elastic sensitivity (tighter noise); set `dp_delta = 0` for pure ε-DP with global elastic sensitivity.
+
+## Settings
+
+| Setting | Default | Mode | Description |
+|---------|---------|------|-------------|
+| `privacy_mode` | `pac` | both | Active privacy mechanism: `pac` or `dp_elastic` |
+| `privacy_seed` | random | both | Fix seed for reproducible results |
+| `privacy_noise` | `true` | both | Toggle noise injection |
+| `privacy_min_group_count` | `NULL` | both | Suppress GROUP BY cells below this count (PAC: low-SNR suppression; DP: τ-thresholding) |
+| `pac_mi` | `1/128` | pac | Mutual information bound (higher = less noise, more leakage) |
+| `pac_ctas` | `true` | pac | Propagate PAC metadata through CTAS |
+| `pac_diffcols` | `NULL` | pac | [Utility diff](docs/pac/utility.md): compare noised vs exact results |
+| `dp_epsilon` | `1.0` | dp_elastic | Privacy budget ε |
+| `dp_delta` | `1e-6` | dp_elastic | Failure probability δ (0 = pure DP) |
+| `dp_sum_bound` | required | dp_elastic | Clipping bound for SUM: values are clipped to `[-bound, bound]` |
 
 ## SQL Reference
 
-### Defining Privacy Units
-
-```sql
--- Create a new PU table with PRIVACY_KEY and optional PROTECTED columns
-CREATE PU TABLE t (col1 INT, col2 INT, PRIVACY_KEY (col1), PROTECTED (col2));
-
--- Or convert an existing table to PU
-ALTER TABLE t ADD PRIVACY_KEY (col1);       -- PRIVACY_KEY on non-PU table (prep for SET PU)
-ALTER TABLE t SET PU;                   -- mark as PU (requires PRIVACY_KEY)
-ALTER TABLE t UNSET PU;                 -- remove PU status
-
--- Add metadata to non-PU tables (use ALTER TABLE)
-ALTER TABLE orders ADD PRIVACY_LINK (fk_col) REFERENCES t(col1);
-ALTER TABLE orders ADD PROTECTED (col2);
-
--- Add metadata to PU tables (use ALTER PU TABLE)
-ALTER PU TABLE t ADD PROTECTED (col2);
-```
-
-`PRIVACY_KEY` identifies the privacy unit (composite keys supported). `PRIVACY_LINK` declares a join path for privacy propagation. `PROTECTED` restricts columns to aggregate-only access — if omitted on a PU table, all columns are protected. Use `ALTER PU TABLE` for PU tables and `ALTER TABLE` for non-PU tables.
-
-`CREATE TABLE AS SELECT` from a PU table automatically propagates PAC metadata to the new table (see [syntax docs](docs/pac/syntax.md#derived-tables-create-table-as-select)).
-
 ### Supported Aggregates and Operators
 
-PAC rewrites standard aggregates: `SUM`, `COUNT`, `AVG`, `MIN`, `MAX`, and `COUNT(DISTINCT)`. Joins, subqueries (correlated and uncorrelated), `UNION`/`UNION ALL`, `GROUP BY`, `HAVING`, `ORDER BY`, and `LIMIT` all work. Window functions and set operations like `EXCEPT`/`INTERSECT` are not yet supported.
+Both modes rewrite standard aggregates: `SUM`, `COUNT`, `AVG`, `MIN`, `MAX`, and `COUNT(DISTINCT)`. Joins, subqueries (correlated and uncorrelated), `UNION`/`UNION ALL`, `GROUP BY`, `HAVING`, `ORDER BY`, and `LIMIT` all work. Window functions and `EXCEPT`/`INTERSECT` are not yet supported.
 
-### Settings
+### DDL Quick Reference
 
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `pac_mi` | `1/128` | Mutual information bound (higher = less noise) |
-| `privacy_seed` | random | Fix seed for reproducible results |
-| `privacy_noise` | `true` | Toggle noise injection |
-| `pac_ctas` | `true` | Propagate PAC metadata through CTAS |
-| `pac_diffcols` | `NULL` | [Utility diff](docs/pac/utility.md): compare noised vs exact results |
-=======
+```sql
+-- Create a new PU table
+CREATE PU TABLE t (col1 INT, col2 INT, PRIVACY_KEY (col1), PROTECTED (col2));
+
+-- Or convert an existing table
+ALTER TABLE t ADD PRIVACY_KEY (col1);
+ALTER TABLE t SET PU;
+ALTER TABLE t UNSET PU;
+
+-- Non-PU tables: use ALTER TABLE
+ALTER TABLE orders ADD PRIVACY_LINK (fk_col) REFERENCES t(col1);
+ALTER TABLE orders ADD PROTECTED (sensitive_col);
+
+-- PU tables: use ALTER PU TABLE
+ALTER PU TABLE t ADD PROTECTED (col2);
+ALTER PU TABLE t DROP PROTECTED (col2);
+```
+
+`CREATE TABLE AS SELECT` from a PU table automatically propagates privacy metadata to the new table (see [syntax docs](docs/pac/syntax.md#derived-tables-create-table-as-select)).
 
 ## Documentation
 
@@ -194,7 +251,11 @@ For implementation details, see the [docs/](docs/) folder: \
 
 ## Literature
 
-I. Battiston, D. Yuan, X. Zhu, P. Boncz. [SIMD-PAC-DB: Pretty Performant PAC Privacy](https://arxiv.org/abs/2603.15023). 2026. 
+I. Battiston, D. Yuan, X. Zhu, P. Boncz. [SIMD-PAC-DB: Pretty Performant PAC Privacy](https://arxiv.org/abs/2603.15023). 2026.
+
+N. Johnson, J.M. Near, D. Song. [Towards Practical Differential Privacy for SQL Queries](https://arxiv.org/abs/1706.09479) (Flex / Elastic Sensitivity). VLDB 2018.
+
+R. Wilson, C. Zhang, W. Lam, D. Desfontaines, D. Simmons-Marengo, B. Gipson. [Differentially Private SQL with Bounded User Contribution](https://arxiv.org/abs/1909.01917). PoPETs 2020.
 
 ```bibtex
 @misc{battiston2026simdpacdbprettyperformantpac,
