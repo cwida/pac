@@ -33,7 +33,7 @@ Both modes share the same DDL (`PRIVACY_KEY`, `PRIVACY_LINK`, `PROTECTED`) and r
 
 ```bash
 GEN=ninja make                # build (release)
-make test                     # run all tests (~20 tests, ~1600 assertions)
+make test                     # run all tests (~25 tests, ~2200 assertions)
 
 # single test
 build/release/test/unittest "test/sql/pac_sum.test"
@@ -63,13 +63,15 @@ The optimizer hook runs in `pre_optimize_function` — BEFORE DuckDB's built-in 
 
 ### DP-elastic pipeline phases (in order)
 
-1. **Compatibility check** (`privacy_compatibility_check.cpp`) — same structural checks; FK chain may be implicit (derived from PRIVACY_LINK metadata when the PU table is absent from the SQL)
-2. **FK chain extraction** (`dp_elastic_compiler.cpp:ExtractFKChain`) — validates the chain is linear; supports both explicit joins and implicit (metadata-only) chains
-3. **AVG rewrite** (`dp_elastic_compiler.cpp:RewriteAvgAggregates`) — each `AVG(x)` becomes `SUM(x) + COUNT(*)` with ε/2 budget split per component
-4. **Sensitivity computation** (`dp_elastic_compiler.cpp:ComputeMfK`) — per-table max frequency; global ES = ∏ mf; smooth ES with β = ε/(2·ln(2/δ)) when δ > 0
-5. **Aggregate rewrite** (`dp_elastic_compiler.cpp`) — SUM clipped to `[-dp_sum_bound, dp_sum_bound]`, then `dp_laplace_noise(agg, sensitivity/epsilon)` injected
-6. **AVG ratio projection** (`dp_elastic_compiler.cpp:WrapAvgRatioProjection`) — for each rewritten AVG: `noised_SUM / max(1, noised_COUNT)`
-7. **τ-thresholding** (`dp_elastic_compiler.cpp:ApplyGroupSuppression`) — if `privacy_min_group_count` set, drops groups where `|noised| < threshold·√2·scale`
+1. **Compatibility check** (`privacy_compatibility_check.cpp`) — shared structural checks; PU columns can only appear inside aggregates
+2. **FK chain extraction** (`dp_elastic_compiler.cpp:ExtractFKChain`) — validates a linear FK path to the PU; chain may be explicit (joins in the SQL) or implicit (derived from PRIVACY_LINK metadata when the PU table is absent)
+3. **AVG rewrite** (`dp_elastic_compiler.cpp:RewriteAvgAggregates`) — each `AVG(x)` is replaced in-place by `SUM(x)` and a `COUNT(*)` is appended; the original `FILTER (WHERE …)` predicate is propagated to both
+4. **Clipping** (`dp_elastic_compiler.cpp:ClipSumInputs`) — SUM (and AVG-derived SUM) arguments wrapped in `greatest(least(v, C), -C)` where C = `dp_sum_bound`
+5. **Sensitivity computation** (`dp_elastic_compiler.cpp:ComputeMfK` + `ComputeElasticSensitivity`) — per-table max frequency; global ES = ∏ mf; smooth ES with β = ε/(2·ln(2/δ)) when δ > 0
+6. **Budget split** (`CompileDPElasticQuery`) — with k user-visible aggregates each gets ε/k (scale × k); AVG components further split to ε/(2k) (scale × 2k)
+7. **Noise injection** (`dp_elastic_compiler.cpp:WrapAggregateWithLaplace`) — projection above the aggregate adds `dp_laplace_noise(agg, scale)` per column, cast back to the original type
+8. **τ-thresholding** (`dp_elastic_compiler.cpp:ApplyGroupSuppression`) — if `privacy_min_group_count` set, a filter above the noise projection drops groups where `|noised| < threshold · √2 · scale` (skipped for AVG positions, whose ratio is not a simple Laplace output)
+9. **AVG ratio projection** (`dp_elastic_compiler.cpp:WrapAvgRatioProjection`) — inserted above the suppression filter (or directly above the noise projection if no suppression). Computes `cast(noised_sum, DOUBLE) / greatest(cast(noised_count, DOUBLE), 1.0)` for each AVG; non-AVG outputs pass through. ColumnBindingReplacer remaps upstream references (including any HAVING filter) so they read the ratio rather than the raw SUM
 
 ### Aggregate naming convention
 

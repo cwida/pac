@@ -46,8 +46,8 @@ ALTER PU TABLE customer ADD PROTECTED (c_acctbal);
 |---|---|---|
 | **Privacy guarantee** | Empirical MIA resistance, theoretical MI bound | Formal (ε,δ)-differential privacy |
 | **Noise calibration** | From query variance across 64 sub-samples | From elastic sensitivity of the join tree |
-| **Join requirement** | Injected automatically from PRIVACY_LINK chain | Must be written explicitly in the query |
-| **SUM** | Works automatically | Requires `SET dp_sum_bound` |
+| **Joins** | Missing PU joins injected automatically from PRIVACY_LINK | FK chain derived from PRIVACY_LINK metadata; explicit joins also work |
+| **SUM / AVG** | Works automatically | Requires `SET dp_sum_bound` for value clipping |
 | **When to use** | General-purpose; works on most queries | When you need a formal DP certificate |
 
 ```sql
@@ -197,9 +197,9 @@ PAC bounds the mutual information (MI) between the query output and whether any 
 
 ### DP-Elastic Mode
 
-Uses elastic sensitivity (Flex, Johnson/Near/Song VLDB 2018) to derive a per-query upper bound on local sensitivity from the join structure. The sensitivity equals the product of per-table max frequencies along the FK join chain. Each SUM input is clipped to `[-dp_sum_bound, dp_sum_bound]` and calibrated Laplace noise is added to the aggregate result.
+Uses elastic sensitivity (Flex, Johnson/Near/Song VLDB 2018) to derive a per-query upper bound on local sensitivity from the join structure. The sensitivity equals the product of per-table max frequencies along the FK join chain — computed from auxiliary `MAX(COUNT(*))` queries, not by executing the user's join. Each `SUM`/`AVG` input is clipped to `[-dp_sum_bound, dp_sum_bound]` and calibrated Laplace noise is added to the aggregate result.
 
-`AVG(x)` is rewritten to noised `SUM(x) / COUNT(*)`. With *k* user-visible aggregates in a query, the budget is split evenly under sequential composition — each consumes ε/k (and AVG further splits its share into ε/(2k) per component) so the total cost stays at ε.
+`AVG(x)` is rewritten to noised `SUM(x) / COUNT(*)`. With *k* user-visible aggregates in a query the budget is split evenly under sequential composition — each consumes ε/k, and AVG further splits its share into ε/(2k) per component, so the total cost across the query stays at ε. `WHERE`, `HAVING`, and `FILTER (WHERE …)` aggregate clauses are honoured: the predicates run before noise is added (or, for `HAVING`, against the already-noised value, which is post-processing and DP-safe). When `privacy_min_group_count` is set, low-count groups are dropped via τ-thresholding (a filter on the noised value, also post-processing).
 
 This gives a formal (ε,δ)-DP guarantee at the **user level** — neighboring datasets differ by removing all rows belonging to one privacy unit across all linked tables. Requires δ > 0 for smooth elastic sensitivity (tighter noise); set `dp_delta = 0` for pure ε-DP with global elastic sensitivity.
 
@@ -216,7 +216,7 @@ This gives a formal (ε,δ)-DP guarantee at the **user level** — neighboring d
 | `pac_diffcols` | `NULL` | pac | [Utility diff](docs/pac/utility.md): compare noised vs exact results |
 | `dp_epsilon` | `1.0` | dp_elastic | Privacy budget ε |
 | `dp_delta` | `1e-6` | dp_elastic | Failure probability δ (0 = pure DP) |
-| `dp_sum_bound` | required | dp_elastic | Clipping bound for SUM: values are clipped to `[-bound, bound]` |
+| `dp_sum_bound` | required | dp_elastic | Clipping bound for `SUM`/`AVG` inputs: values are clipped to `[-bound, bound]` |
 
 ## SQL Reference
 
