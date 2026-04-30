@@ -533,3 +533,42 @@ RESET dp_sum_bound;
 statement ok
 SET privacy_noise = true;
 
+# ---------------------------------------------------------------------------
+# Phase F: GROUP BY + τ-thresholding (privacy_min_group_count)
+# ---------------------------------------------------------------------------
+# orders: amount=(i%7)*1.0 → 7 groups (0..6), ~71-72 rows each.
+# ES = mf_K(orders→u) = 5; scale = 5/ε = 5.
+# suppress_bound = threshold · √2 · scale.
+# A group survives iff |noised_count| ≥ suppress_bound.
+# ---------------------------------------------------------------------------
+
+statement ok
+SET dp_epsilon = 1.0;
+RESET dp_sum_bound;
+
+# Very high threshold: suppress_bound = 1000000·√2·5 >> ~72 → all 7 groups dropped
+statement ok
+SET privacy_min_group_count = 1000000;
+
+query II rowsort
+SELECT CAST(amount AS INTEGER), COUNT(*) FROM orders GROUP BY CAST(amount AS INTEGER);
+----
+
+# Very low threshold: suppress_bound ≈ 0.007 << ~72 → all 7 groups survive
+statement ok
+SET privacy_min_group_count = 0.001;
+
+query II rowsort
+SELECT CAST(amount AS INTEGER), COUNT(*) IS NOT NULL FROM orders GROUP BY CAST(amount AS INTEGER);
+----
+0	true
+1	true
+2	true
+3	true
+4	true
+5	true
+6	true
+
+statement ok
+RESET privacy_min_group_count;
+

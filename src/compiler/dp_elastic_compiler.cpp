@@ -12,12 +12,14 @@
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
+#include "duckdb/planner/expression/bound_comparison_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/operator/logical_aggregate.hpp"
 #include "duckdb/planner/operator/logical_any_join.hpp"
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
 #include "duckdb/planner/operator/logical_cross_product.hpp"
+#include "duckdb/planner/operator/logical_filter.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/planner/operator/logical_projection.hpp"
 
@@ -357,11 +359,22 @@ static double Sensitivity(const BoundAggregateExpression &aggr, double sum_bound
 
 // ----------------------------------------------------------------------------
 // Wrap aggregate output — inserts LogicalProjection above `agg` with
-// dp_laplace_noise applied to each DP-target column, cast back to original type
+// dp_laplace_noise applied to each DP-target column, cast back to original type.
+// Returns the inserted projection so the caller can layer additional rewrites.
 // ----------------------------------------------------------------------------
 
-static void WrapAggregateWithLaplace(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
-                                     LogicalAggregate *agg, const vector<double> &agg_scales) {
+struct NoiseProjection {
+	idx_t proj_idx;
+	LogicalProjection *proj_ptr;
+	vector<LogicalType> proj_types; // all output types [groups..., noised_aggs...]
+
+	NoiseProjection(idx_t idx, LogicalProjection *ptr, vector<LogicalType> types)
+	    : proj_idx(idx), proj_ptr(ptr), proj_types(std::move(types)) {
+	}
+};
+
+static NoiseProjection WrapAggregateWithLaplace(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
+                                                LogicalAggregate *agg, const vector<double> &agg_scales) {
 	idx_t n_groups = agg->groups.size();
 	idx_t n_aggs = agg->expressions.size();
 	idx_t group_idx = agg->group_index;
@@ -406,7 +419,7 @@ static void WrapAggregateWithLaplace(OptimizerExtensionInput &input, unique_ptr<
 	auto old_agg = std::move(*slot);
 	projection->children.push_back(std::move(old_agg));
 	projection->ResolveOperatorTypes();
-	LogicalOperator *proj_ptr = projection.get();
+	LogicalProjection *proj_ptr = projection.get();
 	*slot = std::move(projection);
 
 	// Remap bindings above the inserted projection
@@ -419,6 +432,49 @@ static void WrapAggregateWithLaplace(OptimizerExtensionInput &input, unique_ptr<
 	}
 	replacer.stop_operator = proj_ptr;
 	replacer.VisitOperator(*plan);
+
+	return {proj_idx, proj_ptr, agg_types};
+}
+
+// ----------------------------------------------------------------------------
+// Group suppression filter — inserts LogicalFilter above the noise projection.
+// Drops groups where |noised_value| / (sqrt(2) * scale) < threshold for any agg.
+// This is a post-processing step (safe by data processing inequality).
+// ----------------------------------------------------------------------------
+
+static void ApplyGroupSuppression(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
+                                  const NoiseProjection &noise_proj, idx_t n_groups, idx_t n_aggs,
+                                  const vector<double> &agg_scales, double threshold) {
+	vector<unique_ptr<Expression>> conditions;
+	for (idx_t ai = 0; ai < n_aggs; ai++) {
+		double scale = agg_scales[ai];
+		if (scale <= 0.0 || !std::isfinite(scale)) {
+			continue;
+		}
+		double suppress_bound = threshold * std::sqrt(2.0) * scale;
+		auto col_type = noise_proj.proj_types[n_groups + ai];
+		auto col_ref = make_uniq<BoundColumnRefExpression>(col_type, ColumnBinding(noise_proj.proj_idx, n_groups + ai));
+		auto col_as_double = BoundCastExpression::AddCastToType(input.context, std::move(col_ref), LogicalType::DOUBLE);
+		auto abs_col = input.optimizer.BindScalarFunction("abs", std::move(col_as_double));
+		auto bound_const = make_uniq<BoundConstantExpression>(Value::DOUBLE(suppress_bound));
+		conditions.push_back(make_uniq<BoundComparisonExpression>(ExpressionType::COMPARE_GREATERTHANOREQUALTO,
+		                                                          std::move(abs_col), std::move(bound_const)));
+	}
+	if (conditions.empty()) {
+		return;
+	}
+
+	auto filter = make_uniq<LogicalFilter>();
+	filter->expressions = std::move(conditions);
+
+	auto *slot = FindSlotForOperator(plan, noise_proj.proj_ptr);
+	if (!slot) {
+		throw InternalException("dp_elastic: could not locate noise projection for suppression filter");
+	}
+	filter->children.push_back(std::move(*slot));
+	filter->ResolveOperatorTypes();
+	*slot = std::move(filter);
+	// LogicalFilter passes through all column bindings unchanged — no remapping needed
 }
 
 // ----------------------------------------------------------------------------
@@ -475,7 +531,19 @@ void CompileDPElasticQuery(const PrivacyCompatibilityResult &check, OptimizerExt
 		                    " scale=" + std::to_string(scale));
 	}
 
-	WrapAggregateWithLaplace(input, plan, agg, agg_scales);
+	auto noise_proj = WrapAggregateWithLaplace(input, plan, agg, agg_scales);
+
+	// τ-thresholding: drop groups where |noised_value| / (√2·scale) < threshold.
+	// Applied as a FILTER above the noise projection — safe post-processing by DPI.
+	Value threshold_val;
+	if (input.context.TryGetCurrentSetting("privacy_min_group_count", threshold_val) && !threshold_val.IsNull()) {
+		double threshold = threshold_val.GetValue<double>();
+		if (threshold > 0.0 && std::isfinite(threshold)) {
+			idx_t n_groups = agg->groups.size();
+			idx_t n_aggs = agg->expressions.size();
+			ApplyGroupSuppression(input, plan, noise_proj, n_groups, n_aggs, agg_scales, threshold);
+		}
+	}
 
 #if PRIVACY_DEBUG
 	PRIVACY_DEBUG_PRINT("=== PLAN AFTER DP_ELASTIC TRANSFORMATION ===");
