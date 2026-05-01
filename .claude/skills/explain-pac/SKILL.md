@@ -56,6 +56,33 @@ sampling per query** (each query uses a fresh random subset).
   Stable queries get less noise automatically. But the guarantee depends on the
   data distribution D.
 
+### PAC vs instance-based DP variants
+
+When comparing PAC to DP literature, distinguish DP-compatible instance
+adaptation from weaker DP relaxations:
+
+- **Smooth sensitivity** is the strongest DP-compatible analogy: it calibrates
+  noise to a smoothed local sensitivity around the actual database so the scale
+  itself remains private.
+- **Elastic sensitivity** is the SQL version most relevant to this extension's
+  `dp_elastic` mode; it bounds local sensitivity for equijoins using join-key
+  frequency metrics.
+- **Per-instance DP** and **individual DP** are closer in spirit to PAC's
+  instance-specific reasoning, but they are relaxations/generalizations of
+  standard DP. Do not present them as equivalent to a formal neighboring-dataset
+  DP guarantee.
+- **Individual privacy accounting** is useful for repeated PAC/SIDRA-style
+  releases because it tracks per-participant privacy loss instead of charging
+  every participant the worst-case cost of every release.
+- **Pufferfish/Blowfish** are useful related work for distribution-aware,
+  policy-aware privacy definitions; they are better conceptual neighbors for
+  PAC than pure DP, but their assumptions must be stated explicitly.
+
+Important caveat: recent reconstruction attacks against individual DP and
+bootstrap DP show that aggressively shrinking the protected neighbor-pair set
+can produce very low reported privacy loss while still allowing reconstruction.
+Use those relaxations as related work, not as a safety argument for PAC.
+
 ### Core mechanism (SIMD-PAC-DB implementation)
 
 - Each aggregate maintains **64 parallel counters** (one per bit of a hashed key)

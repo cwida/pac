@@ -1,6 +1,6 @@
 ---
 name: explain-dp
-description: Reference material for differential privacy concepts. Auto-loaded when discussing privacy, attacks, sensitivity, or clipping.
+description: Reference material for differential privacy concepts. Auto-loaded when discussing privacy, attacks, sensitivity, clipping, local/smooth sensitivity, elastic sensitivity, instance-based DP, per-instance DP, individual privacy accounting, personalized DP, Pufferfish/Blowfish, or DP relaxations.
 ---
 
 ## Differential Privacy (DP)
@@ -83,6 +83,45 @@ Per-query upper bound on local sensitivity for SQL with equijoins:
   queries. Flex paper: 76% of real-world SQL queries supported; 14% rejected
   for unsupported features, 7% for parsing.
 
+### Instance-based DP literature map
+
+Use "instance-based DP" carefully: several papers use similar language for
+different guarantees.
+
+- **Smooth sensitivity** (Nissim, Raskhodnikova, Smith 2007): the canonical
+  DP-compatible instance-specific noise framework. Noise depends on the
+  database through smooth sensitivity, not raw local sensitivity, so the noise
+  scale does not itself leak too much. This is the safest citation when saying
+  DP can adapt to local data geometry.
+- **Elastic sensitivity / FLEX** (Johnson, Near, Song 2018): SQL-specific
+  local-sensitivity upper bound for equijoins. It is the most relevant
+  DP-compatible prior art for `dp_elastic_compiler.cpp`.
+- **Per-instance DP / pDP** (Yu-Xiang Wang 2019): captures privacy of a
+  specific individual with respect to a fixed dataset. It preserves composition,
+  post-processing, and side-information robustness per instance, but it is a
+  relaxation/generalization rather than the standard global DP claim.
+- **Individual DP / IDP** (Soria-Comas, Domingo-Ferrer, Sanchez, Megias 2017):
+  asks only for indistinguishability between the actual dataset and its
+  neighbors, not all neighboring dataset pairs. Better utility, weaker
+  protection than standard DP.
+- **Individual privacy accounting** (Feldman and Zrnic 2021; Koskela,
+  Tobaben, Honkela 2023): tracks privacy loss per participant under adaptive
+  composition, often much tighter than charging every user the worst-case loss.
+  This is relevant for repeated refreshes or staged releases.
+- **Personalized DP / PDP** (Jorgensen, Yu, Cormode 2015; Ebadi et al. 2015):
+  users have different privacy budgets. This is personalization by user policy,
+  not data-instance adaptation.
+- **Pufferfish / Blowfish** (Kifer and Machanavajjhala 2014; He,
+  Machanavajjhala, Ding 2014): policy/model-based privacy frameworks with
+  explicit secrets, discriminative pairs, constraints, and assumptions. Useful
+  related work for distribution-aware or schema-aware guarantees, but do not
+  call them standard DP.
+
+Important caveat: Protivash, Durrell, Kifer, Ding, and Zhang 2024 show
+reconstruction attacks against aggressive DP relaxations, including IDP and
+bootstrap DP. If citing IDP/BDP as related work, also mention that reducing the
+protected neighbor-pair set can invalidate the intuitive DP story.
+
 ### τ-thresholding for GROUP BY (Wilson et al. 2019)
 
 Drop any group whose noisy count is below threshold τ. Required for
@@ -113,9 +152,18 @@ gotchas:
    them, but utility collapses. This is utility, not privacy.
 
 References:
+- Smooth Sensitivity: DOI 10.1145/1250790.1250803 (Nissim, Raskhodnikova, Smith; STOC 2007)
 - Flex / Elastic Sensitivity: arXiv 1706.09479 (Johnson, Near, Song; VLDB 2018)
 - Bounded User Contribution: arXiv 1909.01917 (Wilson et al., PoPETs 2020)
 - Chorus follow-up: ICDE 2020 — same group's full SQL→SQL DP rewriter
+- Per-instance DP: arXiv 1707.07708 (Wang; Journal of Privacy and Confidentiality 2019)
+- Individual DP: arXiv 1612.02298 / DOI 10.1109/TIFS.2017.2663337
+- Personalized DP: DOI 10.1109/ICDE.2015.7113353 (Jorgensen, Yu, Cormode; ICDE 2015)
+- Individual Privacy Accounting via a Renyi Filter: arXiv 2008.11193 (Feldman, Zrnic; NeurIPS 2021)
+- Individual Privacy Accounting with Gaussian DP: OpenReview `JmC_Tld3v-f` (Koskela, Tobaben, Honkela; ICLR 2023)
+- Pufferfish: DOI 10.1145/2514689 (Kifer, Machanavajjhala; TODS 2014)
+- Blowfish: DOI 10.1145/2588555.2588581 (He, Machanavajjhala, Ding; SIGMOD 2014)
+- Reconstruction attacks on IDP/BDP: DOI 10.29012/jpc.871 (Protivash et al.; JPC 2024)
 
 ### How PAC differs from DP
 
